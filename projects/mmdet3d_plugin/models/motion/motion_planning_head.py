@@ -176,46 +176,6 @@ class MotionPlanningHead(BaseModule):
         trajs_lidar = torch.einsum('abcij,jkab->abcik', trajs, rot_mat_T)
         return trajs_lidar
 
-    def get_first_step_displacement_lidar(self, motion_output, det_output):
-        """
-        First-step motion displacement in lidar frame for temporal anchor propagation.
-        Returns (displacement, mode_confidence):
-          displacement: (batch_size, num_det, 2) in lidar.
-          mode_confidence: (batch_size, num_det) best-mode probability.
-        Uses first future step and best mode (argmax over mode logits).
-        Motion head outputs are for all detection anchors; we select top num_det by
-        detection confidence so shapes match for _agent2lidar.
-        """
-        det_confidence = det_output["classification"][-1].sigmoid().max(dim=-1).values
-        det_anchors = det_output["prediction"][-1]
-        _, topk_indices = torch.topk(det_confidence, self.num_det, dim=1)
-        bs, num_det = topk_indices.shape
-        batch_idx = torch.arange(bs, device=topk_indices.device)[:, None].expand_as(
-            topk_indices
-        )
-        selected_anchors = det_anchors[batch_idx, topk_indices]
-
-        motion_cls = motion_output["classification"][-1].sigmoid()
-        motion_reg = motion_output["prediction"][-1]
-        topk_expand = topk_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(
-            -1, -1, motion_reg.shape[2], motion_reg.shape[3], motion_reg.shape[4]
-        )
-        selected_motion_reg = torch.gather(motion_reg, 1, topk_expand)
-        topk_cls = topk_indices.unsqueeze(-1).expand(-1, -1, motion_cls.shape[2])
-        selected_motion_cls = torch.gather(motion_cls, 1, topk_cls)
-
-        best_mode = selected_motion_cls.argmax(dim=-1)
-        best_mode_confidence = selected_motion_cls.max(dim=-1).values
-        first_step_reg = selected_motion_reg[:, :, :, 0, :]
-        best_mode_idx = best_mode.unsqueeze(2).unsqueeze(3).expand(
-            -1, -1, 1, first_step_reg.shape[-1]
-        )
-        disp_agent = torch.gather(first_step_reg, 2, best_mode_idx).squeeze(2)
-        disp_lidar = self._agent2lidar(
-            disp_agent.unsqueeze(2).unsqueeze(3), selected_anchors
-        )
-        return disp_lidar.squeeze(2).squeeze(2), best_mode_confidence
-
     def graph_model(
         self,
         index,

@@ -254,14 +254,7 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
         src_timestamp=None,
         dst_timestamps=None,
         time_intervals=None,
-        motion_displacement=None,
-        motion_valid_mask=None,
     ):
-        """
-        motion_displacement: optional (..., 2) in source frame; add to center
-        when motion_valid_mask is True. Else use velocity * time_interval.
-        motion_valid_mask: optional (...,) bool, True = use motion_displacement.
-        """
         dst_anchors = []
         for i in range(len(T_src2dst_list)):
             vel = anchor[..., VX:]
@@ -279,26 +272,7 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
                 )
             else:
                 time_interval = None
-
-            if motion_displacement is not None and motion_valid_mask is not None:
-                # Use motion-predicted displacement (XY) where valid, else velocity
-                if time_interval is not None:
-                    vel_translation = vel.transpose(0, -1) * time_interval
-                    vel_translation = vel_translation.transpose(0, -1)
-                else:
-                    vel_translation = center.new_zeros(center.shape)
-                # motion_displacement is (..., 2); pad Z with 0 for 3D center
-                motion_translation = torch.cat(
-                    [motion_displacement, torch.zeros_like(center[..., :1])],
-                    dim=-1,
-                )
-                translation = torch.where(
-                    motion_valid_mask[..., None],
-                    -motion_translation,
-                    vel_translation,
-                )
-                center = center - translation
-            elif time_interval is not None:
+            if time_interval is not None:
                 translation = vel.transpose(0, -1) * time_interval
                 translation = translation.transpose(0, -1)
                 center = center - translation

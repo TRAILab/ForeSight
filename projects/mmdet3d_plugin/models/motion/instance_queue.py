@@ -131,19 +131,22 @@ class InstanceQueue(nn.Module):
                 temp_mask = self.prev_confidence > self.tracking_threshold
                 match = match * temp_mask.unsqueeze(1)
 
-            match_f = match.float()
             for i in range(len(self.instance_feature_queue)):
                 temp_feature = self.instance_feature_queue[i]
-                temp_feature = torch.bmm(match_f, temp_feature)
+                temp_feature = (
+                    match[..., None] * temp_feature[:, None]
+                ).sum(dim=2)
                 self.instance_feature_queue[i] = temp_feature
 
                 temp_anchor = self.anchor_queue[i]
-                temp_anchor = torch.bmm(match_f, temp_anchor)
+                temp_anchor = (
+                    match[..., None] * temp_anchor[:, None]
+                ).sum(dim=2)
                 self.anchor_queue[i] = temp_anchor
 
-            self.period = torch.bmm(
-                match_f, self.period.unsqueeze(2).to(match_f.dtype)
-            ).squeeze(2).long()
+            self.period = (
+                match * self.period[:, None]
+            ).sum(dim=2)
 
         self.instance_feature_queue.append(instance_feature.detach())
         self.anchor_queue.append(det_anchors.detach())

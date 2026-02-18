@@ -35,9 +35,6 @@ class InstanceBank(nn.Module):
         anchor_grad=True,
         feat_grad=True,
         max_time_interval=2,
-        use_motion_for_anchor_propagation=True,
-        motion_step_sec=0.5,
-        motion_confidence_threshold=0.0,
     ):
         super(InstanceBank, self).__init__()
         self.embed_dims = embed_dims
@@ -45,9 +42,6 @@ class InstanceBank(nn.Module):
         self.default_time_interval = default_time_interval
         self.confidence_decay = confidence_decay
         self.max_time_interval = max_time_interval
-        self.use_motion_for_anchor_propagation = use_motion_for_anchor_propagation
-        self.motion_step_sec = float(motion_step_sec)
-        self.motion_confidence_threshold = float(motion_confidence_threshold)
 
         if anchor_handler is not None:
             anchor_handler = build_from_cfg(anchor_handler, PLUGIN_LAYERS)
@@ -80,8 +74,6 @@ class InstanceBank(nn.Module):
     def reset(self):
         self.cached_feature = None
         self.cached_anchor = None
-        self.cached_motion_displacement = None
-        self.cached_motion_valid_mask = None
         self.metas = None
         self.mask = None
         self.confidence = None
@@ -114,27 +106,10 @@ class InstanceBank(nn.Module):
                         ]
                     )
                 )
-                proj_kwargs = dict(
-                    anchor=self.cached_anchor,
-                    T_src2dst_list=[T_temp2cur],
-                    time_intervals=[-time_interval],
-                )
-                if (
-                    self.use_motion_for_anchor_propagation
-                    and self.cached_motion_displacement is not None
-                    and self.cached_motion_valid_mask is not None
-                ):
-                    motion_disp = self.cached_motion_displacement
-                    if self.motion_step_sec > 0:
-                        scale = (
-                            time_interval.to(motion_disp.dtype) / self.motion_step_sec
-                        ).view(-1, 1, 1)
-                        scale = torch.clamp(scale, min=0.0)
-                        motion_disp = motion_disp * scale
-                    proj_kwargs["motion_displacement"] = motion_disp
-                    proj_kwargs["motion_valid_mask"] = self.cached_motion_valid_mask
                 self.cached_anchor = self.anchor_handler.anchor_projection(
-                    **proj_kwargs
+                    self.cached_anchor,
+                    [T_temp2cur],
+                    time_intervals=[-time_interval],
                 )[0]
 
             if (
@@ -244,44 +219,6 @@ class InstanceBank(nn.Module):
             self.confidence,
             (self.cached_feature, self.cached_anchor),
         ) = topk(confidence, self.num_temp_instances, instance_feature, anchor)
-
-    def set_cached_motion_displacement(self, displacement, mode_confidence=None):
-        """
-        Set motion-predicted displacement for the next frame's anchor projection.
-        displacement: (batch_size, num_agents_with_motion, 2) in lidar/source frame.
-        mode_confidence: optional (batch_size, num_agents_with_motion), best-mode score.
-        When provided with motion_confidence_threshold > 0, only slots with
-        mode_confidence >= threshold use motion; others fall back to velocity.
-        """
-        if not self.use_motion_for_anchor_propagation:
-            return
-        if self.cached_anchor is None or displacement is None:
-            return
-        displacement = displacement.detach()
-        if mode_confidence is not None:
-            mode_confidence = mode_confidence.detach()
-        bs = displacement.shape[0]
-        num_motion = displacement.shape[1]
-        device = displacement.device
-        n = min(num_motion, self.num_temp_instances)
-        self.cached_motion_displacement = displacement.new_zeros(
-            bs, self.num_temp_instances, 2
-        )
-        self.cached_motion_displacement[:, :n] = displacement[:, :n]
-        self.cached_motion_valid_mask = torch.zeros(
-            bs, self.num_temp_instances, dtype=torch.bool, device=device
-        )
-        self.cached_motion_valid_mask[:, :n] = True
-        if (
-            mode_confidence is not None
-            and self.motion_confidence_threshold > 0
-            and mode_confidence.shape[0] == bs
-            and mode_confidence.shape[1] >= n
-        ):
-            low_conf = mode_confidence[:, :n] < self.motion_confidence_threshold
-            self.cached_motion_valid_mask[:, :n] = torch.logical_and(
-                self.cached_motion_valid_mask[:, :n], ~low_conf
-            )
 
     def get_instance_id(self, confidence, anchor=None, threshold=None):
         confidence = confidence.max(dim=-1).values.sigmoid()
