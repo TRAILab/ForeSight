@@ -204,7 +204,7 @@ def main():
             init_method=args.dist_url,
             world_size=mpi_world_size,
             rank=mpi_local_rank,
-            timeout=timedelta(seconds=3600),
+            timeout=timedelta(seconds=7200),
         )
 
         cfg.gpu_ids = range(mpi_world_size)
@@ -212,7 +212,7 @@ def main():
     else:
         distributed = True
         init_dist(
-            args.launcher, timeout=timedelta(seconds=3600), **cfg.dist_params
+            args.launcher, timeout=timedelta(seconds=7200), **cfg.dist_params
         )
         # re-set gpu_ids with distributed training mode
         _, world_size = get_dist_info()

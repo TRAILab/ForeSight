@@ -63,6 +63,15 @@ class SparseDriveHead(BaseModule):
                 self.det_head.instance_bank.mask,
                 self.det_head.instance_bank.anchor_handler,
             )
+            if det_output is not None and motion_output is not None:
+                displacement, mode_confidence = (
+                    self.motion_plan_head.get_first_step_displacement_lidar(
+                        motion_output, det_output
+                    )
+                )
+                self.det_head.instance_bank.set_cached_motion_displacement(
+                    displacement, mode_confidence=mode_confidence
+                )
         else:
             motion_output, planning_output = None, None
 
