@@ -3,7 +3,9 @@
 *.pth
 *.whl
 *.swp
+*.sif
 
+wandb/
 data/
 ckpt/
 work_dirs*/
