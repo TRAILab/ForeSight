@@ -92,6 +92,7 @@ class NuScenes3DDataset(Dataset):
         track3d_eval_version="tracking_nips_2019",
         version="v1.0-trainval",
         use_valid_flag=False,
+        use_gt_mask=True,
         vis_score_threshold=0.25,
         data_aug_conf=None,
         sequences_split_num=1,
@@ -103,6 +104,7 @@ class NuScenes3DDataset(Dataset):
         self.version = version
         self.load_interval = load_interval
         self.use_valid_flag = use_valid_flag
+        self.use_gt_mask = use_gt_mask
         super().__init__()
         self.data_root = data_root
         self.ann_file = ann_file
@@ -265,7 +267,7 @@ class NuScenes3DDataset(Dataset):
 
     def get_cat_ids(self, idx):
         info = self.data_infos[idx]
-        if self.use_valid_flag:
+        if self.use_valid_flag and self.use_gt_mask:
             mask = info["valid_flag"]
             gt_names = set(info["gt_names"][mask])
         else:
@@ -285,7 +287,7 @@ class NuScenes3DDataset(Dataset):
         self.version = self.metadata["version"]
         print(self.metadata)
         return data_infos
-    
+
     def anno2geom(self, annos):
         map_geoms = {}
         for label, anno_list in annos.items():
@@ -363,10 +365,13 @@ class NuScenes3DDataset(Dataset):
 
     def get_ann_info(self, index):
         info = self.data_infos[index]
-        if self.use_valid_flag:
-            mask = info["valid_flag"]
+        if self.use_gt_mask:
+            if self.use_valid_flag:
+                mask = info["valid_flag"]
+            else:
+                mask = info["num_lidar_pts"] > 0
         else:
-            mask = info["num_lidar_pts"] > 0
+            mask = np.ones(len(info["gt_boxes"]), dtype=bool)
         gt_bboxes_3d = info["gt_boxes"][mask]
         gt_names_3d = info["gt_names"][mask]
         gt_labels_3d = []
@@ -411,10 +416,13 @@ class NuScenes3DDataset(Dataset):
                 fut_scene_token = fut_info["scene_token"]
                 if cur_scene_token != fut_scene_token:
                     break
-                if self.use_valid_flag:
-                    mask = fut_info["valid_flag"]
+                if self.use_gt_mask:
+                    if self.use_valid_flag:
+                        mask = fut_info["valid_flag"]
+                    else:
+                        mask = fut_info["num_lidar_pts"] > 0
                 else:
-                    mask = fut_info["num_lidar_pts"] > 0
+                    mask = np.ones(len(fut_info["gt_boxes"]), dtype=bool)
 
                 fut_gt_bboxes_3d = fut_info["gt_boxes"][mask]
                 

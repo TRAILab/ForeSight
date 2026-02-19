@@ -6,7 +6,7 @@ CODE_DIR=/home/spapais/ForeSight/
 CMD=${@:-bash}
 
 # Run docker container
-docker run --gpus all -it --rm --shm-size=16g \
+docker run --gpus all -it --rm --shm-size=32g \
     -v $DATA_DIR:/workspace/ForeSight/data/nuscenes \
     -v $CODE_DIR:/workspace/ForeSight/ \
     --env WANDB_API_KEY=$WANDB_API_KEY \

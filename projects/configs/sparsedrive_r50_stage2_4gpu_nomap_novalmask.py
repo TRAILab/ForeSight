@@ -9,12 +9,12 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 32
-num_gpus = 8
+total_batch_size = 48
+num_gpus = 4
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
-num_epochs = 80
-checkpoint_epoch_interval = 20
+num_epochs = 10
+checkpoint_epoch_interval = 10
 
 checkpoint_config = dict(
     interval=num_iters_per_epoch * checkpoint_epoch_interval
@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r101_stage1_8gpu_noflash',),
+                name='sparsedrive_r50_stage2_4gpu_nomap_novalmask',),
             interval=50)
     ],
 )
@@ -35,7 +35,7 @@ load_from = None
 resume_from = None
 workflow = [("train", 1)]
 fp16 = dict(loss_scale=32.0)
-input_shape = (1408, 512)
+input_shape = (704, 256)
 
 
 # ================== model ========================
@@ -73,7 +73,7 @@ num_decoder = 6
 num_single_frame_decoder = 1
 num_single_frame_decoder_map = 1
 use_deformable_func = True  # mmdet3d_plugin/ops/setup.py needs to be executed
-strides = [8, 16, 32, 64]
+strides = [4, 8, 16, 32]
 num_levels = len(strides)
 num_depth_layers = 3
 drop_out = 0.1
@@ -86,8 +86,8 @@ with_quality_estimation = True
 
 task_config = dict(
     with_det=True,
-    with_map=True,
-    with_motion_plan=False,
+    with_map=False,
+    with_motion_plan=True,
 )
 
 model = dict(
@@ -96,22 +96,20 @@ model = dict(
     use_deformable_func=use_deformable_func,
     img_backbone=dict(
         type="ResNet",
-        depth=101,
+        depth=50,
         num_stages=4,
         frozen_stages=-1,
-        norm_eval=True,
+        norm_eval=False,
         style="pytorch",
         with_cp=True,
         out_indices=(0, 1, 2, 3),
-        norm_cfg=dict(type="BN", requires_grad=False),
-        init_cfg=dict(
-            type='Pretrained',
-            checkpoint='ckpt/cascade_mask_rcnn_r101_fpn_1x_nuim_20201024_134804-45215b1e.pth',
-            prefix='backbone.')),
+        norm_cfg=dict(type="BN", requires_grad=True),
+        pretrained="ckpt/resnet50-19c8e357.pth",
+    ),
     img_neck=dict(
         type="FPN",
         num_outs=num_levels,
-        start_level=1,  # skip stride-4 so depth branch and gt_depth align at [8, 16, 32]
+        start_level=0,
         out_channels=embed_dims,
         add_extra_convs="on_output",
         relu_before_extra_convs=True,
@@ -172,7 +170,7 @@ model = dict(
                 * (num_decoder - num_single_frame_decoder)
             )[2:],
             temp_graph_model=dict(
-                type="MultiheadAttention",
+                type="MultiheadFlashAttention",
                 embed_dims=embed_dims if not decouple_attn else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -181,7 +179,7 @@ model = dict(
             if temporal
             else None,
             graph_model=dict(
-                type="MultiheadAttention",
+                type="MultiheadFlashAttention",
                 embed_dims=embed_dims if not decouple_attn else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -281,7 +279,7 @@ model = dict(
                 embed_dims=embed_dims,
                 anchor="data/kmeans/kmeans_map_100.npy",
                 anchor_handler=dict(type="SparsePoint3DKeyPointsGenerator"),
-                num_temp_instances=0 if temporal_map else -1,
+                num_temp_instances=33 if temporal_map else -1,
                 confidence_decay=0.6,
                 feat_grad=True,
             ),
@@ -313,7 +311,7 @@ model = dict(
                 * (num_decoder - num_single_frame_decoder_map)
             )[:],
             temp_graph_model=dict(
-                type="MultiheadAttention",
+                type="MultiheadFlashAttention",
                 embed_dims=embed_dims if not decouple_attn_map else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -322,7 +320,7 @@ model = dict(
             if temporal_map
             else None,
             graph_model=dict(
-                type="MultiheadAttention",
+                type="MultiheadFlashAttention",
                 embed_dims=embed_dims if not decouple_attn_map else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -425,8 +423,6 @@ model = dict(
                     "temp_gnn",
                     "gnn",
                     "norm",
-                    "cross_gnn",
-                    "norm",
                     "ffn",                    
                     "norm",
                 ] * 3 +
@@ -442,14 +438,14 @@ model = dict(
                 dropout=drop_out,
             ),
             graph_model=dict(
-                type="MultiheadAttention",
+                type="MultiheadFlashAttention",
                 embed_dims=embed_dims if not decouple_attn_motion else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
                 dropout=drop_out,
             ),
             cross_graph_model=dict(
-                type="MultiheadAttention",
+                type="MultiheadFlashAttention",
                 embed_dims=embed_dims,
                 num_heads=num_groups,
                 batch_first=True,
@@ -645,7 +641,7 @@ eval_config = dict(
     test_mode=True,
 )
 data_aug_conf = {
-    "resize_lim": (0.80, 0.94),
+    "resize_lim": (0.40, 0.47),
     "final_dim": input_shape[::-1],
     "bot_pct_lim": (0.0, 0.0),
     "rot_lim": (-5.4, 5.4),
@@ -675,6 +671,7 @@ data = dict(
         data_aug_conf=data_aug_conf,
         test_mode=True,
         eval_config=eval_config,
+        use_gt_mask=False,
     ),
     test=dict(
         **data_basic_config,
@@ -683,6 +680,7 @@ data = dict(
         data_aug_conf=data_aug_conf,
         test_mode=True,
         eval_config=eval_config,
+        use_gt_mask=False,
     ),
 )
 
@@ -714,9 +712,9 @@ runner = dict(
 eval_mode = dict(
     with_det=True,
     with_tracking=True,
-    with_map=True,
-    with_motion=False,
-    with_planning=False,
+    with_map=False,
+    with_motion=True,
+    with_planning=True,
     tracking_threshold=0.2,
     motion_threshhold=0.2,
 )
@@ -724,3 +722,5 @@ evaluation = dict(
     interval=num_iters_per_epoch*checkpoint_epoch_interval,
     eval_mode=eval_mode,
 )
+# ================== pretrained model ========================
+load_from = 'ckpt/sparsedrive_stage1.pth'
