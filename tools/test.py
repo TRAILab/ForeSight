@@ -261,7 +261,7 @@ def main():
     elif hasattr(dataset, "PALETTE"):
         # segmentation dataset has `PALETTE` attribute
         model.PALETTE = dataset.PALETTE
-
+    breakpoint()
     if args.result_file is not None:
         # outputs = torch.load(args.result_file)
         outputs = mmcv.load(args.result_file)
@@ -316,6 +316,15 @@ def main():
             print(eval_kwargs)
             results_dict = dataset.evaluate(outputs, **eval_kwargs)
             print(results_dict)
+
+            # Log to wandb if config has WandbLoggerHook
+            for hook in cfg.log_config.hooks:
+                if hook.type == "WandbLoggerHook":
+                    import wandb
+                    if wandb.run is None:
+                        wandb.init(**hook.init_kwargs)
+                    wandb.log({'val/' + k: v for k, v in results_dict.items()})
+                    break
 
 
 if __name__ == "__main__":
