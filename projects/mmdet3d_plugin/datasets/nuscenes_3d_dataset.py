@@ -409,6 +409,7 @@ class NuScenes3DDataset(Dataset):
             ## get future box for planning eval
             fut_ts = int(info['gt_ego_fut_masks'].sum())
             fut_boxes = []
+            fut_boxes_occluded = []
             cur_scene_token = info["scene_token"]
             cur_T_global = get_T_global(info)
             for i in range(1, fut_ts + 1):
@@ -424,21 +425,28 @@ class NuScenes3DDataset(Dataset):
                 else:
                     mask = np.ones(len(fut_info["gt_boxes"]), dtype=bool)
 
+                # occluded mask: zero combined sensor returns, always independent of use_gt_mask
+                occluded_mask = ~fut_info["valid_flag"]
+
                 fut_gt_bboxes_3d = fut_info["gt_boxes"][mask]
-                
+                fut_gt_bboxes_occluded = fut_info["gt_boxes"][occluded_mask]
+
                 fut_T_global = get_T_global(fut_info)
                 T_fut2cur = np.linalg.inv(cur_T_global) @ fut_T_global
 
-                center = fut_gt_bboxes_3d[:, :3] @ T_fut2cur[:3, :3].T + T_fut2cur[:3, 3]
-                yaw = np.stack([np.cos(fut_gt_bboxes_3d[:, 6]), np.sin(fut_gt_bboxes_3d[:, 6])], axis=-1)
-                yaw = yaw @ T_fut2cur[:2, :2].T
-                yaw = np.arctan2(yaw[..., 1], yaw[..., 0])
+                for bboxes in (fut_gt_bboxes_3d, fut_gt_bboxes_occluded):
+                    if len(bboxes):
+                        center = bboxes[:, :3] @ T_fut2cur[:3, :3].T + T_fut2cur[:3, 3]
+                        yaw = np.stack([np.cos(bboxes[:, 6]), np.sin(bboxes[:, 6])], axis=-1)
+                        yaw = yaw @ T_fut2cur[:2, :2].T
+                        bboxes[:, :3] = center
+                        bboxes[:, 6] = np.arctan2(yaw[..., 1], yaw[..., 0])
 
-                fut_gt_bboxes_3d[:, :3] = center
-                fut_gt_bboxes_3d[:, 6] = yaw
                 fut_boxes.append(fut_gt_bboxes_3d)
+                fut_boxes_occluded.append(fut_gt_bboxes_occluded)
 
             anns_results['fut_boxes'] = fut_boxes
+            anns_results['fut_boxes_occluded'] = fut_boxes_occluded
         
         return anns_results
 
@@ -521,7 +529,8 @@ class NuScenes3DDataset(Dataset):
         }
 
         mmcv.mkdir_or_exist(jsonfile_prefix)
-        res_path = osp.join(jsonfile_prefix, "results_nusc.json")
+        filename = "results_nusc_tracking.json" if tracking else "results_nusc.json"
+        res_path = osp.join(jsonfile_prefix, filename)
         print("Results writes to", res_path)
         mmcv.dump(nusc_submissions, res_path)
         return res_path
@@ -823,6 +832,79 @@ class NuScenes3DDataset(Dataset):
         print_log('\n'+str(table), logger=logger)
         return metrics
 
+    def _evaluate_single_det_occluded(self, result_path, logger=None, result_name='img_bbox'):
+        """Evaluate detection on occluded objects only (num_lidar_pts == 0)."""
+        from nuscenes import NuScenes
+        from .evaluation.det.occluded_det_eval import OccludedDetectionEval
+
+        output_dir = osp.join(osp.dirname(result_path), 'occluded_det')
+        nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
+        eval_set_map = {
+            'v1.0-mini': 'mini_val',
+            'v1.0-trainval': 'val',
+        }
+        nusc_eval = OccludedDetectionEval(
+            nusc,
+            config=self.det3d_eval_configs,
+            result_path=result_path,
+            eval_set=eval_set_map[self.version],
+            output_dir=output_dir,
+            verbose=False,
+        )
+        nusc_eval.main(render_curves=False)
+
+        metrics = mmcv.load(osp.join(output_dir, 'metrics_summary.json'))
+        detail = {}
+        for name in self.CLASSES:
+            for k, v in metrics['label_aps'].get(name, {}).items():
+                detail[f'occluded/{name}_AP_dist_{k}'] = float('{:.4f}'.format(v))
+            for k, v in metrics['label_tp_errors'].get(name, {}).items():
+                detail[f'occluded/{name}_{k}'] = float('{:.4f}'.format(v))
+        for k, v in metrics['tp_errors'].items():
+            detail[f'occluded/{self.ErrNameMapping[k]}'] = float('{:.4f}'.format(v))
+        detail['occluded/NDS'] = metrics['nd_score']
+        detail['occluded/mAP'] = metrics['mean_ap']
+        return detail
+
+    def _evaluate_single_motion_occluded(self,
+                                         results,
+                                         result_path,
+                                         logger=None):
+        """Evaluate motion prediction restricted to occluded objects (num_lidar_pts == 0)."""
+        from nuscenes import NuScenes
+        from .evaluation.motion.motion_eval_uniad import OccludedMotionEval
+
+        output_dir = osp.join(result_path, 'occluded_motion')
+        nusc = NuScenes(
+            version=self.version, dataroot=self.data_root, verbose=False)
+        eval_set_map = {
+            'v1.0-mini': 'mini_val',
+            'v1.0-trainval': 'val',
+        }
+        nusc_eval = OccludedMotionEval(
+            nusc,
+            config=copy.deepcopy(self.det3d_eval_configs),
+            result_path=results,
+            eval_set=eval_set_map[self.version],
+            output_dir=output_dir,
+            verbose=False,
+            seconds=6)
+        metrics = nusc_eval.main(render_curves=False)
+
+        MOTION_METRICS = ['EPA', 'min_ade_err', 'min_fde_err', 'miss_rate_err']
+        class_names = ['car', 'pedestrian']
+
+        table = prettytable.PrettyTable()
+        table.field_names = ["class names (occluded)"] + MOTION_METRICS
+        for class_name in class_names:
+            row_data = [class_name]
+            for m in MOTION_METRICS:
+                row_data.append('%.4f' % metrics[f'{class_name}_{m}'])
+            table.add_row(row_data)
+        print_log('\n[Occluded Objects]\n' + str(table), logger=logger)
+
+        return {f'occluded/{k}': v for k, v in metrics.items()}
+
     def evaluate(
         self,
         results,
@@ -841,6 +923,7 @@ class NuScenes3DDataset(Dataset):
         mmcv.dump(results, res_path)
 
         results_dict = dict()
+        detection_result_files = None
         if eval_mode['with_det']:
             self.tracking = eval_mode["with_tracking"]
             self.tracking_threshold = eval_mode["tracking_threshold"]
@@ -851,6 +934,8 @@ class NuScenes3DDataset(Dataset):
                 result_files, tmp_dir = self.format_results(
                     results, jsonfile_prefix=self.work_dir, tracking=tracking
                 )
+                if not tracking:
+                    detection_result_files = result_files
 
                 if isinstance(result_files, dict):
                     for name in result_names:
@@ -874,15 +959,37 @@ class NuScenes3DDataset(Dataset):
             map_results_dict = self.map_evaluator.evaluate(result_path, logger=logger)
             results_dict.update(map_results_dict)
 
+        motion_result_files = None
         if eval_mode['with_motion']:
             thresh = eval_mode["motion_threshhold"]
-            result_files = self.format_motion_results(results, jsonfile_prefix=self.work_dir, thresh=thresh)
-            motion_results_dict = self._evaluate_single_motion(result_files, self.work_dir, logger=logger)
+            motion_result_files = self.format_motion_results(results, jsonfile_prefix=self.work_dir, thresh=thresh)
+            motion_results_dict = self._evaluate_single_motion(motion_result_files, self.work_dir, logger=logger)
             results_dict.update(motion_results_dict)
-        
+
+        if eval_mode.get('with_occlusion', False):
+            thresh = eval_mode["motion_threshhold"]
+            if motion_result_files is None:
+                motion_result_files = self.format_motion_results(results, jsonfile_prefix=self.work_dir, thresh=thresh)
+            occluded_results_dict = self._evaluate_single_motion_occluded(
+                motion_result_files, self.work_dir, logger=logger)
+            results_dict.update(occluded_results_dict)
+
+            if detection_result_files is not None:
+                if isinstance(detection_result_files, dict):
+                    for name in result_names:
+                        occ_det_dict = self._evaluate_single_det_occluded(
+                            detection_result_files[name], logger=logger, result_name=name)
+                        results_dict.update(occ_det_dict)
+                elif isinstance(detection_result_files, str):
+                    occ_det_dict = self._evaluate_single_det_occluded(
+                        detection_result_files, logger=logger)
+                    results_dict.update(occ_det_dict)
+
         if eval_mode['with_planning']:
             from .evaluation.planning.planning_eval import planning_eval
-            planning_results_dict = planning_eval(results, self.eval_config, logger=logger)
+            planning_results_dict = planning_eval(
+                results, self.eval_config, logger=logger,
+                with_occlusion=eval_mode.get('with_occlusion', False))
             results_dict.update(planning_results_dict)
 
         if show or out_dir:
@@ -915,15 +1022,35 @@ class NuScenes3DDataset(Dataset):
             metric_str += f'mAP_normal= {results_dict["mAP_normal"]:.4f}\n\n' 
 
         if "car_EPA" in results_dict:
-            metric_str += f'Car / Ped\n' 
+            metric_str += f'Car / Ped\n'
             metric_str += f'epa= {results_dict["car_EPA"]:.4f} / {results_dict["pedestrian_EPA"]:.4f}\n'
             metric_str += f'ade= {results_dict["car_min_ade_err"]:.4f} / {results_dict["pedestrian_min_ade_err"]:.4f}\n'
             metric_str += f'fde= {results_dict["car_min_fde_err"]:.4f} / {results_dict["pedestrian_min_fde_err"]:.4f}\n'
-            metric_str += f'mr= {results_dict["car_miss_rate_err"]:.4f} / {results_dict["pedestrian_miss_rate_err"]:.4f}\n\n' 
+            metric_str += f'mr= {results_dict["car_miss_rate_err"]:.4f} / {results_dict["pedestrian_miss_rate_err"]:.4f}\n\n'
+
+        if "occluded/NDS" in results_dict:
+            metric_str += f'[Occluded Det]\n'
+            metric_str += f'mAP: {results_dict["occluded/mAP"]:.4f}\n'
+            metric_str += f'mATE: {results_dict["occluded/mATE"]:.4f}\n'
+            metric_str += f'mASE: {results_dict["occluded/mASE"]:.4f}\n'
+            metric_str += f'mAOE: {results_dict["occluded/mAOE"]:.4f}\n'
+            metric_str += f'mAVE: {results_dict["occluded/mAVE"]:.4f}\n'
+            metric_str += f'mAAE: {results_dict["occluded/mAAE"]:.4f}\n'
+            metric_str += f'NDS: {results_dict["occluded/NDS"]:.4f}\n\n'
+
+        if "occluded/car_EPA" in results_dict:
+            metric_str += f'[Occluded Motion] Car / Ped\n'
+            metric_str += f'epa= {results_dict["occluded/car_EPA"]:.4f} / {results_dict["occluded/pedestrian_EPA"]:.4f}\n'
+            metric_str += f'ade= {results_dict["occluded/car_min_ade_err"]:.4f} / {results_dict["occluded/pedestrian_min_ade_err"]:.4f}\n'
+            metric_str += f'fde= {results_dict["occluded/car_min_fde_err"]:.4f} / {results_dict["occluded/pedestrian_min_fde_err"]:.4f}\n'
+            metric_str += f'mr= {results_dict["occluded/car_miss_rate_err"]:.4f} / {results_dict["occluded/pedestrian_miss_rate_err"]:.4f}\n\n'
 
         if "L2" in results_dict:
             metric_str += f'obj_box_col: {(results_dict["obj_box_col"]*100):.3f}%\n'
-            metric_str += f'L2: {results_dict["L2"]:.4f}\n\n'
+            metric_str += f'L2: {results_dict["L2"]:.4f}\n'
+            if "occluded/obj_box_col" in results_dict:
+                metric_str += f'obj_box_col_occluded: {(results_dict["occluded/obj_box_col"]*100):.3f}%\n'
+            metric_str += '\n'
         
         print_log(metric_str, logger=logger)
         return results_dict

@@ -209,6 +209,82 @@ class NuScenesEval(MotionEval):
     Dummy class for backward-compatibility. Same as MotionEval.
     """
 
+
+class OccludedMotionEval(MotionEval):
+    """Evaluates motion prediction specifically for occluded objects (num_lidar_pts == 0).
+
+    Loads GT filtered to only boxes with zero LiDAR points and applies class +
+    distance filtering without the standard num_pts >= 1 gate.
+    """
+
+    def __init__(self,
+                 nusc: NuScenes,
+                 config: DetectionConfig,
+                 result_path: str,
+                 eval_set: str,
+                 output_dir: str = None,
+                 verbose: bool = True,
+                 seconds: int = 12):
+        self.nusc = nusc
+        self.result_path = result_path
+        self.eval_set = eval_set
+        self.output_dir = output_dir
+        self.verbose = verbose
+        self.cfg = config
+
+        # Make dirs.
+        self.plot_dir = os.path.join(self.output_dir, 'plots')
+        if not os.path.isdir(self.output_dir):
+            os.makedirs(self.output_dir)
+        if not os.path.isdir(self.plot_dir):
+            os.makedirs(self.plot_dir)
+
+        # Load data.
+        if verbose:
+            print('Initializing occluded motion evaluation')
+        self.pred_boxes, self.meta = load_prediction(
+            self.result_path, self.cfg.max_boxes_per_sample, MotionBox, verbose=verbose
+        )
+        # Load GT restricted to boxes with zero lidar points.
+        self.gt_boxes = load_gt(
+            self.nusc, self.eval_set, MotionBox, verbose=verbose,
+            seconds=seconds, occluded_only=True
+        )
+
+        assert set(self.pred_boxes.sample_tokens) == set(self.gt_boxes.sample_tokens), \
+            "Samples in split doesn't match samples in predictions."
+
+        # Add center distances.
+        self.pred_boxes = add_center_dist(nusc, self.pred_boxes)
+        self.gt_boxes = add_center_dist(nusc, self.gt_boxes)
+
+        # Filter predictions normally (class + distance + score).
+        if verbose:
+            print('Filtering predictions')
+        self.pred_boxes = filter_eval_boxes(nusc, self.pred_boxes, self.cfg.class_range, verbose=verbose)
+
+        # For GT: apply only class + distance filter; skip num_pts check because
+        # every occluded box has num_pts == 0 and would be removed by the standard filter.
+        if verbose:
+            print('Filtering occluded ground truth (class + distance only)')
+        self.gt_boxes = self._filter_occluded_gt(self.gt_boxes)
+
+        self.sample_tokens = self.gt_boxes.sample_tokens
+
+    def _filter_occluded_gt(self, gt_boxes):
+        """Return GT boxes restricted to known classes within their distance range."""
+        from nuscenes.eval.common.data_classes import EvalBoxes as _EvalBoxes
+        filtered = _EvalBoxes()
+        for sample_token in gt_boxes.sample_tokens:
+            boxes = [
+                box for box in gt_boxes[sample_token]
+                if box.detection_name in self.cfg.class_range
+                and box.ego_dist < self.cfg.class_range[box.detection_name]
+            ]
+            filtered.add_boxes(sample_token, boxes)
+        return filtered
+
+
 if __name__ == "__main__":
 
     # Settings.
