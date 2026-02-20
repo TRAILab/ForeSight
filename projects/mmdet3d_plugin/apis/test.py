@@ -150,7 +150,7 @@ def collect_results_cpu(result_part, size, tmpdir=None):
         part_list = []
         for i in range(world_size):
             part_file = osp.join(tmpdir, f"part_{i}.pkl")
-            part_list.append(mmcv.load(part_file, map_location='cpu'))
+            part_list.append(mmcv.load(part_file))
         # sort the results
         ordered_results = []
         """
