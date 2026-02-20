@@ -261,7 +261,7 @@ def main():
     elif hasattr(dataset, "PALETTE"):
         # segmentation dataset has `PALETTE` attribute
         model.PALETTE = dataset.PALETTE
-    breakpoint()
+
     if args.result_file is not None:
         # outputs = torch.load(args.result_file)
         outputs = mmcv.load(args.result_file)
