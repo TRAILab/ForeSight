@@ -273,6 +273,7 @@ class OccludedMotionEval(MotionEval):
 
     def _filter_occluded_gt(self, gt_boxes):
         """Return GT boxes restricted to known classes within their distance range."""
+        from collections import Counter
         from nuscenes.eval.common.data_classes import EvalBoxes as _EvalBoxes
         filtered = _EvalBoxes()
         for sample_token in gt_boxes.sample_tokens:
@@ -282,6 +283,13 @@ class OccludedMotionEval(MotionEval):
                 and box.ego_dist < self.cfg.class_range[box.detection_name]
             ]
             filtered.add_boxes(sample_token, boxes)
+        total = sum(len(filtered[t]) for t in filtered.sample_tokens)
+        class_counts = Counter(
+            box.detection_name
+            for t in filtered.sample_tokens
+            for box in filtered[t]
+        )
+        print(f'[Occluded Motion] GT occluded boxes: {total} | {dict(class_counts)}')
         return filtered
 
 

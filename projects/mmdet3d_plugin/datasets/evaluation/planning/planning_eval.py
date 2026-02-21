@@ -142,17 +142,26 @@ def planning_eval(results, eval_config, logger, with_occlusion=False):
     dataloader = build_dataloader(
             dataset, samples_per_gpu=1, workers_per_gpu=1, shuffle=False, dist=False)
     planning_metrics = PlanningMetric()
+    occluded_samples = 0
+    occluded_box_timesteps = 0
     for i, data in enumerate(tqdm(dataloader)):
         sdc_planning = data['gt_ego_fut_trajs'].cumsum(dim=-2).unsqueeze(1)
         sdc_planning_mask = data['gt_ego_fut_masks'].unsqueeze(-1).repeat(1, 1, 2).unsqueeze(1)
         command = data['gt_ego_fut_cmd'].argmax(dim=-1).item()
         fut_boxes = data['fut_boxes']
         fut_boxes_occluded = data.get('fut_boxes_occluded', None) if with_occlusion else None
+        if fut_boxes_occluded is not None:
+            sample_occ_count = sum(boxes[0].shape[0] for boxes in fut_boxes_occluded)
+            if sample_occ_count > 0:
+                occluded_samples += 1
+            occluded_box_timesteps += sample_occ_count
         if not sdc_planning_mask.all(): ## for incomplete gt, we do not count this sample
             continue
         res = results[i]
         pred_sdc_traj = res['img_bbox']['final_planning'].unsqueeze(0)
         planning_metrics.update(pred_sdc_traj[:, :6, :2], sdc_planning[0,:, :6, :2], sdc_planning_mask[0,:, :6, :2], fut_boxes, fut_boxes_occluded)
+    if with_occlusion:
+        print(f'[Occluded Planning] Samples with occluded future boxes: {occluded_samples} | Total occluded box-timestep instances: {occluded_box_timesteps}')
        
     planning_results = planning_metrics.compute()
     planning_metrics.reset()

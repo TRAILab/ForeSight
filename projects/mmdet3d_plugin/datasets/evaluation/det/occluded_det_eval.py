@@ -24,6 +24,7 @@ class OccludedDetectionEval(NuScenesEval):
 
     def _filter_occluded_gt(self, gt_boxes):
         """Keep only GT boxes that have zero sensor returns, within their class distance range."""
+        from collections import Counter
         filtered = EvalBoxes()
         for sample_token in gt_boxes.sample_tokens:
             boxes = [
@@ -33,4 +34,11 @@ class OccludedDetectionEval(NuScenesEval):
                 and box.ego_dist < self.cfg.class_range[box.detection_name]
             ]
             filtered.add_boxes(sample_token, boxes)
+        total = sum(len(filtered[t]) for t in filtered.sample_tokens)
+        class_counts = Counter(
+            box.detection_name
+            for t in filtered.sample_tokens
+            for box in filtered[t]
+        )
+        print(f'[Occluded Det] GT occluded boxes: {total} | {dict(class_counts)}')
         return filtered
