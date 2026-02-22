@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage1_4gpu_sparse4d',),
+                name='sparsedrive_r50_stage1_4gpu_sparse4d_nodn',),
             interval=50)
     ],
 )
@@ -229,8 +229,8 @@ model = dict(
             ),
             sampler=dict(
                 type="SparseBox3DTarget",
-                num_dn_groups=5,
-                num_temp_dn_groups=3,
+                num_dn_groups=0,
+                num_temp_dn_groups=0,
                 dn_noise_scale=[2.0] * 3 + [0.5] * 7,
                 max_dn_gt=32,
                 add_neg_dn=True,
