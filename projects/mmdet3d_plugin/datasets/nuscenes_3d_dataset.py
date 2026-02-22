@@ -424,9 +424,10 @@ class NuScenes3DDataset(Dataset):
                         mask = fut_info["num_lidar_pts"] > 0
                 else:
                     mask = np.ones(len(fut_info["gt_boxes"]), dtype=bool)
-
-                # occluded mask: zero combined sensor returns, always independent of use_gt_mask
-                occluded_mask = ~fut_info["valid_flag"]
+                if self.use_valid_flag:
+                    occluded_mask = ~fut_info["valid_flag"]
+                else:
+                    occluded_mask = ~(fut_info["num_lidar_pts"] > 0)
 
                 fut_gt_bboxes_3d = fut_info["gt_boxes"][mask]
                 fut_gt_bboxes_occluded = fut_info["gt_boxes"][occluded_mask]
