@@ -247,7 +247,6 @@ class MultiheadFlashAttention(BaseModule):
             if self.batch_first is False, else
             [bs, num_queries embed_dims].
         """
-        assert attn_mask is None, 'attn mask not supported now.'
         if key is None:
             key = query
         if value is None:
@@ -267,12 +266,29 @@ class MultiheadFlashAttention(BaseModule):
         if key_pos is not None:
             key = key + key_pos
 
+        if attn_mask is not None:
+            # FlashAttention does not support arbitrary attn_mask (e.g. DN training masks).
+            # Fall back to standard attention using the same projection weights.
+            import torch.nn.functional as F
+            out, _ = F.multi_head_attention_forward(
+                query.transpose(0, 1), key.transpose(0, 1), value.transpose(0, 1),
+                self.attn.embed_dim, self.attn.num_heads,
+                self.attn.in_proj_weight, self.attn.in_proj_bias,
+                None, None, False,
+                self.attn.inner_attn.dropout_p if self.training else 0.0,
+                self.attn.out_proj.weight, self.attn.out_proj.bias,
+                training=self.training,
+                key_padding_mask=key_padding_mask,
+                attn_mask=attn_mask,
+            )
+            return identity + self.dropout_layer(self.proj_drop(out.transpose(0, 1)))
+
         # The dataflow('key', 'query', 'value') of ``FlashAttention`` is (batch, num_query, embed_dims).
         if not self.batch_first:
             query = query.transpose(0, 1)
             key = key.transpose(0, 1)
             value = value.transpose(0, 1)
-        
+
         out = self.attn(
             q=query,
             k=key,
