@@ -906,6 +906,76 @@ class NuScenes3DDataset(Dataset):
 
         return {f'occluded/{k}': v for k, v in metrics.items()}
 
+    def _evaluate_single_det_all(self, result_path, logger=None, result_name='img_bbox'):
+        """Evaluate detection on all objects (visible + occluded)."""
+        from nuscenes import NuScenes
+        from .evaluation.det.occluded_det_eval import AllDetectionEval
+
+        output_dir = osp.join(osp.dirname(result_path), 'all_det')
+        nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
+        eval_set_map = {
+            'v1.0-mini': 'mini_val',
+            'v1.0-trainval': 'val',
+        }
+        nusc_eval = AllDetectionEval(
+            nusc,
+            config=self.det3d_eval_configs,
+            result_path=result_path,
+            eval_set=eval_set_map[self.version],
+            output_dir=output_dir,
+            verbose=False,
+        )
+        nusc_eval.main(render_curves=False)
+
+        metrics = mmcv.load(osp.join(output_dir, 'metrics_summary.json'))
+        detail = {}
+        for name in self.CLASSES:
+            for k, v in metrics['label_aps'].get(name, {}).items():
+                detail[f'all/{name}_AP_dist_{k}'] = float('{:.4f}'.format(v))
+            for k, v in metrics['label_tp_errors'].get(name, {}).items():
+                detail[f'all/{name}_{k}'] = float('{:.4f}'.format(v))
+        for k, v in metrics['tp_errors'].items():
+            detail[f'all/{self.ErrNameMapping[k]}'] = float('{:.4f}'.format(v))
+        detail['all/NDS'] = metrics['nd_score']
+        detail['all/mAP'] = metrics['mean_ap']
+        return detail
+
+    def _evaluate_single_motion_all(self, results, result_path, logger=None):
+        """Evaluate motion prediction on all objects (visible + occluded)."""
+        from nuscenes import NuScenes
+        from .evaluation.motion.motion_eval_uniad import AllMotionEval
+
+        output_dir = osp.join(result_path, 'all_motion')
+        nusc = NuScenes(
+            version=self.version, dataroot=self.data_root, verbose=False)
+        eval_set_map = {
+            'v1.0-mini': 'mini_val',
+            'v1.0-trainval': 'val',
+        }
+        nusc_eval = AllMotionEval(
+            nusc,
+            config=copy.deepcopy(self.det3d_eval_configs),
+            result_path=results,
+            eval_set=eval_set_map[self.version],
+            output_dir=output_dir,
+            verbose=False,
+            seconds=6)
+        metrics = nusc_eval.main(render_curves=False)
+
+        MOTION_METRICS = ['EPA', 'min_ade_err', 'min_fde_err', 'miss_rate_err']
+        class_names = ['car', 'pedestrian']
+
+        table = prettytable.PrettyTable()
+        table.field_names = ["class names (all)"] + MOTION_METRICS
+        for class_name in class_names:
+            row_data = [class_name]
+            for m in MOTION_METRICS:
+                row_data.append('%.4f' % metrics[f'{class_name}_{m}'])
+            table.add_row(row_data)
+        print_log('\n[All Objects]\n' + str(table), logger=logger)
+
+        return {f'all/{k}': v for k, v in metrics.items()}
+
     def evaluate(
         self,
         results,
@@ -981,10 +1051,20 @@ class NuScenes3DDataset(Dataset):
                         occ_det_dict = self._evaluate_single_det_occluded(
                             detection_result_files[name], logger=logger, result_name=name)
                         results_dict.update(occ_det_dict)
+                        all_det_dict = self._evaluate_single_det_all(
+                            detection_result_files[name], logger=logger, result_name=name)
+                        results_dict.update(all_det_dict)
                 elif isinstance(detection_result_files, str):
                     occ_det_dict = self._evaluate_single_det_occluded(
                         detection_result_files, logger=logger)
                     results_dict.update(occ_det_dict)
+                    all_det_dict = self._evaluate_single_det_all(
+                        detection_result_files, logger=logger)
+                    results_dict.update(all_det_dict)
+
+            all_results_dict = self._evaluate_single_motion_all(
+                motion_result_files, self.work_dir, logger=logger)
+            results_dict.update(all_results_dict)
 
         if eval_mode['with_planning']:
             from .evaluation.planning.planning_eval import planning_eval
@@ -1045,6 +1125,23 @@ class NuScenes3DDataset(Dataset):
             metric_str += f'ade= {results_dict["occluded/car_min_ade_err"]:.4f} / {results_dict["occluded/pedestrian_min_ade_err"]:.4f}\n'
             metric_str += f'fde= {results_dict["occluded/car_min_fde_err"]:.4f} / {results_dict["occluded/pedestrian_min_fde_err"]:.4f}\n'
             metric_str += f'mr= {results_dict["occluded/car_miss_rate_err"]:.4f} / {results_dict["occluded/pedestrian_miss_rate_err"]:.4f}\n\n'
+
+        if "all/NDS" in results_dict:
+            metric_str += f'[All Det]\n'
+            metric_str += f'mAP: {results_dict["all/mAP"]:.4f}\n'
+            metric_str += f'mATE: {results_dict["all/mATE"]:.4f}\n'
+            metric_str += f'mASE: {results_dict["all/mASE"]:.4f}\n'
+            metric_str += f'mAOE: {results_dict["all/mAOE"]:.4f}\n'
+            metric_str += f'mAVE: {results_dict["all/mAVE"]:.4f}\n'
+            metric_str += f'mAAE: {results_dict["all/mAAE"]:.4f}\n'
+            metric_str += f'NDS: {results_dict["all/NDS"]:.4f}\n\n'
+
+        if "all/car_EPA" in results_dict:
+            metric_str += f'[All Motion] Car / Ped\n'
+            metric_str += f'epa= {results_dict["all/car_EPA"]:.4f} / {results_dict["all/pedestrian_EPA"]:.4f}\n'
+            metric_str += f'ade= {results_dict["all/car_min_ade_err"]:.4f} / {results_dict["all/pedestrian_min_ade_err"]:.4f}\n'
+            metric_str += f'fde= {results_dict["all/car_min_fde_err"]:.4f} / {results_dict["all/pedestrian_min_fde_err"]:.4f}\n'
+            metric_str += f'mr= {results_dict["all/car_miss_rate_err"]:.4f} / {results_dict["all/pedestrian_miss_rate_err"]:.4f}\n\n'
 
         if "L2" in results_dict:
             metric_str += f'obj_box_col: {(results_dict["obj_box_col"]*100):.3f}%\n'

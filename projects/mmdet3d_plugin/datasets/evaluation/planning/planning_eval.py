@@ -68,6 +68,7 @@ class PlanningMetric():
         self.obj_col = torch.zeros(self.n_future)
         self.obj_box_col = torch.zeros(self.n_future)
         self.obj_box_col_occluded = torch.zeros(self.n_future)
+        self.obj_box_col_all = torch.zeros(self.n_future)
         self.L2 = torch.zeros(self.n_future)
         self.total = torch.tensor(0)
         self.total_occluded = torch.tensor(0)
@@ -131,14 +132,24 @@ class PlanningMetric():
             has_occluded = any(boxes[0].shape[0] > 0 for boxes in fut_boxes_occluded)
             self.total_occluded += int(has_occluded)
 
+            merged_boxes = [
+                [torch.cat([fut_boxes[t][0], fut_boxes_occluded[t][0]], dim=0)]
+                for t in range(len(fut_boxes))
+            ]
+            _, obj_box_coll_all_sum = self.evaluate_coll(trajs[:,:,:2], gt_trajs[:,:,:2], merged_boxes)
+            self.obj_box_col_all += obj_box_coll_all_sum
+
     def compute(self):
         occ_denom = self.total_occluded if self.total_occluded > 0 else torch.tensor(1)
-        return {
+        results = {
             'obj_col': self.obj_col / self.total,
             'obj_box_col': self.obj_box_col / self.total,
-            'occluded/obj_box_col': self.obj_box_col_occluded / occ_denom,
             'L2': self.L2 / self.total,
         }
+        if self.total_occluded > 0:
+            results['occluded/obj_box_col'] = self.obj_box_col_occluded / occ_denom
+            results['all/obj_box_col'] = self.obj_box_col_all / self.total
+        return results
 
 
 def planning_eval(results, eval_config, logger, with_occlusion=False):

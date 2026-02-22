@@ -293,6 +293,83 @@ class OccludedMotionEval(MotionEval):
         return filtered
 
 
+class AllMotionEval(OccludedMotionEval):
+    """Evaluates motion prediction on all objects (visible + occluded, num_pts >= 0).
+
+    Identical to OccludedMotionEval but loads GT without the occluded_only
+    restriction, so predictions are scored against every annotated object.
+    """
+
+    def __init__(self,
+                 nusc: NuScenes,
+                 config: DetectionConfig,
+                 result_path: str,
+                 eval_set: str,
+                 output_dir: str = None,
+                 verbose: bool = True,
+                 seconds: int = 12):
+        self.nusc = nusc
+        self.result_path = result_path
+        self.eval_set = eval_set
+        self.output_dir = output_dir
+        self.verbose = verbose
+        self.cfg = config
+
+        self.plot_dir = os.path.join(self.output_dir, 'plots')
+        if not os.path.isdir(self.output_dir):
+            os.makedirs(self.output_dir)
+        if not os.path.isdir(self.plot_dir):
+            os.makedirs(self.plot_dir)
+
+        if verbose:
+            print('Initializing all-objects motion evaluation')
+        self.pred_boxes, self.meta = load_prediction(
+            self.result_path, self.cfg.max_boxes_per_sample, MotionBox, verbose=verbose
+        )
+        # Load GT for all objects (visible + occluded).
+        self.gt_boxes = load_gt(
+            self.nusc, self.eval_set, MotionBox, verbose=verbose,
+            seconds=seconds
+        )
+
+        assert set(self.pred_boxes.sample_tokens) == set(self.gt_boxes.sample_tokens), \
+            "Samples in split doesn't match samples in predictions."
+
+        self.pred_boxes = add_center_dist(nusc, self.pred_boxes)
+        self.gt_boxes = add_center_dist(nusc, self.gt_boxes)
+
+        if verbose:
+            print('Filtering predictions')
+        self.pred_boxes = filter_eval_boxes(nusc, self.pred_boxes, self.cfg.class_range, verbose=verbose)
+
+        if verbose:
+            print('Filtering all ground truth (class + distance only)')
+        self.gt_boxes = self._filter_all_gt(self.gt_boxes)
+
+        self.sample_tokens = self.gt_boxes.sample_tokens
+
+    def _filter_all_gt(self, gt_boxes):
+        """Return GT boxes for all objects within their distance range (no num_pts filter)."""
+        from collections import Counter
+        from nuscenes.eval.common.data_classes import EvalBoxes as _EvalBoxes
+        filtered = _EvalBoxes()
+        for sample_token in gt_boxes.sample_tokens:
+            boxes = [
+                box for box in gt_boxes[sample_token]
+                if box.detection_name in self.cfg.class_range
+                and box.ego_dist < self.cfg.class_range[box.detection_name]
+            ]
+            filtered.add_boxes(sample_token, boxes)
+        total = sum(len(filtered[t]) for t in filtered.sample_tokens)
+        class_counts = Counter(
+            box.detection_name
+            for t in filtered.sample_tokens
+            for box in filtered[t]
+        )
+        print(f'[All Motion] GT all boxes: {total} | {dict(class_counts)}')
+        return filtered
+
+
 if __name__ == "__main__":
 
     # Settings.
