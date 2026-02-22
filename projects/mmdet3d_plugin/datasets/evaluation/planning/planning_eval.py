@@ -70,6 +70,7 @@ class PlanningMetric():
         self.obj_box_col_occluded = torch.zeros(self.n_future)
         self.L2 = torch.zeros(self.n_future)
         self.total = torch.tensor(0)
+        self.total_occluded = torch.tensor(0)
 
     def evaluate_single_coll(self, traj, fut_boxes):
         n_future = traj.shape[0]
@@ -127,12 +128,15 @@ class PlanningMetric():
         if fut_boxes_occluded is not None:
             _, obj_box_coll_occ_sum = self.evaluate_coll(trajs[:,:,:2], gt_trajs[:,:,:2], fut_boxes_occluded)
             self.obj_box_col_occluded += obj_box_coll_occ_sum
+            has_occluded = any(boxes[0].shape[0] > 0 for boxes in fut_boxes_occluded)
+            self.total_occluded += int(has_occluded)
 
     def compute(self):
+        occ_denom = self.total_occluded if self.total_occluded > 0 else torch.tensor(1)
         return {
             'obj_col': self.obj_col / self.total,
             'obj_box_col': self.obj_box_col / self.total,
-            'occluded/obj_box_col': self.obj_box_col_occluded / self.total,
+            'occluded/obj_box_col': self.obj_box_col_occluded / occ_denom,
             'L2': self.L2 / self.total,
         }
 
