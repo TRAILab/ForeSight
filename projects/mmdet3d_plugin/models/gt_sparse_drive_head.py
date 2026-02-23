@@ -47,6 +47,11 @@ class GTSparseDriveHead(BaseModule):
             "and instance_bank sub-modules."
         )
         self.det_head = build_head(det_head)
+        # Freeze all det_head parameters: we only use its sub-modules
+        # (anchor_encoder, instance_bank) as non-trainable components.
+        # This prevents DDP from complaining about unused parameters.
+        for p in self.det_head.parameters():
+            p.requires_grad_(False)
 
         assert motion_plan_head is not None
         self.motion_plan_head = build_head(motion_plan_head)
