@@ -109,6 +109,29 @@ class BBoxRotation(object):
             results["gt_bboxes_3d"] = self.box_rotate(
                 results["gt_bboxes_3d"], angle
             )
+        if "gt_agent_fut_trajs" in results:
+            results["gt_agent_fut_trajs"] = self.traj_rotate(
+                results["gt_agent_fut_trajs"], angle
+            )
+        if "gt_ego_fut_trajs" in results:
+            results["gt_ego_fut_trajs"] = self.traj_rotate(
+                results["gt_ego_fut_trajs"], angle
+            )
+        if "gt_ego_fut_cmd" in results:
+            final_x = float(results["gt_ego_fut_trajs"].sum(axis=0)[0])
+            if final_x >= 2.0:
+                cmd = np.array([1, 0, 0], dtype=np.float32)  # Turn Right
+            elif final_x <= -2.0:
+                cmd = np.array([0, 1, 0], dtype=np.float32)  # Turn Left
+            else:
+                cmd = np.array([0, 0, 1], dtype=np.float32)  # Go Straight
+            results["gt_ego_fut_cmd"] = cmd
+        if "ego_status" in results:
+            ego_status = results["ego_status"].copy()
+            rot_mat_T = np.array([[rot_cos, rot_sin], [-rot_sin, rot_cos]])
+            ego_status[0:2] = ego_status[0:2] @ rot_mat_T  # XY acceleration
+            ego_status[6:8] = ego_status[6:8] @ rot_mat_T  # XY velocity
+            results["ego_status"] = ego_status
         return results
 
     @staticmethod
@@ -124,6 +147,13 @@ class BBoxRotation(object):
             vel_dims = bbox_3d[:, 7:].shape[-1]
             bbox_3d[:, 7:] = bbox_3d[:, 7:] @ rot_mat_T[:vel_dims, :vel_dims]
         return bbox_3d
+
+    @staticmethod
+    def traj_rotate(trajs, angle):
+        rot_cos = np.cos(angle)
+        rot_sin = np.sin(angle)
+        rot_mat_T = np.array([[rot_cos, rot_sin], [-rot_sin, rot_cos]])
+        return trajs @ rot_mat_T
 
 
 @PIPELINES.register_module()
