@@ -128,7 +128,7 @@ class BBoxRotation(object):
             results["gt_ego_fut_cmd"] = cmd
         if "ego_status" in results:
             ego_status = results["ego_status"].copy()
-            rot_mat_T = np.array([[rot_cos, rot_sin], [-rot_sin, rot_cos]])
+            rot_mat_T = np.array([[rot_cos, rot_sin], [-rot_sin, rot_cos]], dtype=np.float32)
             ego_status[0:2] = ego_status[0:2] @ rot_mat_T  # XY acceleration
             ego_status[6:8] = ego_status[6:8] @ rot_mat_T  # XY velocity
             results["ego_status"] = ego_status
@@ -152,7 +152,7 @@ class BBoxRotation(object):
     def traj_rotate(trajs, angle):
         rot_cos = np.cos(angle)
         rot_sin = np.sin(angle)
-        rot_mat_T = np.array([[rot_cos, rot_sin], [-rot_sin, rot_cos]])
+        rot_mat_T = np.array([[rot_cos, rot_sin], [-rot_sin, rot_cos]], dtype=trajs.dtype)
         return trajs @ rot_mat_T
 
 
