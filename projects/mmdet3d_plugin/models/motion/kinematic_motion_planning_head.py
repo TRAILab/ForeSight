@@ -177,11 +177,11 @@ class KinematicMotionPlanningHead(BaseModule):
         speed   = torch.sqrt(vx ** 2 + vy ** 2).clamp(min=1e-6)
         heading = torch.atan2(vy, vx)
 
-        queue = self.instance_queue.anchor_queue   # (bs, queue_len, N, 11) or None
-        have_history = queue is not None
+        queue = self.instance_queue.anchor_queue   # list of (bs, N, 11) tensors
+        have_history = len(queue) > 0
 
         if self.use_acceleration and have_history:
-            prev = queue[:, -1]                     # (bs, N, 11)
+            prev = queue[-1]                        # (bs, N, 11)
             prev_speed = torch.sqrt(
                 prev[..., VX] ** 2 + prev[..., VY] ** 2
             ).clamp(min=1e-6)
@@ -190,7 +190,7 @@ class KinematicMotionPlanningHead(BaseModule):
             accel = torch.zeros_like(speed)
 
         if self.use_turn_rate and have_history:
-            prev = queue[:, -1]
+            prev = queue[-1]                        # (bs, N, 11)
             prev_heading = torch.atan2(prev[..., VY], prev[..., VX])
             omega = (heading - prev_heading) / self.dt
         else:
@@ -212,13 +212,13 @@ class KinematicMotionPlanningHead(BaseModule):
         speed   = torch.sqrt(vx ** 2 + vy ** 2).clamp(min=1e-6)
         heading = torch.atan2(vy, vx)
 
-        ego_queue = self.instance_queue.ego_anchor_queue  # (bs, queue_len, 4) or None
-        have_history = ego_queue is not None
+        ego_queue = self.instance_queue.ego_anchor_queue  # list of (bs, 4) tensors
+        have_history = len(ego_queue) > 0
 
         if self.use_acceleration and have_history:
             # ego_anchor_queue stores [x, y, cos_h, sin_h] per step; use
             # the heading difference to derive speed change as a proxy.
-            prev_ego = ego_queue[:, -1]                   # (bs, 4)
+            prev_ego = ego_queue[-1]                      # (bs, 4)
             prev_vx  = prev_ego[:, 0]                     # stored as vx in slot 0
             prev_vy  = prev_ego[:, 1]                     # stored as vy in slot 1
             prev_speed = torch.sqrt(prev_vx ** 2 + prev_vy ** 2).clamp(min=1e-6)
@@ -227,7 +227,7 @@ class KinematicMotionPlanningHead(BaseModule):
             accel = torch.zeros_like(speed)
 
         if self.use_turn_rate and have_history:
-            prev_ego = ego_queue[:, -1]
+            prev_ego = ego_queue[-1]                      # (bs, 4)
             prev_heading = torch.atan2(prev_ego[:, 1], prev_ego[:, 0])
             omega = (heading - prev_heading) / self.dt
         else:
