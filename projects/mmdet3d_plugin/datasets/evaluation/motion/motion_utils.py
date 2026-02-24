@@ -437,18 +437,25 @@ def accumulate(gt_boxes: EvalBoxes,
     # ---------------------------------------------
     # Re-sample the match-data to match, prec, recall and conf.
     # ---------------------------------------------
+    confs = np.array(match_data['conf'])
+    all_same_conf = confs.max() == confs.min()
 
     for key in match_data.keys():
         if key == "conf":
             continue  # Confidence is used as reference to align with fp and tp. So skip in this step.
 
+        arr = np.array(match_data[key])
+        if all_same_conf:
+            # When all predictions have identical confidence (e.g. a GT-oracle model),
+            # the recall-weighted np.interp degenerates because xp is constant and
+            # np.interp requires a strictly-increasing sequence.  Fall back to the
+            # plain mean replicated across all recall levels.
+            match_data[key] = np.full(DetectionMetricData.nelem, arr.mean())
         else:
             # For each match_data, we first calculate the accumulated mean.
-            tmp = cummean(np.array(match_data[key]))
-
+            tmp = cummean(arr)
             # Then interpolate based on the confidences. (Note reversing since np.interp needs increasing arrays)
-            match_data[key] = np.interp(conf[::-1], match_data['conf'][::-1], tmp[::-1])[::-1]
-
+            match_data[key] = np.interp(conf[::-1], confs[::-1], tmp[::-1])[::-1]
     EPA = (hit - 0.5 * N_fp) / npos
 
     ## match based on traj

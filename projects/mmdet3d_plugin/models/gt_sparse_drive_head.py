@@ -253,6 +253,7 @@ class GTSparseDriveHead(BaseModule):
     def post_process(self, model_outs, data):
         det_output, _, motion_output, planning_output = model_outs
 
+        det_result = self.det_head.post_process(det_output)
         motion_result, planning_result = self.motion_plan_head.post_process(
             det_output, motion_output, planning_output, data
         )
@@ -260,6 +261,7 @@ class GTSparseDriveHead(BaseModule):
         batch_size = len(motion_result)
         results = [dict() for _ in range(batch_size)]
         for i in range(batch_size):
+            results[i].update(det_result[i])
             results[i].update(motion_result[i])
             results[i].update(planning_result[i])
 
