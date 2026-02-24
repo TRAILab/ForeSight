@@ -177,11 +177,13 @@ class KinematicMotionPlanningHead(BaseModule):
         speed   = torch.sqrt(vx ** 2 + vy ** 2).clamp(min=1e-6)
         heading = torch.atan2(vy, vx)
 
+        # anchor_queue[-1] is the current frame (just appended by prepare_motion),
+        # so the actual previous frame is at index -2.
         queue = self.instance_queue.anchor_queue   # list of (bs, N, 11) tensors
-        have_history = len(queue) > 0
+        have_history = len(queue) >= 2
 
         if self.use_acceleration and have_history:
-            prev = queue[-1]                        # (bs, N, 11)
+            prev = queue[-2]                        # (bs, N, 11) — previous frame
             prev_speed = torch.sqrt(
                 prev[..., VX] ** 2 + prev[..., VY] ** 2
             ).clamp(min=1e-6)
@@ -190,7 +192,7 @@ class KinematicMotionPlanningHead(BaseModule):
             accel = torch.zeros_like(speed)
 
         if self.use_turn_rate and have_history:
-            prev = queue[-1]                        # (bs, N, 11)
+            prev = queue[-2]                        # (bs, N, 11) — previous frame
             prev_heading = torch.atan2(prev[..., VY], prev[..., VX])
             omega = (heading - prev_heading) / self.dt
         else:
@@ -212,8 +214,11 @@ class KinematicMotionPlanningHead(BaseModule):
         speed   = torch.sqrt(vx ** 2 + vy ** 2).clamp(min=1e-6)
         heading = torch.atan2(vy, vx)
 
-        ego_queue = self.instance_queue.ego_anchor_queue  # list of (bs, 4) tensors
-        have_history = len(ego_queue) > 0
+        # ego_anchor_queue[-1] stores the previous frame's velocity in VX/VY slots,
+        # but on the very first frame prev_ego_status was None so VX=VY=0.
+        # Require len >= 2 so the first frame always falls back to zero accel/omega.
+        ego_queue = self.instance_queue.ego_anchor_queue  # list of (bs, 1, 11) tensors
+        have_history = len(ego_queue) >= 2
 
         if self.use_acceleration and have_history:
             prev_ego = ego_queue[-1][:, 0]                # (bs, 11)
