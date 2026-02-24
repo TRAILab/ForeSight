@@ -52,6 +52,7 @@ class Sparse4DHead(BaseModule):
         cls_threshold_to_reg: float = -1,
         dn_loss_weight: float = 5.0,
         decouple_attn: bool = True,
+        temporal_warmup_order: Optional[List[str]] = None,
         init_cfg: dict = None,
         **kwargs,
     ):
@@ -113,6 +114,13 @@ class Sparse4DHead(BaseModule):
                 for op in self.operation_order
             ]
         )
+        self.temporal_warmup_order = list(temporal_warmup_order) if temporal_warmup_order else []
+        self.warmup_layers = nn.ModuleList(
+            [
+                build(*self.op_config_map.get(op, [None, None]))
+                for op in self.temporal_warmup_order
+            ]
+        )
         self.embed_dims = self.instance_bank.embed_dims
         if self.decouple_attn:
             self.fc_before = nn.Linear(
@@ -133,9 +141,27 @@ class Sparse4DHead(BaseModule):
                 for p in self.layers[i].parameters():
                     if p.dim() > 1:
                         nn.init.xavier_uniform_(p)
+        for i, op in enumerate(self.temporal_warmup_order):
+            if self.warmup_layers[i] is None:
+                continue
+            elif op != "refine":
+                for p in self.warmup_layers[i].parameters():
+                    if p.dim() > 1:
+                        nn.init.xavier_uniform_(p)
         for m in self.modules():
             if hasattr(m, "init_weight"):
                 m.init_weight()
+
+    def _gnn_with_layer(self, layer, feat, anchor_embed):
+        """Self-attention (GNN) using an explicit layer rather than self.layers[i].
+        Used by the temporal warmup block where queries attend only to each other."""
+        if self.decouple_attn:
+            q = torch.cat([feat, anchor_embed], dim=-1)
+            v = self.fc_before(feat)
+            return self.fc_after(layer(q, q, v))
+        else:
+            v = self.fc_before(feat)
+            return self.fc_after(layer(feat, feat, v, query_pos=anchor_embed))
 
     def graph_model(
         self,
@@ -255,6 +281,36 @@ class Sparse4DHead(BaseModule):
         else:
             temp_anchor_embed = None
 
+        # =========== temporal warmup (Block 0) ====================
+        # Social self-attention among the num_temp_instances cached queries
+        # from the previous frame before they are merged with current-frame
+        # detections. No image features are used here.
+        if temp_instance_feature is not None and self.temporal_warmup_order:
+            w_feat = temp_instance_feature
+            w_anchor = temp_anchor
+            w_anchor_embed = temp_anchor_embed
+            for i, op in enumerate(self.temporal_warmup_order):
+                if self.warmup_layers[i] is None:
+                    continue
+                if op == "gnn":
+                    w_feat = self._gnn_with_layer(
+                        self.warmup_layers[i], w_feat, w_anchor_embed
+                    )
+                elif op in ("norm", "ffn"):
+                    w_feat = self.warmup_layers[i](w_feat)
+                elif op == "refine":
+                    w_anchor, _, _ = self.warmup_layers[i](
+                        w_feat,
+                        w_anchor,
+                        w_anchor_embed,
+                        time_interval=time_interval,
+                        return_cls=True,
+                    )
+                    w_anchor_embed = self.anchor_encoder(w_anchor)
+            temp_instance_feature = w_feat
+            temp_anchor = w_anchor
+            temp_anchor_embed = w_anchor_embed
+
         # =================== forward the layers ====================
         prediction = []
         classification = []
@@ -305,7 +361,9 @@ class Sparse4DHead(BaseModule):
                 quality.append(qt)
                 if len(prediction) == self.num_single_frame_decoder:
                     instance_feature, anchor = self.instance_bank.update(
-                        instance_feature, anchor, cls
+                        instance_feature, anchor, cls,
+                        cached_feature_override=temp_instance_feature,
+                        cached_anchor_override=temp_anchor,
                     )
                     if (
                         dn_metas is not None
