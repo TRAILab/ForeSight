@@ -147,7 +147,7 @@ model = dict(
                 in_loops=1,
                 out_loops=4 if decouple_attn else 2,
             ),
-            temporal_warmup_order=("gnn", "norm", "ffn", "norm", "refine"),
+            temporal_warmup_order=("gnn", "norm", "refine"),
             num_single_frame_decoder=num_single_frame_decoder,
             operation_order=(
                 [
