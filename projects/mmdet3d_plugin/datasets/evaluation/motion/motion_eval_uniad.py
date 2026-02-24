@@ -27,7 +27,7 @@ from nuscenes.eval.common.utils import quaternion_yaw, Quaternion
 from nuscenes.eval.common.utils import center_distance, scale_iou, yaw_diff, velocity_l2, attr_acc, cummean
 
 from .motion_utils import MotionBox, load_prediction, load_gt, accumulate
-MOTION_TP_METRICS = ['min_ade_err', 'min_fde_err', 'miss_rate_err']
+MOTION_TP_METRICS = ['min_ade_err', 'min_fde_err', 'miss_rate_err', 'top1_fde_err', 'brier_min_fde_err']
 
 
 class MotionEval:

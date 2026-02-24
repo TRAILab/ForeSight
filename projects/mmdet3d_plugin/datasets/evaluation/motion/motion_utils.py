@@ -55,7 +55,8 @@ class MotionBox(DetectionBox):
                  detection_name: str = 'car',  # The class name used in the detection challenge.
                  detection_score: float = -1.0,  # GT samples do not have a score.
                  attribute_name: str = '',  # Box attribute. Each box can have at most 1 attribute.
-                 traj=None):  
+                 traj=None,
+                 traj_score=None):
 
         super().__init__(sample_token, translation, size, rotation, velocity, ego_translation, num_pts)
 
@@ -73,6 +74,7 @@ class MotionBox(DetectionBox):
         self.detection_score = detection_score
         self.attribute_name = attribute_name
         self.traj = traj
+        self.traj_score = traj_score
 
     def __eq__(self, other):
         return (self.sample_token == other.sample_token and
@@ -101,6 +103,7 @@ class MotionBox(DetectionBox):
             'detection_score': self.detection_score,
             'attribute_name': self.attribute_name,
             'traj': self.traj,
+            'traj_score': self.traj_score,
         }
 
     @classmethod
@@ -117,7 +120,8 @@ class MotionBox(DetectionBox):
                    detection_name=content['detection_name'],
                    detection_score=-1.0 if 'detection_score' not in content else float(content['detection_score']),
                    attribute_name=content['attribute_name'],
-                   traj=content['trajs'],)
+                   traj=content['trajs'],
+                   traj_score=content.get('trajs_score', None),)
 
 
 def load_prediction(result_path: str, max_boxes_per_sample: int, box_cls, verbose: bool = False) \
@@ -363,7 +367,9 @@ def accumulate(gt_boxes: EvalBoxes,
     match_data = {'conf': [],
                   'min_ade': [],
                   'min_fde': [],
-                  'miss_rate': []}
+                  'miss_rate': [],
+                  'top1_fde': [],
+                  'brier_min_fde': []}
 
     # ---------------------------------------------
     # Match and accumulate match data.
@@ -400,10 +406,12 @@ def accumulate(gt_boxes: EvalBoxes,
 
             match_data['conf'].append(pred_box.detection_score)
 
-            minade, minfde, mr = prediction_metrics(gt_box_match, pred_box)
+            minade, minfde, mr, top1_fde, brier_min_fde = prediction_metrics(gt_box_match, pred_box)
             match_data['min_ade'].append(minade)
             match_data['min_fde'].append(minfde)
             match_data['miss_rate'].append(mr)
+            match_data['top1_fde'].append(top1_fde)
+            match_data['brier_min_fde'].append(brier_min_fde)
 
             if minfde < 2.0:
                 hit += 1
@@ -491,7 +499,9 @@ def accumulate(gt_boxes: EvalBoxes,
                                confidence=conf,
                                min_ade_err=match_data['min_ade'],
                                min_fde_err=match_data['min_fde'],
-                               miss_rate_err=match_data['miss_rate']), EPA, EPA_
+                               miss_rate_err=match_data['miss_rate'],
+                               top1_fde_err=match_data['top1_fde'],
+                               brier_min_fde_err=match_data['brier_min_fde']), EPA, EPA_
 
 
 def prediction_metrics(gt_box_match, pred_box, miss_thresh=2):
@@ -500,7 +510,7 @@ def prediction_metrics(gt_box_match, pred_box, miss_thresh=2):
 
     valid_step = gt_traj.shape[0]
     if valid_step <= 0:
-        return 0, 0, 0
+        return 0, 0, 0, 0, 0
 
     pred_traj_valid = pred_traj[:, :valid_step, :]
     dist = np.linalg.norm(pred_traj_valid - gt_traj[np.newaxis], axis=2)
@@ -509,7 +519,27 @@ def prediction_metrics(gt_box_match, pred_box, miss_thresh=2):
     minfde = dist[:, -1].min()
     mr = dist.max(axis=1).min() > miss_thresh
 
-    return minade, minfde, mr
+    # Top-1 FDE: FDE of the highest-confidence mode.
+    # Brier-minFDE: minFDE + (1 - p_best)^2, where p_best is the normalized
+    # probability assigned to the mode closest to GT (nuScenes leaderboard metric).
+    traj_score = getattr(pred_box, 'traj_score', None)
+    if traj_score is not None and len(traj_score) == pred_traj.shape[0]:
+        scores = np.array(traj_score, dtype=np.float64)
+        top1_idx = int(np.argmax(scores))
+        top1_fde = float(dist[top1_idx, -1])
+
+        scores_sum = scores.sum()
+        probs = scores / scores_sum if scores_sum > 1e-6 else np.ones(len(scores)) / len(scores)
+        best_mode_idx = int(np.argmin(dist[:, -1]))
+        p_best = float(probs[best_mode_idx])
+        brier_min_fde = minfde + (1.0 - p_best) ** 2
+    else:
+        # No per-mode scores available: fall back to min-FDE for top1,
+        # and worst-case confidence penalty for Brier-minFDE.
+        top1_fde = minfde
+        brier_min_fde = minfde + 1.0
+
+    return minade, minfde, mr, top1_fde, brier_min_fde
 
 def traj_fde(gt_box, pred_box, final_step):
     if gt_box.traj.shape[0] <= 0:
@@ -543,7 +573,9 @@ class MotionMetricData(DetectionMetricData):
                  confidence: np.array,
                  min_ade_err: np.array,
                  min_fde_err: np.array,
-                 miss_rate_err: np.array):
+                 miss_rate_err: np.array,
+                 top1_fde_err: np.array,
+                 brier_min_fde_err: np.array):
 
         # Assert lengths.
         assert len(recall) == self.nelem
@@ -552,6 +584,8 @@ class MotionMetricData(DetectionMetricData):
         assert len(min_ade_err) == self.nelem
         assert len(min_fde_err) == self.nelem
         assert len(miss_rate_err) == self.nelem
+        assert len(top1_fde_err) == self.nelem
+        assert len(brier_min_fde_err) == self.nelem
 
         # Assert ordering.
         assert all(confidence == sorted(confidence, reverse=True))  # Confidences should be descending.
@@ -564,6 +598,8 @@ class MotionMetricData(DetectionMetricData):
         self.min_ade_err = min_ade_err
         self.min_fde_err = min_fde_err
         self.miss_rate_err = miss_rate_err
+        self.top1_fde_err = top1_fde_err
+        self.brier_min_fde_err = brier_min_fde_err
 
     def __eq__(self, other):
         eq = True
@@ -599,6 +635,8 @@ class MotionMetricData(DetectionMetricData):
             'min_ade_err': self.min_ade_err.tolist(),
             'min_fde_err': self.min_fde_err.tolist(),
             'miss_rate_err': self.miss_rate_err.tolist(),
+            'top1_fde_err': self.top1_fde_err.tolist(),
+            'brier_min_fde_err': self.brier_min_fde_err.tolist(),
         }
 
     @classmethod
@@ -609,7 +647,9 @@ class MotionMetricData(DetectionMetricData):
                    confidence=np.array(content['confidence']),
                    min_ade_err=np.array(content['min_ade_err']),
                    min_fde_err=np.array(content['min_fde_err']),
-                   miss_rate_err=np.array(content['miss_rate_err']))
+                   miss_rate_err=np.array(content['miss_rate_err']),
+                   top1_fde_err=np.array(content['top1_fde_err']),
+                   brier_min_fde_err=np.array(content['brier_min_fde_err']))
 
     @classmethod
     def no_predictions(cls):
@@ -619,7 +659,9 @@ class MotionMetricData(DetectionMetricData):
                    confidence=np.zeros(cls.nelem),
                    min_ade_err=np.ones(cls.nelem),
                    min_fde_err=np.ones(cls.nelem),
-                   miss_rate_err=np.ones(cls.nelem))
+                   miss_rate_err=np.ones(cls.nelem),
+                   top1_fde_err=np.ones(cls.nelem),
+                   brier_min_fde_err=np.ones(cls.nelem) * 2.0)
 
     @classmethod
     def random_md(cls):
@@ -629,5 +671,7 @@ class MotionMetricData(DetectionMetricData):
                    confidence=np.linspace(0, 1, cls.nelem)[::-1],
                    min_ade_err=np.random.random(cls.nelem),
                    min_fde_err=np.random.random(cls.nelem),
-                   miss_rate_err=np.random.random(cls.nelem))
+                   miss_rate_err=np.random.random(cls.nelem),
+                   top1_fde_err=np.random.random(cls.nelem),
+                   brier_min_fde_err=np.random.random(cls.nelem))
 
