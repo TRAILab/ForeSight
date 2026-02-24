@@ -47,6 +47,7 @@ class MotionPlanningHead(BaseModule):
         temp_graph_model=None,
         graph_model=None,
         cross_graph_model=None,
+        deformable_model=None,
         norm_layer=None,
         ffn=None,
         refine_layer=None,
@@ -86,6 +87,7 @@ class MotionPlanningHead(BaseModule):
             "temp_gnn": [temp_graph_model, ATTENTION],
             "gnn": [graph_model, ATTENTION],
             "cross_gnn": [cross_graph_model, ATTENTION],
+            "deformable": [deformable_model, ATTENTION],
             "norm": [norm_layer, NORM_LAYERS],
             "ffn": [ffn, FEEDFORWARD_NETWORK],
             "refine": [refine_layer, PLUGIN_LAYERS],
@@ -311,6 +313,19 @@ class MotionPlanningHead(BaseModule):
                     key=map_instance_feature_selected,
                     query_pos=anchor_embed,
                     key_pos=map_anchor_embed_selected,
+                )
+            elif op == "deformable":
+                # Apply deformable cross-attention to sensor features for
+                # agent instances only (ego token has no well-defined 3D box).
+                agent_feature = self.layers[i](
+                    instance_feature[:, :num_anchor],
+                    det_anchors,
+                    anchor_embed[:, :num_anchor],
+                    feature_maps,
+                    metas,
+                )
+                instance_feature = torch.cat(
+                    [agent_feature, instance_feature[:, num_anchor:]], dim=1
                 )
             elif op == "refine":
                 motion_query = motion_mode_query + (instance_feature + anchor_embed)[:, :num_anchor].unsqueeze(2)
