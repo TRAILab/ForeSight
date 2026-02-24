@@ -34,6 +34,7 @@ log_config = dict(
 load_from = None
 resume_from = None
 workflow = [("train", 1)]
+find_unused_parameters = True
 fp16 = dict(loss_scale=32.0)
 input_shape = (704, 256)
 
