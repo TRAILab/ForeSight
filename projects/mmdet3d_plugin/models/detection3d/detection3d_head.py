@@ -53,6 +53,7 @@ class Sparse4DHead(BaseModule):
         dn_loss_weight: float = 5.0,
         decouple_attn: bool = True,
         temporal_warmup_order: Optional[List[str]] = None,
+        warmup_refine_layer: dict = None,
         init_cfg: dict = None,
         **kwargs,
     ):
@@ -115,9 +116,15 @@ class Sparse4DHead(BaseModule):
             ]
         )
         self.temporal_warmup_order = list(temporal_warmup_order) if temporal_warmup_order else []
+        # For "refine" in warmup, use warmup_refine_layer if provided (should have
+        # with_cls_branch=False, with_quality_estimation=False to avoid unused params).
+        # Falls back to refine_layer if warmup_refine_layer is not specified.
+        warmup_op_config_map = dict(self.op_config_map)
+        if warmup_refine_layer is not None:
+            warmup_op_config_map["refine"] = [warmup_refine_layer, PLUGIN_LAYERS]
         self.warmup_layers = nn.ModuleList(
             [
-                build(*self.op_config_map.get(op, [None, None]))
+                build(*warmup_op_config_map.get(op, [None, None]))
                 for op in self.temporal_warmup_order
             ]
         )
@@ -333,7 +340,7 @@ class Sparse4DHead(BaseModule):
                         w_anchor,
                         w_anchor_embed,
                         time_interval=time_interval,
-                        return_cls=True,
+                        return_cls=False,
                     )
                     w_anchor_embed = self.anchor_encoder(w_anchor)
             if is_temporal:

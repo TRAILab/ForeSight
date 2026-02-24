@@ -147,7 +147,15 @@ model = dict(
                 in_loops=1,
                 out_loops=4 if decouple_attn else 2,
             ),
-            temporal_warmup_order=("gnn", "norm"),
+            temporal_warmup_order=("gnn", "norm", "refine"),
+            warmup_refine_layer=dict(
+                type="SparseBox3DRefinementModule",
+                embed_dims=embed_dims,
+                num_cls=num_classes,
+                refine_yaw=True,
+                with_cls_branch=False,
+                with_quality_estimation=False,
+            ),
             num_single_frame_decoder=num_single_frame_decoder,
             operation_order=(
                 [
