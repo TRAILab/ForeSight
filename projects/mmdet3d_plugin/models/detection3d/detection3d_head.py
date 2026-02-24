@@ -132,6 +132,19 @@ class Sparse4DHead(BaseModule):
         else:
             self.fc_before = nn.Identity()
             self.fc_after = nn.Identity()
+        # Dedicated fc projections for warmup GNN — must NOT share with fc_before/fc_after
+        # because gradient checkpointing would fire DDP hooks twice for shared params.
+        has_warmup_gnn = any(op == "gnn" for op in self.temporal_warmup_order)
+        if has_warmup_gnn and self.decouple_attn:
+            self.warmup_fc_before = nn.Linear(
+                self.embed_dims, self.embed_dims * 2, bias=False
+            )
+            self.warmup_fc_after = nn.Linear(
+                self.embed_dims * 2, self.embed_dims, bias=False
+            )
+        else:
+            self.warmup_fc_before = nn.Identity()
+            self.warmup_fc_after = nn.Identity()
 
     def init_weights(self):
         for i, op in enumerate(self.operation_order):
@@ -148,20 +161,25 @@ class Sparse4DHead(BaseModule):
                 for p in self.warmup_layers[i].parameters():
                     if p.dim() > 1:
                         nn.init.xavier_uniform_(p)
+        if isinstance(self.warmup_fc_before, nn.Linear):
+            nn.init.xavier_uniform_(self.warmup_fc_before.weight)
+        if isinstance(self.warmup_fc_after, nn.Linear):
+            nn.init.xavier_uniform_(self.warmup_fc_after.weight)
         for m in self.modules():
             if hasattr(m, "init_weight"):
                 m.init_weight()
 
     def _gnn_with_layer(self, layer, feat, anchor_embed):
         """Self-attention (GNN) using an explicit layer rather than self.layers[i].
-        Used by the temporal warmup block where queries attend only to each other."""
+        Used by the temporal warmup block where queries attend only to each other.
+        Uses warmup_fc_before/after (not shared with main decoder fc projections)."""
         if self.decouple_attn:
             q = torch.cat([feat, anchor_embed], dim=-1)
-            v = self.fc_before(feat)
-            return self.fc_after(layer(q, q, v))
+            v = self.warmup_fc_before(feat)
+            return self.warmup_fc_after(layer(q, q, v))
         else:
-            v = self.fc_before(feat)
-            return self.fc_after(layer(feat, feat, v, query_pos=anchor_embed))
+            v = self.warmup_fc_before(feat)
+            return self.warmup_fc_after(layer(feat, feat, v, query_pos=anchor_embed))
 
     def graph_model(
         self,
