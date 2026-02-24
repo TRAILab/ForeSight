@@ -300,13 +300,24 @@ class Sparse4DHead(BaseModule):
             temp_anchor_embed = None
 
         # =========== temporal warmup (Block 0) ====================
-        # Social self-attention among the num_temp_instances cached queries
-        # from the previous frame before they are merged with current-frame
-        # detections. No image features are used here.
-        if temp_instance_feature is not None and self.temporal_warmup_order:
-            w_feat = temp_instance_feature
-            w_anchor = temp_anchor
-            w_anchor_embed = temp_anchor_embed
+        # Social self-attention among temporal queries before they are merged
+        # with current-frame detections. No image features used here.
+        # Always runs (even on first frame) so warmup params always receive
+        # gradients — avoids the need for find_unused_parameters=True.
+        if self.temporal_warmup_order:
+            if temp_instance_feature is not None:
+                # Temporal case: warm up the cached temporal features
+                w_feat = temp_instance_feature
+                w_anchor = temp_anchor
+                w_anchor_embed = temp_anchor_embed
+                is_temporal = True
+            else:
+                # First frame: warm up the first num_temp_instances current slots
+                num_ti = self.instance_bank.num_temp_instances
+                w_feat = instance_feature[:, :num_ti]
+                w_anchor = anchor[:, :num_ti]
+                w_anchor_embed = anchor_embed[:, :num_ti]
+                is_temporal = False
             for i, op in enumerate(self.temporal_warmup_order):
                 if self.warmup_layers[i] is None:
                     continue
@@ -325,9 +336,21 @@ class Sparse4DHead(BaseModule):
                         return_cls=True,
                     )
                     w_anchor_embed = self.anchor_encoder(w_anchor)
-            temp_instance_feature = w_feat
-            temp_anchor = w_anchor
-            temp_anchor_embed = w_anchor_embed
+            if is_temporal:
+                temp_instance_feature = w_feat
+                temp_anchor = w_anchor
+                temp_anchor_embed = w_anchor_embed
+            else:
+                # Inject warmed first-frame features back so warmup params
+                # connect to the loss via the main decoder.
+                num_ti = self.instance_bank.num_temp_instances
+                instance_feature = torch.cat(
+                    [w_feat, instance_feature[:, num_ti:]], dim=1
+                )
+                anchor = torch.cat([w_anchor, anchor[:, num_ti:]], dim=1)
+                anchor_embed = torch.cat(
+                    [w_anchor_embed, anchor_embed[:, num_ti:]], dim=1
+                )
 
         # =================== forward the layers ====================
         prediction = []
