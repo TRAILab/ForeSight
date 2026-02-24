@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_bs24_predonly_refine',),
+                name='sparsedrive_r50_stage2_4gpu_bs24_predonly_initrand_deform',),
             interval=50)
     ],
 )
@@ -419,15 +419,23 @@ model = dict(
                 tracking_threshold=0.2,
                 feature_map_scale=(input_shape[1]/strides[-1], input_shape[0]/strides[-1]),
             ),
+            # Deformable cross-attention to sensor (image) features inserted
+            # after the GNN self-attention block in each of the 3 decoder
+            # iterations.  residual_mode="add" keeps embed_dims unchanged so
+            # the existing AsymmetricFFN (in_channels=embed_dims) is compatible.
             operation_order=(
                 [
                     "temp_gnn",
                     "gnn",
                     "norm",
+                    "deformable",
+                    "norm",
                     "ffn",
                     "norm",
+                ] * 3 +
+                [
                     "refine",
-                ] * 3
+                ]
             ),
             temp_graph_model=dict(
                 type="MultiheadAttention",
@@ -449,6 +457,30 @@ model = dict(
                 num_heads=num_groups,
                 batch_first=True,
                 dropout=drop_out,
+            ),
+            deformable_model=dict(
+                type="DeformableFeatureAggregation",
+                embed_dims=embed_dims,
+                num_groups=num_groups,
+                num_levels=num_levels,
+                num_cams=6,
+                attn_drop=0.15,
+                use_deformable_func=use_deformable_func,
+                use_camera_embed=True,
+                residual_mode="add",
+                kps_generator=dict(
+                    type="SparseBox3DKeyPointsGenerator",
+                    num_learnable_pts=6,
+                    fix_scale=[
+                        [0, 0, 0],
+                        [0.45, 0, 0],
+                        [-0.45, 0, 0],
+                        [0, 0.45, 0],
+                        [0, -0.45, 0],
+                        [0, 0, 0.45],
+                        [0, 0, -0.45],
+                    ],
+                ),
             ),
             norm_layer=dict(type="LN", normalized_shape=embed_dims),
             ffn=dict(
@@ -558,7 +590,7 @@ train_pipeline = [
             "focal",
             "gt_bboxes_3d",
             "gt_labels_3d",
-            'gt_map_labels', 
+            'gt_map_labels',
             'gt_map_pts',
             'gt_agent_fut_trajs',
             'gt_agent_fut_masks',
@@ -608,7 +640,7 @@ eval_pipeline = [
         normalize=False,
     ),
     dict(
-        type='Collect', 
+        type='Collect',
         keys=[
             'vectors',
             "gt_bboxes_3d",
@@ -616,7 +648,7 @@ eval_pipeline = [
             'gt_agent_fut_trajs',
             'gt_agent_fut_masks',
             'gt_ego_fut_trajs',
-            'gt_ego_fut_masks', 
+            'gt_ego_fut_masks',
             'gt_ego_fut_cmd',
             'fut_boxes'
         ],
@@ -727,4 +759,3 @@ evaluation = dict(
     eval_mode=eval_mode,
 )
 # ================== pretrained model ========================
-load_from = 'ckpt/sparsedrive_stage1.pth'

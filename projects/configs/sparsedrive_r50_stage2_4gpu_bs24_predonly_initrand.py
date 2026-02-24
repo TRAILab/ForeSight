@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_bs24_predonly_refine',),
+                name='sparsedrive_r50_stage2_4gpu_bs24_predonly_initrand',),
             interval=50)
     ],
 )
@@ -424,10 +424,12 @@ model = dict(
                     "temp_gnn",
                     "gnn",
                     "norm",
-                    "ffn",
+                    "ffn",                    
                     "norm",
+                ] * 3 +
+                [
                     "refine",
-                ] * 3
+                ]
             ),
             temp_graph_model=dict(
                 type="MultiheadAttention",
@@ -727,4 +729,3 @@ evaluation = dict(
     eval_mode=eval_mode,
 )
 # ================== pretrained model ========================
-load_from = 'ckpt/sparsedrive_stage1.pth'
