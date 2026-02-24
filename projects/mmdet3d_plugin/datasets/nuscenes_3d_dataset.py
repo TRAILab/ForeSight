@@ -762,6 +762,8 @@ class NuScenes3DDataset(Dataset):
                         trajs=det['img_bbox']['trajs_3d'][i].numpy(),
                     )
                 )
+                if 'trajs_score' in det['img_bbox']:
+                    nusc_anno['trajs_score'] = det['img_bbox']['trajs_score'][i].numpy()
                 annos.append(nusc_anno)
             nusc_annos[sample_token] = annos
         nusc_submissions = {

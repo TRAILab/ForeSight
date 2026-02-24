@@ -47,6 +47,7 @@ class MotionPlanningHead(BaseModule):
         temp_graph_model=None,
         graph_model=None,
         cross_graph_model=None,
+        deformable_model=None,
         norm_layer=None,
         ffn=None,
         refine_layer=None,
@@ -86,6 +87,7 @@ class MotionPlanningHead(BaseModule):
             "temp_gnn": [temp_graph_model, ATTENTION],
             "gnn": [graph_model, ATTENTION],
             "cross_gnn": [cross_graph_model, ATTENTION],
+            "deformable": [deformable_model, ATTENTION],
             "norm": [norm_layer, NORM_LAYERS],
             "ffn": [ffn, FEEDFORWARD_NETWORK],
             "refine": [refine_layer, PLUGIN_LAYERS],
@@ -312,9 +314,22 @@ class MotionPlanningHead(BaseModule):
                     query_pos=anchor_embed,
                     key_pos=map_anchor_embed_selected,
                 )
+            elif op == "deformable":
+                # Apply deformable cross-attention to sensor features for
+                # agent instances only (ego token has no well-defined 3D box).
+                agent_feature = self.layers[i](
+                    instance_feature[:, :num_anchor],
+                    det_anchors,
+                    anchor_embed[:, :num_anchor],
+                    feature_maps,
+                    metas,
+                )
+                instance_feature = torch.cat(
+                    [agent_feature, instance_feature[:, num_anchor:]], dim=1
+                )
             elif op == "refine":
                 motion_query = motion_mode_query + (instance_feature + anchor_embed)[:, :num_anchor].unsqueeze(2)
-                plan_query = plan_mode_query + (instance_feature + anchor_embed)[:, num_anchor:].unsqueeze(2) 
+                plan_query = plan_mode_query + (instance_feature + anchor_embed)[:, num_anchor:].unsqueeze(2)
                 (
                     motion_cls,
                     motion_reg,
@@ -332,6 +347,16 @@ class MotionPlanningHead(BaseModule):
                 planning_classification.append(plan_cls)
                 planning_prediction.append(plan_reg)
                 planning_status.append(plan_status)
+                # Update mode anchor queries for the next decoder iteration.
+                # cumsum converts delta trajectories to absolute endpoints.
+                motion_anchor_upd = motion_reg.detach().cumsum(dim=-2)
+                motion_mode_query = self.motion_anchor_encoder(
+                    gen_sineembed_for_position(motion_anchor_upd[..., -1, :])
+                )
+                plan_anchor_upd = plan_reg.detach().cumsum(dim=-2)
+                plan_mode_query = self.plan_anchor_encoder(
+                    gen_sineembed_for_position(plan_anchor_upd[..., -1, :])
+                ).flatten(1, 2).unsqueeze(1)
         
         self.instance_queue.cache_motion(instance_feature[:, :num_anchor], det_output, metas)
         self.instance_queue.cache_planning(instance_feature[:, num_anchor:], plan_status)
