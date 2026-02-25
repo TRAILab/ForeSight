@@ -368,9 +368,11 @@ class Sparse4DHead(BaseModule):
         # so it gets supervised like any other intermediate decoder stage.
         # Pads non-temporal slots (num_ti:num_anchor) with initial anchor positions
         # and near-zero cls logits so the sampler treats them as background.
+        # NOTE: do NOT gate this on is_temporal — the cls branch must always
+        # participate in the loss so DDP doesn't see unused parameters on
+        # first-frame batches (which have is_temporal=False).
         if (
             self.temporal_warmup_order
-            and is_temporal
             and w_cls is not None
             and dn_metas is None
         ):
