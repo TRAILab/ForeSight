@@ -325,6 +325,7 @@ class Sparse4DHead(BaseModule):
                 w_anchor = anchor[:, :num_ti]
                 w_anchor_embed = anchor_embed[:, :num_ti]
                 is_temporal = False
+            w_cls, w_qt = None, None
             for i, op in enumerate(self.temporal_warmup_order):
                 if self.warmup_layers[i] is None:
                     continue
@@ -335,12 +336,12 @@ class Sparse4DHead(BaseModule):
                 elif op in ("norm", "ffn"):
                     w_feat = self.warmup_layers[i](w_feat)
                 elif op == "refine":
-                    w_anchor, _, _ = self.warmup_layers[i](
+                    w_anchor, w_cls, w_qt = self.warmup_layers[i](
                         w_feat,
                         w_anchor,
                         w_anchor_embed,
                         time_interval=time_interval,
-                        return_cls=False,
+                        return_cls=True,
                     )
                     w_anchor_embed = self.anchor_encoder(w_anchor)
             if is_temporal:
@@ -363,6 +364,45 @@ class Sparse4DHead(BaseModule):
         prediction = []
         classification = []
         quality = []
+        # If warmup produced a refine prediction on temporal instances, prepend it
+        # so it gets supervised like any other intermediate decoder stage.
+        # Pads non-temporal slots (num_ti:num_anchor) with initial anchor positions
+        # and near-zero cls logits so the sampler treats them as background.
+        if (
+            self.temporal_warmup_order
+            and is_temporal
+            and w_cls is not None
+            and dn_metas is None
+        ):
+            num_ti = self.instance_bank.num_temp_instances
+            num_anchor = self.instance_bank.num_anchor
+            warmup_pred = torch.cat(
+                [w_anchor, anchor[:, num_ti:num_anchor]], dim=1
+            )
+            warmup_cls = torch.cat(
+                [
+                    w_cls,
+                    w_cls.new_full(
+                        [batch_size, num_anchor - num_ti, w_cls.shape[-1]], -10.0
+                    ),
+                ],
+                dim=1,
+            )
+            warmup_qt = (
+                torch.cat(
+                    [
+                        w_qt,
+                        w_qt.new_zeros(batch_size, num_anchor - num_ti, w_qt.shape[-1]),
+                    ],
+                    dim=1,
+                )
+                if w_qt is not None
+                else None
+            )
+            prediction.append(warmup_pred)
+            classification.append(warmup_cls)
+            quality.append(warmup_qt)
+        num_main_decoder_refines = 0
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
                 continue
@@ -407,7 +447,8 @@ class Sparse4DHead(BaseModule):
                 prediction.append(anchor)
                 classification.append(cls)
                 quality.append(qt)
-                if len(prediction) == self.num_single_frame_decoder:
+                num_main_decoder_refines += 1
+                if num_main_decoder_refines == self.num_single_frame_decoder:
                     instance_feature, anchor = self.instance_bank.update(
                         instance_feature, anchor, cls,
                         cached_feature_override=temp_instance_feature,
