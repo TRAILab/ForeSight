@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_bs24_notrainmask',),
+                name='sparsedrive_r50_stage2_4gpu_bs24_occpeval',),
             interval=50)
     ],
 )
@@ -614,7 +614,8 @@ eval_pipeline = [
             'gt_ego_fut_trajs',
             'gt_ego_fut_masks', 
             'gt_ego_fut_cmd',
-            'fut_boxes'
+            'fut_boxes',
+            'fut_boxes_occluded',
         ],
         meta_keys=['token', 'timestamp']
     ),
@@ -665,7 +666,6 @@ data = dict(
         with_seq_flag=True,
         sequences_split_num=2,
         keep_consistent_seq_aug=True,
-        use_gt_mask=False,
     ),
     val=dict(
         **data_basic_config,
@@ -716,6 +716,7 @@ eval_mode = dict(
     with_map=True,
     with_motion=True,
     with_planning=True,
+    with_occlusion=True,
     tracking_threshold=0.2,
     motion_threshhold=0.2,
 )

@@ -9,7 +9,7 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 48
+total_batch_size = 24
 num_gpus = 4
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_nomap_notrainmask',),
+                name='sparsedrive_r50_stage2_4gpu_bs24_occfheval',),
             interval=50)
     ],
 )
@@ -86,7 +86,7 @@ with_quality_estimation = True
 
 task_config = dict(
     with_det=True,
-    with_map=False,
+    with_map=True,
     with_motion_plan=True,
 )
 
@@ -423,6 +423,8 @@ model = dict(
                     "temp_gnn",
                     "gnn",
                     "norm",
+                    "cross_gnn",
+                    "norm",
                     "ffn",                    
                     "norm",
                 ] * 3 +
@@ -612,7 +614,8 @@ eval_pipeline = [
             'gt_ego_fut_trajs',
             'gt_ego_fut_masks', 
             'gt_ego_fut_cmd',
-            'fut_boxes'
+            'fut_boxes',
+            'fut_boxes_occluded',
         ],
         meta_keys=['token', 'timestamp']
     ),
@@ -656,18 +659,17 @@ data = dict(
     workers_per_gpu=6,
     train=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_train.pkl",
+        ann_file=anno_root + "nuscenes_infos_train_occ.pkl",
         pipeline=train_pipeline,
         test_mode=False,
         data_aug_conf=data_aug_conf,
         with_seq_flag=True,
         sequences_split_num=2,
         keep_consistent_seq_aug=True,
-        use_gt_mask=False,
     ),
     val=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_val.pkl",
+        ann_file=anno_root + "nuscenes_infos_val_occ.pkl",
         pipeline=test_pipeline,
         data_aug_conf=data_aug_conf,
         test_mode=True,
@@ -675,7 +677,7 @@ data = dict(
     ),
     test=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_val.pkl",
+        ann_file=anno_root + "nuscenes_infos_val_occ.pkl",
         pipeline=test_pipeline,
         data_aug_conf=data_aug_conf,
         test_mode=True,
@@ -686,7 +688,7 @@ data = dict(
 # ================== training ========================
 optimizer = dict(
     type="AdamW",
-    lr=3e-4,
+    lr=1.5e-4,
     weight_decay=0.001,
     paramwise_cfg=dict(
         custom_keys={
@@ -711,9 +713,10 @@ runner = dict(
 eval_mode = dict(
     with_det=True,
     with_tracking=True,
-    with_map=False,
+    with_map=True,
     with_motion=True,
     with_planning=True,
+    with_occlusion=True,
     tracking_threshold=0.2,
     motion_threshhold=0.2,
 )

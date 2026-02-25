@@ -13,6 +13,7 @@ dist_test/
 vis/
 val/
 lib/
+logs/
 
 *.egg-info
 build/
