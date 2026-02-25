@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_bs24_occfhtraineval',),
+                name='sparsedrive_r50_stage2_4gpu_bs24_nomap_sephead_occfheval',),
             interval=50)
     ],
 )
@@ -86,7 +86,7 @@ with_quality_estimation = True
 
 task_config = dict(
     with_det=True,
-    with_map=True,
+    with_map=False,
     with_motion_plan=True,
 )
 
@@ -146,6 +146,15 @@ model = dict(
                 output_fc=not decouple_attn,
                 in_loops=1,
                 out_loops=4 if decouple_attn else 2,
+            ),
+            temporal_warmup_order=("gnn", "norm", "refine"),
+            warmup_refine_layer=dict(
+                type="SparseBox3DRefinementModule",
+                embed_dims=embed_dims,
+                num_cls=num_classes,
+                refine_yaw=True,
+                with_cls_branch=True,
+                with_quality_estimation=False,
             ),
             num_single_frame_decoder=num_single_frame_decoder,
             operation_order=(
@@ -423,8 +432,6 @@ model = dict(
                     "temp_gnn",
                     "gnn",
                     "norm",
-                    "cross_gnn",
-                    "norm",
                     "ffn",                    
                     "norm",
                 ] * 3 +
@@ -689,7 +696,7 @@ data = dict(
 # ================== training ========================
 optimizer = dict(
     type="AdamW",
-    lr=1.5e-4,
+    lr=3e-4,
     weight_decay=0.001,
     paramwise_cfg=dict(
         custom_keys={
@@ -714,7 +721,7 @@ runner = dict(
 eval_mode = dict(
     with_det=True,
     with_tracking=True,
-    with_map=True,
+    with_map=False,
     with_motion=True,
     with_planning=True,
     with_occlusion=True,
