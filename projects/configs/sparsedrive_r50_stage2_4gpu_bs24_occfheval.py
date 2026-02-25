@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_bs24_evaloccp',),
+                name='sparsedrive_r50_stage2_4gpu_bs24_occfheval',),
             interval=50)
     ],
 )
@@ -659,7 +659,7 @@ data = dict(
     workers_per_gpu=6,
     train=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_train.pkl",
+        ann_file=anno_root + "nuscenes_infos_train_occ.pkl",
         pipeline=train_pipeline,
         test_mode=False,
         data_aug_conf=data_aug_conf,
@@ -669,7 +669,7 @@ data = dict(
     ),
     val=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_val.pkl",
+        ann_file=anno_root + "nuscenes_infos_val_occ.pkl",
         pipeline=test_pipeline,
         data_aug_conf=data_aug_conf,
         test_mode=True,
@@ -677,7 +677,7 @@ data = dict(
     ),
     test=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_val.pkl",
+        ann_file=anno_root + "nuscenes_infos_val_occ.pkl",
         pipeline=test_pipeline,
         data_aug_conf=data_aug_conf,
         test_mode=True,
