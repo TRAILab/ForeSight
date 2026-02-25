@@ -165,7 +165,7 @@ def load_prediction(result_path: str, max_boxes_per_sample: int, box_cls, verbos
     return all_results, meta
 
 
-def load_gt(nusc: NuScenes, eval_split: str, box_cls, verbose: bool = False, seconds: int = 12) -> EvalBoxes:
+def load_gt(nusc: NuScenes, eval_split: str, box_cls, verbose: bool = False, seconds: int = 12, occluded_only: bool = False) -> EvalBoxes:
     """
     Loads ground truth boxes from DB.
     :param nusc: A NuScenes instance.
@@ -265,6 +265,9 @@ def load_gt(nusc: NuScenes, eval_split: str, box_cls, verbose: bool = False, sec
                 else:
                     fut_traj_scence_centric = np.zeros((0,))
 
+                num_pts = sample_annotation['num_lidar_pts'] + sample_annotation['num_radar_pts']
+                if occluded_only and num_pts > 0:
+                    continue
                 sample_boxes.append(
                     box_cls(
                         sample_token=sample_token,
@@ -272,7 +275,7 @@ def load_gt(nusc: NuScenes, eval_split: str, box_cls, verbose: bool = False, sec
                         size=sample_annotation['size'],
                         rotation=sample_annotation['rotation'],
                         velocity=nusc.box_velocity(sample_annotation['token'])[:2],
-                        num_pts=sample_annotation['num_lidar_pts'] + sample_annotation['num_radar_pts'],
+                        num_pts=num_pts,
                         detection_name=detection_name,
                         detection_score=-1.0,  # GT samples do not have a score.
                         attribute_name=attribute_name,

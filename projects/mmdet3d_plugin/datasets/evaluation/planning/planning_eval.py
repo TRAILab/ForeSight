@@ -67,8 +67,11 @@ class PlanningMetric():
     def reset(self):
         self.obj_col = torch.zeros(self.n_future)
         self.obj_box_col = torch.zeros(self.n_future)
+        self.obj_box_col_occluded = torch.zeros(self.n_future)
+        self.obj_box_col_all = torch.zeros(self.n_future)
         self.L2 = torch.zeros(self.n_future)
         self.total = torch.tensor(0)
+        self.total_occluded = torch.tensor(0)
 
     def evaluate_single_coll(self, traj, fut_boxes):
         n_future = traj.shape[0]
@@ -111,7 +114,7 @@ class PlanningMetric():
         '''
         return torch.sqrt((((trajs[:, :, :2] - gt_trajs[:, :, :2]) ** 2) * gt_trajs_mask).sum(dim=-1)) 
 
-    def update(self, trajs, gt_trajs, gt_trajs_mask, fut_boxes):
+    def update(self, trajs, gt_trajs, gt_trajs_mask, fut_boxes, fut_boxes_occluded=None):
         assert trajs.shape == gt_trajs.shape
         trajs[..., 0] = - trajs[..., 0]
         gt_trajs[..., 0] = - gt_trajs[..., 0]
@@ -121,31 +124,59 @@ class PlanningMetric():
         self.obj_col += obj_coll_sum
         self.obj_box_col += obj_box_coll_sum
         self.L2 += L2.sum(dim=0)
-        self.total +=len(trajs)
+        self.total += len(trajs)
+
+        if fut_boxes_occluded is not None:
+            _, obj_box_coll_occ_sum = self.evaluate_coll(trajs[:,:,:2], gt_trajs[:,:,:2], fut_boxes_occluded)
+            self.obj_box_col_occluded += obj_box_coll_occ_sum
+            has_occluded = any(boxes[0].shape[0] > 0 for boxes in fut_boxes_occluded)
+            self.total_occluded += int(has_occluded)
+
+            merged_boxes = [
+                [torch.cat([fut_boxes[t][0], fut_boxes_occluded[t][0]], dim=0)]
+                for t in range(len(fut_boxes))
+            ]
+            _, obj_box_coll_all_sum = self.evaluate_coll(trajs[:,:,:2], gt_trajs[:,:,:2], merged_boxes)
+            self.obj_box_col_all += obj_box_coll_all_sum
 
     def compute(self):
-        return {
+        occ_denom = self.total_occluded if self.total_occluded > 0 else torch.tensor(1)
+        results = {
             'obj_col': self.obj_col / self.total,
             'obj_box_col': self.obj_box_col / self.total,
-            'L2' : self.L2 / self.total
+            'L2': self.L2 / self.total,
         }
+        if self.total_occluded > 0:
+            results['occluded/obj_box_col'] = self.obj_box_col_occluded / occ_denom
+            results['all/obj_box_col'] = self.obj_box_col_all / self.total
+        return results
 
 
-def planning_eval(results, eval_config, logger):
+def planning_eval(results, eval_config, logger, with_occlusion=False):
     dataset = build_dataset(eval_config)
     dataloader = build_dataloader(
             dataset, samples_per_gpu=1, workers_per_gpu=1, shuffle=False, dist=False)
     planning_metrics = PlanningMetric()
+    occluded_samples = 0
+    occluded_box_timesteps = 0
     for i, data in enumerate(tqdm(dataloader)):
         sdc_planning = data['gt_ego_fut_trajs'].cumsum(dim=-2).unsqueeze(1)
         sdc_planning_mask = data['gt_ego_fut_masks'].unsqueeze(-1).repeat(1, 1, 2).unsqueeze(1)
         command = data['gt_ego_fut_cmd'].argmax(dim=-1).item()
         fut_boxes = data['fut_boxes']
+        fut_boxes_occluded = data.get('fut_boxes_occluded', None) if with_occlusion else None
+        if fut_boxes_occluded is not None:
+            sample_occ_count = sum(boxes[0].shape[0] for boxes in fut_boxes_occluded)
+            if sample_occ_count > 0:
+                occluded_samples += 1
+            occluded_box_timesteps += sample_occ_count
         if not sdc_planning_mask.all(): ## for incomplete gt, we do not count this sample
             continue
         res = results[i]
         pred_sdc_traj = res['img_bbox']['final_planning'].unsqueeze(0)
-        planning_metrics.update(pred_sdc_traj[:, :6, :2], sdc_planning[0,:, :6, :2], sdc_planning_mask[0,:, :6, :2], fut_boxes)
+        planning_metrics.update(pred_sdc_traj[:, :6, :2], sdc_planning[0,:, :6, :2], sdc_planning_mask[0,:, :6, :2], fut_boxes, fut_boxes_occluded)
+    if with_occlusion:
+        print(f'[Occluded Planning] Samples with occluded future boxes: {occluded_samples} | Total occluded box-timestep instances: {occluded_box_timesteps}')
        
     planning_results = planning_metrics.compute()
     planning_metrics.reset()
