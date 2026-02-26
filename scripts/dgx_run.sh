@@ -20,6 +20,7 @@ CMD=${@:-bash}
 echo "Running: $CMD"
 singularity exec --nv -e --pwd /workspace/ForeSight/ \
     --env="WANDB_API_KEY=$WANDB_API_KEY" \
+    --env="PYTHONPYCACHEPREFIX=/tmp/pycache" \
     --bind=$CODE_DIR:/workspace/ForeSight/ \
     --bind=$DATA_DIR:/workspace/ForeSight/data/nuscenes \
     docker/foresight.sif $CMD
