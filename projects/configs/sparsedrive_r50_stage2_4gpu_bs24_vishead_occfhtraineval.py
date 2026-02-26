@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_bs24_vishead_occptraineval',),
+                name='sparsedrive_r50_stage2_4gpu_bs24_vishead_occfhtraineval',),
             interval=50)
     ],
 )
