@@ -88,6 +88,10 @@ class NuScenesSparse4DAdaptor(object):
             input_dict["gt_labels_3d"] = DC(
                 to_tensor(input_dict["gt_labels_3d"]).long()
             )
+        if "gt_visibility" in input_dict:
+            input_dict["gt_visibility"] = DC(
+                to_tensor(input_dict["gt_visibility"]).float()
+            )
 
         imgs = [img.transpose(2, 0, 1) for img in input_dict["img"]]
         imgs = np.ascontiguousarray(np.stack(imgs, axis=0))
