@@ -39,6 +39,7 @@ class SparseBox3DDecoder(object):
         box_preds,
         instance_id=None,
         quality=None,
+        visibility=None,
         output_idx=-1,
     ):
         squeeze_cls = instance_id is not None
@@ -59,6 +60,8 @@ class SparseBox3DDecoder(object):
         if self.score_threshold is not None:
             mask = cls_scores >= self.score_threshold
 
+        if visibility is not None and visibility[output_idx] is None:
+            visibility = None
         if quality[output_idx] is None:
             quality = None
         if quality is not None:
@@ -104,4 +107,9 @@ class SparseBox3DDecoder(object):
                 if self.score_threshold is not None:
                     ids = ids[mask[i]]
                 output[-1]["instance_ids"] = ids
+            if visibility is not None:
+                vis_i = visibility[output_idx][i, indices[i] // num_cls, 0].sigmoid()
+                if self.score_threshold is not None:
+                    vis_i = vis_i[mask[i]]
+                output[-1]["visibility_scores"] = vis_i.cpu()
         return output

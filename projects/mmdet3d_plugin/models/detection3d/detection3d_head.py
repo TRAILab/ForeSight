@@ -40,11 +40,13 @@ class Sparse4DHead(BaseModule):
         temp_graph_model: dict = None,
         loss_cls: dict = None,
         loss_reg: dict = None,
+        loss_visibility: dict = None,
         decoder: dict = None,
         sampler: dict = None,
         gt_cls_key: str = "gt_labels_3d",
         gt_reg_key: str = "gt_bboxes_3d",
         gt_id_key: str = "instance_id",
+        gt_visibility_key: str = "gt_visibility",
         with_instance_id: bool = True,
         task_prefix: str = 'det',
         reg_weights: List = None,
@@ -93,12 +95,14 @@ class Sparse4DHead(BaseModule):
                 return None
             return build_from_cfg(cfg, registry)
 
+        self.gt_visibility_key = gt_visibility_key
         self.instance_bank = build(instance_bank, PLUGIN_LAYERS)
         self.anchor_encoder = build(anchor_encoder, POSITIONAL_ENCODING)
         self.sampler = build(sampler, BBOX_SAMPLERS)
         self.decoder = build(decoder, BBOX_CODERS)
         self.loss_cls = build(loss_cls, LOSSES)
         self.loss_reg = build(loss_reg, LOSSES)
+        self.loss_visibility = build(loss_visibility, LOSSES) if loss_visibility else None
         self.op_config_map = {
             "temp_gnn": [temp_graph_model, ATTENTION],
             "gnn": [graph_model, ATTENTION],
@@ -259,6 +263,7 @@ class Sparse4DHead(BaseModule):
         prediction = []
         classification = []
         quality = []
+        visibility = []
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
                 continue
@@ -293,7 +298,7 @@ class Sparse4DHead(BaseModule):
                     metas,
                 )
             elif op == "refine":
-                anchor, cls, qt = self.layers[i](
+                anchor, cls, qt, vis = self.layers[i](
                     instance_feature,
                     anchor,
                     anchor_embed,
@@ -303,6 +308,7 @@ class Sparse4DHead(BaseModule):
                 prediction.append(anchor)
                 classification.append(cls)
                 quality.append(qt)
+                visibility.append(vis)
                 if len(prediction) == self.num_single_frame_decoder:
                     instance_feature, anchor = self.instance_bank.update(
                         instance_feature, anchor, cls
@@ -354,6 +360,10 @@ class Sparse4DHead(BaseModule):
                 x[:, :num_free_instance] if x is not None else None
                 for x in quality
             ]
+            visibility = [
+                x[:, :num_free_instance] if x is not None else None
+                for x in visibility
+            ]
             output.update(
                 {
                     "dn_prediction": dn_prediction,
@@ -394,6 +404,7 @@ class Sparse4DHead(BaseModule):
                 "classification": classification,
                 "prediction": prediction,
                 "quality": quality,
+                "visibility": visibility,
                 "instance_feature": instance_feature,
                 "anchor_embed": anchor_embed,
             }
@@ -416,9 +427,10 @@ class Sparse4DHead(BaseModule):
         cls_scores = model_outs["classification"]
         reg_preds = model_outs["prediction"]
         quality = model_outs["quality"]
+        vis_scores = model_outs.get("visibility", [None] * len(cls_scores))
         output = {}
-        for decoder_idx, (cls, reg, qt) in enumerate(
-            zip(cls_scores, reg_preds, quality)
+        for decoder_idx, (cls, reg, qt, vis) in enumerate(
+            zip(cls_scores, reg_preds, quality, vis_scores)
         ):
             reg = reg[..., : len(self.reg_weights)]
             cls_target, reg_target, reg_weights = self.sampler.sample(
@@ -470,6 +482,38 @@ class Sparse4DHead(BaseModule):
 
             output[f"{self.task_prefix}_loss_cls_{decoder_idx}"] = cls_loss
             output.update(reg_loss)
+
+            # ---- visibility loss (only on matched / positive anchors) ----
+            if (
+                vis is not None
+                and self.loss_visibility is not None
+                and self.gt_visibility_key in data
+            ):
+                gt_vis_list = data[self.gt_visibility_key]
+                bs_v, num_pred_v = vis.shape[:2]
+                vis_target = vis.new_zeros(bs_v, num_pred_v)
+                for b_i, (pred_idx, target_idx) in enumerate(
+                    self.sampler.indices
+                ):
+                    if (
+                        pred_idx is not None
+                        and len(pred_idx) > 0
+                        and len(gt_vis_list[b_i]) > 0
+                    ):
+                        vis_target[b_i, pred_idx] = (
+                            gt_vis_list[b_i]
+                            .to(vis.device)
+                            .float()[target_idx]
+                        )
+                matched = mask_valid.reshape(-1)
+                vis_loss = self.loss_visibility(
+                    vis.squeeze(-1).flatten(end_dim=1)[matched],
+                    vis_target.flatten(end_dim=1)[matched],
+                    avg_factor=num_pos,
+                )
+                output[
+                    f"{self.task_prefix}_loss_visibility_{decoder_idx}"
+                ] = vis_loss
 
         if "dn_prediction" not in model_outs:
             return output
@@ -554,5 +598,6 @@ class Sparse4DHead(BaseModule):
             model_outs["prediction"],
             model_outs.get("instance_id"),
             model_outs.get("quality"),
+            model_outs.get("visibility"),
             output_idx=output_idx,
         )
