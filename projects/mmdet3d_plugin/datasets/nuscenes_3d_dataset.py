@@ -914,6 +914,45 @@ class NuScenes3DDataset(Dataset):
 
         return {f'occluded/{k}': v for k, v in metrics.items()}
 
+    def _evaluate_single_det_visible(self, result_path, logger=None, result_name='img_bbox'):
+        """Evaluate detection on visible objects, ignoring predictions that match occluded GT.
+
+        This gives a fair vis/mAP comparison between a visible-only baseline and
+        a model trained to also predict occluded objects: detections of occluded
+        objects are not penalised as false positives.
+        """
+        from nuscenes import NuScenes
+        from .evaluation.det.occluded_det_eval import VisibleDetectionEval
+
+        output_dir = osp.join(osp.dirname(result_path), 'visible_det')
+        nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
+        eval_set_map = {
+            'v1.0-mini': 'mini_val',
+            'v1.0-trainval': 'val',
+        }
+        nusc_eval = VisibleDetectionEval(
+            nusc,
+            config=self.det3d_eval_configs,
+            result_path=result_path,
+            eval_set=eval_set_map[self.version],
+            output_dir=output_dir,
+            verbose=False,
+        )
+        nusc_eval.main(render_curves=False)
+
+        metrics = mmcv.load(osp.join(output_dir, 'metrics_summary.json'))
+        detail = {}
+        for name in self.CLASSES:
+            for k, v in metrics['label_aps'].get(name, {}).items():
+                detail[f'vis/{name}_AP_dist_{k}'] = float('{:.4f}'.format(v))
+            for k, v in metrics['label_tp_errors'].get(name, {}).items():
+                detail[f'vis/{name}_{k}'] = float('{:.4f}'.format(v))
+        for k, v in metrics['tp_errors'].items():
+            detail[f'vis/{self.ErrNameMapping[k]}'] = float('{:.4f}'.format(v))
+        detail['vis/NDS'] = metrics['nd_score']
+        detail['vis/mAP'] = metrics['mean_ap']
+        return detail
+
     def _evaluate_single_det_all(self, result_path, logger=None, result_name='img_bbox'):
         """Evaluate detection on all objects (visible + occluded)."""
         from nuscenes import NuScenes
@@ -1160,6 +1199,9 @@ class NuScenes3DDataset(Dataset):
             if detection_result_files is not None:
                 if isinstance(detection_result_files, dict):
                     for name in result_names:
+                        vis_det_dict = self._evaluate_single_det_visible(
+                            detection_result_files[name], logger=logger, result_name=name)
+                        results_dict.update(vis_det_dict)
                         occ_det_dict = self._evaluate_single_det_occluded(
                             detection_result_files[name], logger=logger, result_name=name)
                         results_dict.update(occ_det_dict)
@@ -1167,6 +1209,9 @@ class NuScenes3DDataset(Dataset):
                             detection_result_files[name], logger=logger, result_name=name)
                         results_dict.update(all_det_dict)
                 elif isinstance(detection_result_files, str):
+                    vis_det_dict = self._evaluate_single_det_visible(
+                        detection_result_files, logger=logger)
+                    results_dict.update(vis_det_dict)
                     occ_det_dict = self._evaluate_single_det_occluded(
                         detection_result_files, logger=logger)
                     results_dict.update(occ_det_dict)
