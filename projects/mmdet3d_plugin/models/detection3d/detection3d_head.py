@@ -593,11 +593,17 @@ class Sparse4DHead(BaseModule):
 
     @force_fp32(apply_to=("model_outs"))
     def post_process(self, model_outs, output_idx=-1):
+        vis_list = model_outs.get("visibility")
+        # Only pass visibility to decode() when the head is active (not all-None).
+        # This keeps backward-compatibility with decoders that lack the param.
+        vis_kwarg = {}
+        if vis_list is not None and any(v is not None for v in vis_list):
+            vis_kwarg = {"visibility": vis_list}
         return self.decoder.decode(
             model_outs["classification"],
             model_outs["prediction"],
-            model_outs.get("instance_id"),
-            model_outs.get("quality"),
-            model_outs.get("visibility"),
+            instance_id=model_outs.get("instance_id"),
+            quality=model_outs.get("quality"),
             output_idx=output_idx,
+            **vis_kwarg,
         )
