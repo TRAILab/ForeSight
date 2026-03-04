@@ -47,3 +47,7 @@ sbatch scripts/dgx_run.sh bash ./tools/dist_train.sh projects/configs/sparsedriv
 
 # Visualize
 ./scripts/apollo_run.sh scripts/visualize.sh
+
+# Data generation
+sbatch tools/dgx_run.sh python unitraj/inference.py --config-name=config_v1inference_3class
+./scripts/local_run.sh python tools/data_converter/nuscenes_occlusion_converter.py convert --input data/infos/nuscenes_infos_val.pkl --output data/infos/nuscenes_infos_val_occ.pkl --predictions data/occlusions/nuscenes_predictions_trainval.npz
