@@ -9,12 +9,12 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 24
-num_gpus = 4
+total_batch_size = 64
+num_gpus = 8
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
-num_epochs = 10
-checkpoint_epoch_interval = 10
+num_epochs = 100
+checkpoint_epoch_interval = 20
 
 checkpoint_config = dict(
     interval=num_iters_per_epoch * checkpoint_epoch_interval
@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_bs24_occfheval',),
+                name='sparsedrive_r50_stage1_8gpu_noflash_nomap_dn_rotaug',),
             interval=50)
     ],
 )
@@ -86,8 +86,8 @@ with_quality_estimation = True
 
 task_config = dict(
     with_det=True,
-    with_map=True,
-    with_motion_plan=True,
+    with_map=False,
+    with_motion_plan=False,
 )
 
 model = dict(
@@ -170,7 +170,7 @@ model = dict(
                 * (num_decoder - num_single_frame_decoder)
             )[2:],
             temp_graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -179,7 +179,7 @@ model = dict(
             if temporal
             else None,
             graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -229,8 +229,8 @@ model = dict(
             ),
             sampler=dict(
                 type="SparseBox3DTarget",
-                num_dn_groups=0,
-                num_temp_dn_groups=0,
+                num_dn_groups=5,
+                num_temp_dn_groups=3,
                 dn_noise_scale=[2.0] * 3 + [0.5] * 7,
                 max_dn_gt=32,
                 add_neg_dn=True,
@@ -279,7 +279,7 @@ model = dict(
                 embed_dims=embed_dims,
                 anchor="data/kmeans/kmeans_map_100.npy",
                 anchor_handler=dict(type="SparsePoint3DKeyPointsGenerator"),
-                num_temp_instances=33 if temporal_map else -1,
+                num_temp_instances=0 if temporal_map else -1,
                 confidence_decay=0.6,
                 feat_grad=True,
             ),
@@ -311,7 +311,7 @@ model = dict(
                 * (num_decoder - num_single_frame_decoder_map)
             )[:],
             temp_graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn_map else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -320,7 +320,7 @@ model = dict(
             if temporal_map
             else None,
             graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn_map else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -423,8 +423,6 @@ model = dict(
                     "temp_gnn",
                     "gnn",
                     "norm",
-                    "cross_gnn",
-                    "norm",
                     "ffn",                    
                     "norm",
                 ] * 3 +
@@ -440,14 +438,14 @@ model = dict(
                 dropout=drop_out,
             ),
             graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn_motion else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
                 dropout=drop_out,
             ),
             cross_graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims,
                 num_heads=num_groups,
                 batch_first=True,
@@ -614,8 +612,7 @@ eval_pipeline = [
             'gt_ego_fut_trajs',
             'gt_ego_fut_masks', 
             'gt_ego_fut_cmd',
-            'fut_boxes',
-            'fut_boxes_occluded',
+            'fut_boxes'
         ],
         meta_keys=['token', 'timestamp']
     ),
@@ -639,7 +636,7 @@ data_basic_config = dict(
 )
 eval_config = dict(
     **data_basic_config,
-    ann_file=anno_root + 'nuscenes_infos_val_occ.pkl',
+    ann_file=anno_root + 'nuscenes_infos_val.pkl',
     pipeline=eval_pipeline,
     test_mode=True,
 )
@@ -651,7 +648,7 @@ data_aug_conf = {
     "H": 900,
     "W": 1600,
     "rand_flip": True,
-    "rot3d_range": [0, 0],
+    "rot3d_range": [-0.3925, 0.3925],
 }
 
 data = dict(
@@ -659,7 +656,7 @@ data = dict(
     workers_per_gpu=6,
     train=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_train_occ.pkl",
+        ann_file=anno_root + "nuscenes_infos_train.pkl",
         pipeline=train_pipeline,
         test_mode=False,
         data_aug_conf=data_aug_conf,
@@ -669,7 +666,7 @@ data = dict(
     ),
     val=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_val_occ.pkl",
+        ann_file=anno_root + "nuscenes_infos_val.pkl",
         pipeline=test_pipeline,
         data_aug_conf=data_aug_conf,
         test_mode=True,
@@ -677,7 +674,7 @@ data = dict(
     ),
     test=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_val_occ.pkl",
+        ann_file=anno_root + "nuscenes_infos_val.pkl",
         pipeline=test_pipeline,
         data_aug_conf=data_aug_conf,
         test_mode=True,
@@ -688,11 +685,11 @@ data = dict(
 # ================== training ========================
 optimizer = dict(
     type="AdamW",
-    lr=1.5e-4,
+    lr=4e-4,
     weight_decay=0.001,
     paramwise_cfg=dict(
         custom_keys={
-            "img_backbone": dict(lr_mult=0.1),
+            "img_backbone": dict(lr_mult=0.5),
         }
     ),
 )
@@ -713,10 +710,9 @@ runner = dict(
 eval_mode = dict(
     with_det=True,
     with_tracking=True,
-    with_map=True,
-    with_motion=True,
-    with_planning=True,
-    with_occlusion=True,
+    with_map=False,
+    with_motion=False,
+    with_planning=False,
     tracking_threshold=0.2,
     motion_threshhold=0.2,
 )
@@ -724,5 +720,3 @@ evaluation = dict(
     interval=num_iters_per_epoch*checkpoint_epoch_interval,
     eval_mode=eval_mode,
 )
-# ================== pretrained model ========================
-load_from = 'ckpt/sparsedrive_stage1.pth'

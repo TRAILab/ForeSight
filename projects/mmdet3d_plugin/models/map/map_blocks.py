@@ -87,7 +87,7 @@ class SparsePoint3DRefinementModule(BaseModule):
         else:
             cls = None
         qt = None
-        return output, cls, qt
+        return output, cls, qt, None
 
 
 @PLUGIN_LAYERS.register_module()

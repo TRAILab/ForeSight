@@ -85,6 +85,7 @@ class SparseBox3DRefinementModule(BaseModule):
         refine_yaw=False,
         with_cls_branch=True,
         with_quality_estimation=False,
+        with_visibility_estimation=False,
     ):
         super(SparseBox3DRefinementModule, self).__init__()
         self.embed_dims = embed_dims
@@ -114,11 +115,20 @@ class SparseBox3DRefinementModule(BaseModule):
                 *linear_relu_ln(embed_dims, 1, 2),
                 Linear(self.embed_dims, 2),
             )
+        self.with_visibility_estimation = with_visibility_estimation
+        if with_visibility_estimation:
+            self.visibility_layers = nn.Sequential(
+                *linear_relu_ln(embed_dims, 1, 2),
+                Linear(self.embed_dims, 1),
+            )
 
     def init_weight(self):
         if self.with_cls_branch:
             bias_init = bias_init_with_prob(0.01)
             nn.init.constant_(self.cls_layers[-1].bias, bias_init)
+        if self.with_visibility_estimation:
+            # Neutral prior — model starts with no bias toward visible/occluded
+            nn.init.constant_(self.visibility_layers[-1].bias, 0.0)
 
     def forward(
         self,
@@ -153,7 +163,12 @@ class SparseBox3DRefinementModule(BaseModule):
             quality = self.quality_layers(feature)
         else:
             quality = None
-        return output, cls, quality
+        if return_cls and self.with_visibility_estimation:
+            # (bs, N, 1) — raw logit; 1 = sensor-visible, 0 = occluded
+            visibility = self.visibility_layers(instance_feature)
+        else:
+            visibility = None
+        return output, cls, quality, visibility
 
 
 @PLUGIN_LAYERS.register_module()

@@ -86,6 +86,7 @@ class NuScenes3DDataset(Dataset):
         map_classes=None,
         load_interval=1,
         with_velocity=True,
+        with_visibility=True,
         modality=None,
         test_mode=False,
         det3d_eval_version="detection_cvpr_2019",
@@ -123,6 +124,7 @@ class NuScenes3DDataset(Dataset):
             self.pipeline = Compose(pipeline)
 
         self.with_velocity = with_velocity
+        self.with_visibility = with_visibility
         self.det3d_eval_version = det3d_eval_version
         self.det3d_eval_configs = det_configs(self.det3d_eval_version)
         self.det3d_eval_configs.class_names = list(self.det3d_eval_configs.class_range.keys())
@@ -388,10 +390,14 @@ class NuScenes3DDataset(Dataset):
             gt_velocity[nan_mask] = [0.0, 0.0]
             gt_bboxes_3d = np.concatenate([gt_bboxes_3d, gt_velocity], axis=-1)
 
+        if self.with_visibility:
+            gt_visibility = (info["num_lidar_pts"][mask] > 0).astype(np.float32)
+
         anns_results = dict(
             gt_bboxes_3d=gt_bboxes_3d,
             gt_labels_3d=gt_labels_3d,
             gt_names=gt_names_3d,
+            gt_visibility=gt_visibility,
         )
         if "instance_inds" in info:
             instance_inds = np.array(info["instance_inds"], dtype=np.int)[mask]
@@ -908,6 +914,45 @@ class NuScenes3DDataset(Dataset):
 
         return {f'occluded/{k}': v for k, v in metrics.items()}
 
+    def _evaluate_single_det_visible(self, result_path, logger=None, result_name='img_bbox'):
+        """Evaluate detection on visible objects, ignoring predictions that match occluded GT.
+
+        This gives a fair vis/mAP comparison between a visible-only baseline and
+        a model trained to also predict occluded objects: detections of occluded
+        objects are not penalised as false positives.
+        """
+        from nuscenes import NuScenes
+        from .evaluation.det.occluded_det_eval import VisibleDetectionEval
+
+        output_dir = osp.join(osp.dirname(result_path), 'visible_det')
+        nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
+        eval_set_map = {
+            'v1.0-mini': 'mini_val',
+            'v1.0-trainval': 'val',
+        }
+        nusc_eval = VisibleDetectionEval(
+            nusc,
+            config=self.det3d_eval_configs,
+            result_path=result_path,
+            eval_set=eval_set_map[self.version],
+            output_dir=output_dir,
+            verbose=False,
+        )
+        nusc_eval.main(render_curves=False)
+
+        metrics = mmcv.load(osp.join(output_dir, 'metrics_summary.json'))
+        detail = {}
+        for name in self.CLASSES:
+            for k, v in metrics['label_aps'].get(name, {}).items():
+                detail[f'vis/{name}_AP_dist_{k}'] = float('{:.4f}'.format(v))
+            for k, v in metrics['label_tp_errors'].get(name, {}).items():
+                detail[f'vis/{name}_{k}'] = float('{:.4f}'.format(v))
+        for k, v in metrics['tp_errors'].items():
+            detail[f'vis/{self.ErrNameMapping[k]}'] = float('{:.4f}'.format(v))
+        detail['vis/NDS'] = metrics['nd_score']
+        detail['vis/mAP'] = metrics['mean_ap']
+        return detail
+
     def _evaluate_single_det_all(self, result_path, logger=None, result_name='img_bbox'):
         """Evaluate detection on all objects (visible + occluded)."""
         from nuscenes import NuScenes
@@ -978,6 +1023,107 @@ class NuScenes3DDataset(Dataset):
 
         return {f'all/{k}': v for k, v in metrics.items()}
 
+    def _evaluate_visibility_accuracy(self, results):
+        """Evaluate the visibility head calibration on matched GT boxes.
+
+        For each GT box (visible or occluded) we find the closest same-class
+        prediction within MATCH_DIST metres (BEV).  We then compare the
+        prediction's sigmoid visibility score to the GT sensor-visibility flag
+        (num_lidar_pts > 0).
+
+        Returned metrics
+        ----------------
+        visibility/accuracy          : fraction correct at 0.5 threshold
+        visibility/auroc             : area under the ROC curve
+        visibility/accuracy_visible  : accuracy on visible-GT-matched pairs
+        visibility/accuracy_occluded : accuracy on occluded-GT-matched pairs
+        visibility/n_matched         : total matched pairs across the val set
+        visibility/n_visible         : matched pairs where GT is visible
+        visibility/n_occluded        : matched pairs where GT is occluded
+        """
+        MATCH_DIST = 4.0  # BEV centre-distance threshold in metres
+
+        all_scores = []   # predicted visibility scores (sigmoid)
+        all_targets = []  # GT sensor-visibility (0.0 / 1.0)
+
+        for i, result in enumerate(results):
+            det = result.get('img_bbox', result)
+            if 'visibility_scores' not in det:
+                return {}   # head not enabled — skip entirely
+
+            vis_scores  = det['visibility_scores'].numpy()   # (N,)
+            boxes       = det['boxes_3d'].numpy()            # (N, ≥2)
+            pred_labels = det['labels_3d'].numpy()           # (N,)
+
+            info     = self.data_infos[i]
+            gt_boxes = info['gt_boxes']    # (M, 7) lidar frame
+            gt_names = info['gt_names']    # (M,)
+
+            if 'num_lidar_pts' in info:
+                gt_vis = (info['num_lidar_pts'] > 0).astype(np.float32)
+            elif 'valid_flag' in info:
+                gt_vis = info['valid_flag'].astype(np.float32)
+            else:
+                continue
+
+            if len(gt_boxes) == 0 or len(boxes) == 0:
+                continue
+
+            pred_centers = boxes[:, :2]    # (N, 2) BEV
+            gt_centers   = gt_boxes[:, :2] # (M, 2) BEV
+
+            for gi in range(len(gt_names)):
+                gt_cls = gt_names[gi]
+                if gt_cls not in self.CLASSES:
+                    continue
+                gt_label = self.CLASSES.index(gt_cls)
+
+                cls_idx = np.where(pred_labels == gt_label)[0]
+                if len(cls_idx) == 0:
+                    continue
+
+                dists   = np.linalg.norm(pred_centers[cls_idx] - gt_centers[gi], axis=1)
+                nearest = dists.argmin()
+                if dists[nearest] <= MATCH_DIST:
+                    all_scores.append(float(vis_scores[cls_idx[nearest]]))
+                    all_targets.append(float(gt_vis[gi]))
+
+        if len(all_targets) < 2:
+            return {}
+
+        scores  = np.array(all_scores,  dtype=np.float64)
+        targets = np.array(all_targets, dtype=np.float64)
+        preds   = (scores > 0.5).astype(np.float64)
+
+        accuracy = float((preds == targets).mean())
+
+        # AUROC via trapezoidal rule (no external dependency)
+        pos = targets.sum()
+        neg = len(targets) - pos
+        if pos > 0 and neg > 0:
+            order    = np.argsort(scores)[::-1]
+            t_sorted = targets[order]
+            tprs = np.concatenate([[0.0], np.cumsum(t_sorted == 1) / pos, [1.0]])
+            fprs = np.concatenate([[0.0], np.cumsum(t_sorted == 0) / neg, [1.0]])
+            auroc = float(np.trapz(tprs, fprs))
+        else:
+            auroc = float('nan')
+
+        vis_mask = targets == 1.0
+        occ_mask = targets == 0.0
+        acc_vis = float((preds[vis_mask] == targets[vis_mask]).mean()) if vis_mask.any() else float('nan')
+        acc_occ = float((preds[occ_mask] == targets[occ_mask]).mean()) if occ_mask.any() else float('nan')
+
+        return {
+            'visibility/accuracy':          accuracy,
+            'visibility/auroc':             auroc,
+            'visibility/accuracy_visible':  acc_vis,
+            'visibility/accuracy_occluded': acc_occ,
+            'visibility/n_matched':         int(len(targets)),
+            'visibility/n_visible':         int(vis_mask.sum()),
+            'visibility/n_occluded':        int(occ_mask.sum()),
+        }
+
     def evaluate(
         self,
         results,
@@ -1025,6 +1171,9 @@ class NuScenes3DDataset(Dataset):
                 if tmp_dir is not None:
                     tmp_dir.cleanup()
 
+            vis_metrics = self._evaluate_visibility_accuracy(results)
+            results_dict.update(vis_metrics)
+
         if eval_mode['with_map']:
             from .evaluation.map.vector_eval import VectorEvaluate
             self.map_evaluator = VectorEvaluate(self.eval_config)
@@ -1050,6 +1199,9 @@ class NuScenes3DDataset(Dataset):
             if detection_result_files is not None:
                 if isinstance(detection_result_files, dict):
                     for name in result_names:
+                        vis_det_dict = self._evaluate_single_det_visible(
+                            detection_result_files[name], logger=logger, result_name=name)
+                        results_dict.update(vis_det_dict)
                         occ_det_dict = self._evaluate_single_det_occluded(
                             detection_result_files[name], logger=logger, result_name=name)
                         results_dict.update(occ_det_dict)
@@ -1057,6 +1209,9 @@ class NuScenes3DDataset(Dataset):
                             detection_result_files[name], logger=logger, result_name=name)
                         results_dict.update(all_det_dict)
                 elif isinstance(detection_result_files, str):
+                    vis_det_dict = self._evaluate_single_det_visible(
+                        detection_result_files, logger=logger)
+                    results_dict.update(vis_det_dict)
                     occ_det_dict = self._evaluate_single_det_occluded(
                         detection_result_files, logger=logger)
                     results_dict.update(occ_det_dict)
@@ -1144,6 +1299,21 @@ class NuScenes3DDataset(Dataset):
             metric_str += f'ade= {results_dict["all/car_min_ade_err"]:.4f} / {results_dict["all/pedestrian_min_ade_err"]:.4f}\n'
             metric_str += f'fde= {results_dict["all/car_min_fde_err"]:.4f} / {results_dict["all/pedestrian_min_fde_err"]:.4f}\n'
             metric_str += f'mr= {results_dict["all/car_miss_rate_err"]:.4f} / {results_dict["all/pedestrian_miss_rate_err"]:.4f}\n\n'
+
+        if 'visibility/accuracy' in results_dict:
+            rd = results_dict
+            metric_str += f'[Visibility Head]\n'
+            metric_str += (
+                f'accuracy= {rd["visibility/accuracy"]:.4f}  '
+                f'(visible={rd["visibility/accuracy_visible"]:.4f}, '
+                f'occluded={rd["visibility/accuracy_occluded"]:.4f})\n'
+            )
+            metric_str += f'auroc= {rd["visibility/auroc"]:.4f}\n'
+            metric_str += (
+                f'matched: {rd["visibility/n_matched"]} '
+                f'(visible={rd["visibility/n_visible"]}, '
+                f'occluded={rd["visibility/n_occluded"]})\n\n'
+            )
 
         if "L2" in results_dict:
             metric_str += f'obj_box_col: {(results_dict["obj_box_col"]*100):.3f}%\n'
