@@ -145,7 +145,8 @@ class InstanceBank(nn.Module):
             time_interval,
         )
 
-    def update(self, instance_feature, anchor, confidence):
+    def update(self, instance_feature, anchor, confidence,
+               cached_feature_override=None, cached_anchor_override=None):
         if self.cached_feature is None:
             return instance_feature, anchor
 
@@ -158,16 +159,21 @@ class InstanceBank(nn.Module):
             anchor = anchor[:, : self.num_anchor]
             confidence = confidence[:, : self.num_anchor]
 
+        cached_feat = cached_feature_override if cached_feature_override is not None \
+            else self.cached_feature
+        cached_anch = cached_anchor_override if cached_anchor_override is not None \
+            else self.cached_anchor
+
         N = self.num_anchor - self.num_temp_instances
         confidence = confidence.max(dim=-1).values
         _, (selected_feature, selected_anchor) = topk(
             confidence, N, instance_feature, anchor
         )
         selected_feature = torch.cat(
-            [self.cached_feature, selected_feature], dim=1
+            [cached_feat, selected_feature], dim=1
         )
         selected_anchor = torch.cat(
-            [self.cached_anchor, selected_anchor], dim=1
+            [cached_anch, selected_anchor], dim=1
         )
         instance_feature = torch.where(
             self.mask[:, None, None], selected_feature, instance_feature
