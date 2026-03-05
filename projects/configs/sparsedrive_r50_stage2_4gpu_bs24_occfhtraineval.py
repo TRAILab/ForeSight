@@ -639,7 +639,7 @@ data_basic_config = dict(
 )
 eval_config = dict(
     **data_basic_config,
-    ann_file=anno_root + 'nuscenes_infos_val_occ.pkl',
+    ann_file=anno_root + 'nuscenes_infos_val_cvocc.pkl',
     pipeline=eval_pipeline,
     test_mode=True,
 )
@@ -659,7 +659,7 @@ data = dict(
     workers_per_gpu=6,
     train=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_train_occ.pkl",
+        ann_file=anno_root + "nuscenes_infos_train_cvocc.pkl",
         pipeline=train_pipeline,
         test_mode=False,
         data_aug_conf=data_aug_conf,
@@ -670,7 +670,7 @@ data = dict(
     ),
     val=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_val_occ.pkl",
+        ann_file=anno_root + "nuscenes_infos_val_cvocc.pkl",
         pipeline=test_pipeline,
         data_aug_conf=data_aug_conf,
         test_mode=True,
@@ -678,7 +678,7 @@ data = dict(
     ),
     test=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_val_occ.pkl",
+        ann_file=anno_root + "nuscenes_infos_val_cvocc.pkl",
         pipeline=test_pipeline,
         data_aug_conf=data_aug_conf,
         test_mode=True,

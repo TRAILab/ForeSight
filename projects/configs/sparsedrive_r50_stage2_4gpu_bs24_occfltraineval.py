@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_bs24_vishead_occfhtraineval',),
+                name='sparsedrive_r50_stage2_4gpu_bs24_occfhtraineval',),
             interval=50)
     ],
 )
@@ -226,7 +226,6 @@ model = dict(
                 num_cls=num_classes,
                 refine_yaw=True,
                 with_quality_estimation=with_quality_estimation,
-                with_visibility_estimation=True,
             ),
             sampler=dict(
                 type="SparseBox3DTarget",
@@ -266,11 +265,6 @@ model = dict(
                 loss_centerness=dict(type="CrossEntropyLoss", use_sigmoid=True),
                 loss_yawness=dict(type="GaussianFocalLoss"),
                 cls_allow_reverse=[class_names.index("barrier")],
-            ),
-            loss_visibility=dict(
-                type="CrossEntropyLoss",
-                use_sigmoid=True,
-                loss_weight=1.0,
             ),
             decoder=dict(type="SparseBox3DDecoder"),
             reg_weights=[2.0] * 3 + [1.0] * 7,
@@ -575,7 +569,6 @@ train_pipeline = [
             'gt_ego_fut_masks',
             'gt_ego_fut_cmd',
             'ego_status',
-            'gt_visibility',
         ],
         meta_keys=["T_global", "T_global_inv", "timestamp", "instance_id"],
     ),
@@ -646,7 +639,7 @@ data_basic_config = dict(
 )
 eval_config = dict(
     **data_basic_config,
-    ann_file=anno_root + 'nuscenes_infos_val_cvocc.pkl',
+    ann_file=anno_root + 'nuscenes_infos_val_occ.pkl',
     pipeline=eval_pipeline,
     test_mode=True,
 )
@@ -666,7 +659,7 @@ data = dict(
     workers_per_gpu=6,
     train=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_train_cvocc.pkl",
+        ann_file=anno_root + "nuscenes_infos_train_occ.pkl",
         pipeline=train_pipeline,
         test_mode=False,
         data_aug_conf=data_aug_conf,
@@ -677,7 +670,7 @@ data = dict(
     ),
     val=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_val_cvocc.pkl",
+        ann_file=anno_root + "nuscenes_infos_val_occ.pkl",
         pipeline=test_pipeline,
         data_aug_conf=data_aug_conf,
         test_mode=True,
@@ -685,7 +678,7 @@ data = dict(
     ),
     test=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_val_cvocc.pkl",
+        ann_file=anno_root + "nuscenes_infos_val_occ.pkl",
         pipeline=test_pipeline,
         data_aug_conf=data_aug_conf,
         test_mode=True,
