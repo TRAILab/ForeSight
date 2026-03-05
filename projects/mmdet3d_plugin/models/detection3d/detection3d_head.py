@@ -56,6 +56,7 @@ class Sparse4DHead(BaseModule):
         decouple_attn: bool = True,
         temporal_warmup_order: Optional[List[str]] = None,
         warmup_refine_layer: dict = None,
+        warmup_ffn: dict = None,
         init_cfg: dict = None,
         **kwargs,
     ):
@@ -126,6 +127,8 @@ class Sparse4DHead(BaseModule):
         warmup_op_config_map = dict(self.op_config_map)
         if warmup_refine_layer is not None:
             warmup_op_config_map["refine"] = [warmup_refine_layer, PLUGIN_LAYERS]
+        if warmup_ffn is not None:
+            warmup_op_config_map["ffn"] = [warmup_ffn, FEEDFORWARD_NETWORK]
         self.warmup_layers = nn.ModuleList(
             [
                 build(*warmup_op_config_map.get(op, [None, None]))
@@ -329,7 +332,7 @@ class Sparse4DHead(BaseModule):
                 w_anchor = anchor[:, :num_ti]
                 w_anchor_embed = anchor_embed[:, :num_ti]
                 is_temporal = False
-            w_cls, w_qt = None, None
+            w_cls, w_qt, w_vis = None, None, None
             for i, op in enumerate(self.temporal_warmup_order):
                 if self.warmup_layers[i] is None:
                     continue
@@ -340,7 +343,7 @@ class Sparse4DHead(BaseModule):
                 elif op in ("norm", "ffn"):
                     w_feat = self.warmup_layers[i](w_feat)
                 elif op == "refine":
-                    w_anchor, w_cls, w_qt = self.warmup_layers[i](
+                    w_anchor, w_cls, w_qt, w_vis = self.warmup_layers[i](
                         w_feat,
                         w_anchor,
                         w_anchor_embed,
@@ -406,9 +409,21 @@ class Sparse4DHead(BaseModule):
                 if w_qt is not None
                 else None
             )
+            warmup_vis = (
+                torch.cat(
+                    [
+                        w_vis,
+                        w_vis.new_zeros(batch_size, num_anchor - num_ti, w_vis.shape[-1]),
+                    ],
+                    dim=1,
+                )
+                if w_vis is not None
+                else None
+            )
             prediction.append(warmup_pred)
             classification.append(warmup_cls)
             quality.append(warmup_qt)
+            visibility.append(warmup_vis)
         num_main_decoder_refines = 0
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
