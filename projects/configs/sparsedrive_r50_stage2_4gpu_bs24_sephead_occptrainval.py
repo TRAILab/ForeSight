@@ -164,7 +164,7 @@ model = dict(
                 num_cls=num_classes,
                 refine_yaw=True,
                 with_cls_branch=True,
-                with_quality_estimation=False,
+                with_quality_estimation=with_quality_estimation,
             ),
             num_single_frame_decoder=num_single_frame_decoder,
             operation_order=(
