@@ -288,10 +288,11 @@ model = dict(
                 cls_allow_reverse=[class_names.index("barrier")],
             ),
             loss_visibility=dict(
-                type="CrossEntropyLoss",
+                type="FocalLoss",
                 use_sigmoid=True,
+                gamma=0.0,
+                alpha=0.2,
                 loss_weight=1.0,
-                pos_weight=0.5,
             ),
             decoder=dict(type="SparseBox3DDecoder"),
             reg_weights=[2.0] * 3 + [1.0] * 7,
