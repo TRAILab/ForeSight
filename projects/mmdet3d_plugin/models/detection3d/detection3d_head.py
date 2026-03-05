@@ -54,6 +54,8 @@ class Sparse4DHead(BaseModule):
         cls_threshold_to_reg: float = -1,
         dn_loss_weight: float = 5.0,
         decouple_attn: bool = True,
+        temporal_warmup_order: Optional[List[str]] = None,
+        warmup_refine_layer: dict = None,
         init_cfg: dict = None,
         **kwargs,
     ):
@@ -117,6 +119,19 @@ class Sparse4DHead(BaseModule):
                 for op in self.operation_order
             ]
         )
+        self.temporal_warmup_order = list(temporal_warmup_order) if temporal_warmup_order else []
+        # For "refine" in warmup, use warmup_refine_layer if provided (should have
+        # with_cls_branch=False, with_quality_estimation=False to avoid unused params).
+        # Falls back to refine_layer if warmup_refine_layer is not specified.
+        warmup_op_config_map = dict(self.op_config_map)
+        if warmup_refine_layer is not None:
+            warmup_op_config_map["refine"] = [warmup_refine_layer, PLUGIN_LAYERS]
+        self.warmup_layers = nn.ModuleList(
+            [
+                build(*warmup_op_config_map.get(op, [None, None]))
+                for op in self.temporal_warmup_order
+            ]
+        )
         self.embed_dims = self.instance_bank.embed_dims
         if self.decouple_attn:
             self.fc_before = nn.Linear(
@@ -128,6 +143,19 @@ class Sparse4DHead(BaseModule):
         else:
             self.fc_before = nn.Identity()
             self.fc_after = nn.Identity()
+        # Dedicated fc projections for warmup GNN — must NOT share with fc_before/fc_after
+        # because gradient checkpointing would fire DDP hooks twice for shared params.
+        has_warmup_gnn = any(op == "gnn" for op in self.temporal_warmup_order)
+        if has_warmup_gnn and self.decouple_attn:
+            self.warmup_fc_before = nn.Linear(
+                self.embed_dims, self.embed_dims * 2, bias=False
+            )
+            self.warmup_fc_after = nn.Linear(
+                self.embed_dims * 2, self.embed_dims, bias=False
+            )
+        else:
+            self.warmup_fc_before = nn.Identity()
+            self.warmup_fc_after = nn.Identity()
 
     def init_weights(self):
         for i, op in enumerate(self.operation_order):
@@ -137,9 +165,32 @@ class Sparse4DHead(BaseModule):
                 for p in self.layers[i].parameters():
                     if p.dim() > 1:
                         nn.init.xavier_uniform_(p)
+        for i, op in enumerate(self.temporal_warmup_order):
+            if self.warmup_layers[i] is None:
+                continue
+            elif op != "refine":
+                for p in self.warmup_layers[i].parameters():
+                    if p.dim() > 1:
+                        nn.init.xavier_uniform_(p)
+        if isinstance(self.warmup_fc_before, nn.Linear):
+            nn.init.xavier_uniform_(self.warmup_fc_before.weight)
+        if isinstance(self.warmup_fc_after, nn.Linear):
+            nn.init.xavier_uniform_(self.warmup_fc_after.weight)
         for m in self.modules():
             if hasattr(m, "init_weight"):
                 m.init_weight()
+
+    def _gnn_with_layer(self, layer, feat, anchor_embed):
+        """Self-attention (GNN) using an explicit layer rather than self.layers[i].
+        Used by the temporal warmup block where queries attend only to each other.
+        Uses warmup_fc_before/after (not shared with main decoder fc projections)."""
+        if self.decouple_attn:
+            q = torch.cat([feat, anchor_embed], dim=-1)
+            v = self.warmup_fc_before(feat)
+            return self.warmup_fc_after(layer(q, q, v))
+        else:
+            v = self.warmup_fc_before(feat)
+            return self.warmup_fc_after(layer(feat, feat, v, query_pos=anchor_embed))
 
     def graph_model(
         self,
@@ -259,11 +310,106 @@ class Sparse4DHead(BaseModule):
         else:
             temp_anchor_embed = None
 
+        # =========== temporal warmup (Block 0) ====================
+        # Social self-attention among temporal queries before they are merged
+        # with current-frame detections. No image features used here.
+        # Always runs (even on first frame) so warmup params always receive
+        # gradients — avoids the need for find_unused_parameters=True.
+        if self.temporal_warmup_order:
+            if temp_instance_feature is not None:
+                # Temporal case: warm up the cached temporal features
+                w_feat = temp_instance_feature
+                w_anchor = temp_anchor
+                w_anchor_embed = temp_anchor_embed
+                is_temporal = True
+            else:
+                # First frame: warm up the first num_temp_instances current slots
+                num_ti = self.instance_bank.num_temp_instances
+                w_feat = instance_feature[:, :num_ti]
+                w_anchor = anchor[:, :num_ti]
+                w_anchor_embed = anchor_embed[:, :num_ti]
+                is_temporal = False
+            w_cls, w_qt = None, None
+            for i, op in enumerate(self.temporal_warmup_order):
+                if self.warmup_layers[i] is None:
+                    continue
+                if op == "gnn":
+                    w_feat = self._gnn_with_layer(
+                        self.warmup_layers[i], w_feat, w_anchor_embed
+                    )
+                elif op in ("norm", "ffn"):
+                    w_feat = self.warmup_layers[i](w_feat)
+                elif op == "refine":
+                    w_anchor, w_cls, w_qt = self.warmup_layers[i](
+                        w_feat,
+                        w_anchor,
+                        w_anchor_embed,
+                        time_interval=time_interval,
+                        return_cls=True,
+                    )
+                    w_anchor_embed = self.anchor_encoder(w_anchor)
+            if is_temporal:
+                temp_instance_feature = w_feat
+                temp_anchor = w_anchor
+                temp_anchor_embed = w_anchor_embed
+            else:
+                # Inject warmed first-frame features back so warmup params
+                # connect to the loss via the main decoder.
+                num_ti = self.instance_bank.num_temp_instances
+                instance_feature = torch.cat(
+                    [w_feat, instance_feature[:, num_ti:]], dim=1
+                )
+                anchor = torch.cat([w_anchor, anchor[:, num_ti:]], dim=1)
+                anchor_embed = torch.cat(
+                    [w_anchor_embed, anchor_embed[:, num_ti:]], dim=1
+                )
+
         # =================== forward the layers ====================
         prediction = []
         classification = []
         quality = []
         visibility = []
+        # If warmup produced a refine prediction on temporal instances, prepend it
+        # so it gets supervised like any other intermediate decoder stage.
+        # Pads non-temporal slots (num_ti:num_anchor) with initial anchor positions
+        # and near-zero cls logits so the sampler treats them as background.
+        # NOTE: do NOT gate this on is_temporal — the cls branch must always
+        # participate in the loss so DDP doesn't see unused parameters on
+        # first-frame batches (which have is_temporal=False).
+        if (
+            self.temporal_warmup_order
+            and w_cls is not None
+            and dn_metas is None
+        ):
+            num_ti = self.instance_bank.num_temp_instances
+            num_anchor = self.instance_bank.num_anchor
+            warmup_pred = torch.cat(
+                [w_anchor, anchor[:, num_ti:num_anchor]], dim=1
+            )
+            warmup_cls = torch.cat(
+                [
+                    w_cls,
+                    w_cls.new_full(
+                        [batch_size, num_anchor - num_ti, w_cls.shape[-1]], -10.0
+                    ),
+                ],
+                dim=1,
+            )
+            warmup_qt = (
+                torch.cat(
+                    [
+                        w_qt,
+                        w_qt.new_zeros(batch_size, num_anchor - num_ti, w_qt.shape[-1]),
+                    ],
+                    dim=1,
+                )
+                if w_qt is not None
+                else None
+            )
+            prediction.append(warmup_pred)
+            classification.append(warmup_cls)
+            quality.append(warmup_qt)
+        num_main_decoder_refines = 0
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
                 continue
@@ -309,9 +455,12 @@ class Sparse4DHead(BaseModule):
                 classification.append(cls)
                 quality.append(qt)
                 visibility.append(vis)
-                if len(prediction) == self.num_single_frame_decoder:
+                num_main_decoder_refines += 1
+                if num_main_decoder_refines == self.num_single_frame_decoder:
                     instance_feature, anchor = self.instance_bank.update(
-                        instance_feature, anchor, cls
+                        instance_feature, anchor, cls,
+                        cached_feature_override=temp_instance_feature,
+                        cached_anchor_override=temp_anchor,
                     )
                     if (
                         dn_metas is not None
