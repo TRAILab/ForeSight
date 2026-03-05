@@ -147,7 +147,17 @@ model = dict(
                 in_loops=1,
                 out_loops=4 if decouple_attn else 2,
             ),
-            temporal_warmup_order=("gnn", "norm", "refine"),
+            temporal_warmup_order=("gnn", "norm", "ffn", "norm", "refine"),
+            warmup_ffn=dict(
+                type="AsymmetricFFN",
+                in_channels=embed_dims,
+                pre_norm=dict(type="LN"),
+                embed_dims=embed_dims,
+                feedforward_channels=embed_dims * 4,
+                num_fcs=2,
+                ffn_drop=drop_out,
+                act_cfg=dict(type="ReLU", inplace=True),
+            ),
             warmup_refine_layer=dict(
                 type="SparseBox3DRefinementModule",
                 embed_dims=embed_dims,

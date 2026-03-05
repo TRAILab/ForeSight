@@ -9,8 +9,8 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 24
-num_gpus = 4
+total_batch_size = 8
+num_gpus = 1
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
 num_epochs = 10
@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_bs24_nomap_sephead',),
+                name='sparsedrive_r50_stage2_1gpu_nomap_sephead',),
             interval=50)
     ],
 )
