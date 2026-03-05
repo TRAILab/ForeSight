@@ -688,7 +688,7 @@ class Sparse4DHead(BaseModule):
                         )
                 matched = mask_valid.reshape(-1)
                 vis_loss = self.loss_visibility(
-                    vis.squeeze(-1).flatten(end_dim=1)[matched],
+                    vis.squeeze(-1).flatten(end_dim=1)[matched].unsqueeze(-1),
                     vis_target.flatten(end_dim=1)[matched].long(),
                     avg_factor=num_pos,
                 )
