@@ -1,6 +1,6 @@
 import numpy as np
 from collections import Counter
-from typing import Callable
+from typing import Callable, Dict, Optional, Tuple
 
 from nuscenes.eval.common.data_classes import EvalBoxes
 from nuscenes.eval.common.loaders import load_gt, add_center_dist
@@ -9,6 +9,107 @@ from nuscenes.eval.common.utils import (
 )
 from nuscenes.eval.detection.data_classes import DetectionBox, DetectionMetricData
 from nuscenes.eval.detection.evaluate import NuScenesEval
+
+
+# ---------------------------------------------------------------------------
+# Adaptive matching threshold coefficients (UniTraj class mapping)
+# Formula: d = dist_th + alpha*t + beta*v*t + gamma*a*t^2
+# ---------------------------------------------------------------------------
+
+ADAPTIVE_COEFFS = {
+    'vehicle':    (0.0568, 0.1962, 0.2133),
+    'cyclist':    (0.1023, 0.1861, 0.2266),
+    'pedestrian': (0.2641, 0.1457, 0.1774),
+}
+
+NUSCENES_TO_UNITRAJ = {
+    'car':                  'vehicle',
+    'truck':                'vehicle',
+    'construction_vehicle': 'vehicle',
+    'bus':                  'vehicle',
+    'trailer':              'vehicle',
+    'motorcycle':           'cyclist',
+    'bicycle':              'cyclist',
+    'pedestrian':           'pedestrian',
+    # barrier, traffic_cone: no adaptive threshold
+}
+
+
+# ---------------------------------------------------------------------------
+# Adaptive threshold helpers
+# ---------------------------------------------------------------------------
+
+def _ann_speed(nusc, ann: dict) -> float:
+    """Speed (m/s) of an annotation estimated from position difference to prev."""
+    if ann['prev'] == '':
+        return 0.0
+    prev_ann = nusc.get('sample_annotation', ann['prev'])
+    curr_ts = nusc.get('sample', ann['sample_token'])['timestamp']
+    prev_ts = nusc.get('sample', prev_ann['sample_token'])['timestamp']
+    dt = (curr_ts - prev_ts) * 1e-6
+    if dt <= 0:
+        return 0.0
+    dx = ann['translation'][0] - prev_ann['translation'][0]
+    dy = ann['translation'][1] - prev_ann['translation'][1]
+    return np.sqrt(dx ** 2 + dy ** 2) / dt
+
+
+def _occ_metadata(nusc, ann_token: str) -> Tuple[float, float, float]:
+    """Return (t, v, a) for an occluded annotation.
+
+    t : occlusion duration in seconds (≥ 0.5 s since current frame is occluded)
+    v : speed at the last visible annotation (m/s)
+    a : acceleration magnitude at the last visible annotation (m/s²)
+    """
+    ann = nusc.get('sample_annotation', ann_token)
+
+    # Walk prev-links counting consecutive occluded frames and finding the
+    # last visible annotation and the one before it.
+    t_frames = 1          # current frame counts as 1 occluded frame
+    last_vis = None
+    prev_of_last_vis = None
+
+    prev_token = ann['prev']
+    while prev_token != '':
+        prev_ann = nusc.get('sample_annotation', prev_token)
+        if prev_ann['num_lidar_pts'] > 0:
+            last_vis = prev_ann
+            if prev_ann['prev'] != '':
+                prev_of_last_vis = nusc.get('sample_annotation', prev_ann['prev'])
+            break
+        t_frames += 1
+        prev_token = prev_ann['prev']
+
+    t = t_frames * 0.5  # NuScenes is 2 Hz → 0.5 s per frame
+
+    v = _ann_speed(nusc, last_vis) if last_vis is not None else 0.0
+
+    a = 0.0
+    if last_vis is not None and prev_of_last_vis is not None:
+        v_last = _ann_speed(nusc, last_vis)
+        v_prev = _ann_speed(nusc, prev_of_last_vis)
+        curr_ts = nusc.get('sample', last_vis['sample_token'])['timestamp']
+        prev_ts = nusc.get('sample', prev_of_last_vis['sample_token'])['timestamp']
+        dt = (curr_ts - prev_ts) * 1e-6
+        if dt > 0:
+            a = abs(v_last - v_prev) / dt
+
+    return t, v, a
+
+
+def _adaptive_dist_th(
+    base_dist_th: float,
+    class_name: str,
+    t: float,
+    v: float,
+    a: float,
+) -> float:
+    """d = dist_th + alpha*t + beta*v*t + gamma*a*t^2"""
+    unitraj_cls = NUSCENES_TO_UNITRAJ.get(class_name)
+    if unitraj_cls is None:
+        return base_dist_th  # static class (barrier, traffic_cone)
+    alpha, beta, gamma = ADAPTIVE_COEFFS[unitraj_cls]
+    return base_dist_th + alpha * t + beta * v * t + gamma * a * t ** 2
 
 
 # ---------------------------------------------------------------------------
@@ -22,38 +123,33 @@ def accumulate_with_ignore(
     class_name: str,
     dist_fcn: Callable,
     dist_th: float,
+    per_gt_dist_ths: Optional[Dict[Tuple[str, int], float]] = None,
     verbose: bool = False,
 ) -> DetectionMetricData:
     """AP accumulation with a three-outcome matching rule.
 
     For each prediction (processed in descending confidence order):
 
-      1. **TP** – prediction matches an unmatched visible GT box within dist_th.
+      1. **TP** – prediction matches an unmatched visible GT box within its
+         effective distance threshold (adaptive if per_gt_dist_ths provided,
+         otherwise the fixed dist_th).
       2. **Ignored** – prediction does not match visible GT, but matches an
          ignore box within dist_th.  The prediction is excluded from both the
          numerator and denominator of the precision-recall curve.
       3. **FP** – prediction matches neither.
 
-    This is strictly more correct than pre-filtering predictions before calling
-    the standard accumulate(), because pre-filtering can remove legitimate TPs
-    when a visible GT box and an ignore box are spatially close (within dist_th
-    of each other).  Here, visible GT matching is resolved first under the
-    greedy confidence-sorted algorithm, and the ignore check is only applied to
-    predictions that failed to claim a visible GT box.
-
     Parameters
     ----------
-    gt_boxes:     Visible GT boxes used for scoring (TP/FP/recall denominator).
-    pred_boxes:   All model predictions.
-    ignore_boxes: GT boxes that should neutralise unmatched predictions
-                  (e.g. occluded GT for VisibleDetectionEval).
-    class_name:   Detection class to evaluate.
-    dist_fcn:     BEV distance function (same as used by nuScenes accumulate).
-    dist_th:      Match / ignore distance threshold in metres.
+    gt_boxes:          Visible GT boxes used for scoring (TP/FP/recall denominator).
+    pred_boxes:        All model predictions.
+    ignore_boxes:      GT boxes that neutralise unmatched preds.
+    class_name:        Detection class to evaluate.
+    dist_fcn:          BEV distance function.
+    dist_th:           Base match / ignore distance threshold in metres.
+    per_gt_dist_ths:   Optional dict mapping (sample_token, gt_idx) → adaptive
+                       threshold for TP matching.  Ignore matching always uses
+                       the fixed dist_th.
     """
-    # ------------------------------------------------------------------
-    # Initialise
-    # ------------------------------------------------------------------
     npos = len([1 for b in gt_boxes.all if b.detection_name == class_name])
     if verbose:
         print(f'Found {npos} GT of class {class_name} across '
@@ -62,13 +158,11 @@ def accumulate_with_ignore(
     if npos == 0:
         return DetectionMetricData.no_predictions()
 
-    # Pre-index ignore boxes by sample token for O(1) lookup.
     ignore_by_token = {
         t: [b for b in ignore_boxes[t] if b.detection_name == class_name]
         for t in ignore_boxes.sample_tokens
     }
 
-    # Collect and sort predictions by confidence (descending).
     pred_boxes_list = [b for b in pred_boxes.all if b.detection_name == class_name]
     pred_confs = [b.detection_score for b in pred_boxes_list]
     sortind = [i for (v, i) in sorted((v, i) for (i, v) in enumerate(pred_confs))][::-1]
@@ -81,15 +175,12 @@ def accumulate_with_ignore(
         'orient_err': [], 'attr_err': [], 'conf': [],
     }
 
-    # ------------------------------------------------------------------
-    # Greedy matching
-    # ------------------------------------------------------------------
-    taken = set()  # (sample_token, gt_idx) pairs already matched to a TP.
+    taken = set()
 
     for ind in sortind:
         pred_box = pred_boxes_list[ind]
 
-        # --- Step 1: find nearest unmatched visible GT ---
+        # --- Step 1: find nearest unmatched GT ---
         min_dist = np.inf
         match_gt_idx = None
         for gt_idx, gt_box in enumerate(gt_boxes[pred_box.sample_token]):
@@ -102,8 +193,15 @@ def accumulate_with_ignore(
                 min_dist = d
                 match_gt_idx = gt_idx
 
-        if min_dist < dist_th:
-            # TP: prediction claimed a visible GT box.
+        # Resolve effective threshold for the nearest GT box.
+        if match_gt_idx is not None and per_gt_dist_ths is not None:
+            eff_dist_th = per_gt_dist_ths.get(
+                (pred_box.sample_token, match_gt_idx), dist_th
+            )
+        else:
+            eff_dist_th = dist_th
+
+        if min_dist < eff_dist_th:
             taken.add((pred_box.sample_token, match_gt_idx))
             tp.append(1)
             fp.append(0)
@@ -119,23 +217,17 @@ def accumulate_with_ignore(
             match_data['conf'].append(pred_box.detection_score)
 
         else:
-            # --- Step 2: prediction did not match visible GT.
-            #     Check if it is attributable to an ignore box. ---
+            # Step 2: check ignore boxes (always with fixed dist_th).
             ignores = ignore_by_token.get(pred_box.sample_token, [])
             is_ignored = any(dist_fcn(ign, pred_box) < dist_th for ign in ignores)
 
             if is_ignored:
-                # Excluded from the PR curve entirely — not TP, not FP.
                 continue
 
-            # FP: unmatched and not near any ignore box.
             tp.append(0)
             fp.append(1)
             conf.append(pred_box.detection_score)
 
-    # ------------------------------------------------------------------
-    # Build precision-recall curve
-    # ------------------------------------------------------------------
     if len(match_data['trans_err']) == 0:
         return DetectionMetricData.no_predictions()
 
@@ -172,25 +264,9 @@ def accumulate_with_ignore(
 # ---------------------------------------------------------------------------
 
 class _IgnoreAwareNuScenesEval(NuScenesEval):
-    """Base class for ignore-aware detection evaluators.
-
-    Subclasses must set:
-      self.gt_boxes     – EvalBoxes used as the scoring GT set.
-      self._ignore_boxes – EvalBoxes whose proximity neutralises unmatched preds.
-
-    The evaluate() override uses accumulate_with_ignore() which applies a
-    three-outcome matching rule (TP / ignored / FP) so that visible GT matching
-    is resolved before the ignore check.  This prevents the pre-filter approach
-    from incorrectly removing TPs when a scoring GT box and an ignore box happen
-    to be within dist_th of each other.
-    """
-
-    # ------------------------------------------------------------------
-    # Shared GT filtering helpers
-    # ------------------------------------------------------------------
+    """Base class for ignore-aware detection evaluators."""
 
     def _filter_occluded_boxes(self, gt_boxes: EvalBoxes) -> EvalBoxes:
-        """Return GT boxes with zero sensor returns, within class distance range."""
         filtered = EvalBoxes()
         for sample_token in gt_boxes.sample_tokens:
             boxes = [
@@ -203,7 +279,6 @@ class _IgnoreAwareNuScenesEval(NuScenesEval):
         return filtered
 
     def _filter_visible_boxes(self, gt_boxes: EvalBoxes) -> EvalBoxes:
-        """Return GT boxes with at least one sensor return, within class distance range."""
         filtered = EvalBoxes()
         for sample_token in gt_boxes.sample_tokens:
             boxes = [
@@ -215,18 +290,7 @@ class _IgnoreAwareNuScenesEval(NuScenesEval):
             filtered.add_boxes(sample_token, boxes)
         return filtered
 
-    # ------------------------------------------------------------------
-    # Evaluation override
-    # ------------------------------------------------------------------
-
     def evaluate(self):
-        """Override NuScenesEval.evaluate() using accumulate_with_ignore().
-
-        For each (class, dist_th) pair, predictions are classified as TP,
-        ignored, or FP according to the three-outcome rule in
-        accumulate_with_ignore().  Ignored predictions are excluded from both
-        precision and recall, removing the edge-case bias of pre-filtering.
-        """
         import time
         from nuscenes.eval.detection.algo import calc_ap, calc_tp
         from nuscenes.eval.detection.data_classes import (
@@ -280,11 +344,13 @@ class _IgnoreAwareNuScenesEval(NuScenesEval):
 # ---------------------------------------------------------------------------
 
 class OccludedDetectionEval(_IgnoreAwareNuScenesEval):
-    """NuScenes detection evaluator restricted to occluded objects (num_lidar_pts == 0).
+    """NuScenes detection evaluator restricted to occluded objects.
 
-    Scores predictions against occluded GT only.  Predictions that match a
-    visible GT box are ignored (not penalised as FPs) via the three-outcome
-    matching rule in accumulate_with_ignore().
+    Uses an adaptive matching threshold d = dist_th + alpha*t + beta*v*t +
+    gamma*a*t^2 where t is occlusion duration, v is speed and a is
+    acceleration at the last visible annotation.  Coefficients are
+    class-specific (Vehicle / Cyclist / Pedestrian via UniTraj mapping).
+    Static classes (barrier, traffic_cone) retain the fixed dist_th.
     """
 
     def __init__(self, nusc, config, result_path, eval_set, output_dir, verbose):
@@ -307,23 +373,109 @@ class OccludedDetectionEval(_IgnoreAwareNuScenesEval):
         print(f'[Occluded Det] GT occluded boxes: {occ_total} | {dict(class_counts)}')
         print(f'[Occluded Det] Ignore (visible) boxes: {vis_total}')
 
+        # Pre-compute adaptive thresholds for each (base_dist_th).
+        self._adaptive_dist_ths = self._build_adaptive_dist_ths(nusc)
+
+    def _build_adaptive_dist_ths(
+        self, nusc
+    ) -> Dict[float, Dict[Tuple[str, int], float]]:
+        """Build per-GT-box adaptive thresholds for every base dist_th.
+
+        Returns
+        -------
+        dict mapping base_dist_th → {(sample_token, gt_idx): adaptive_dist_th}
+        """
+        # Build sample_token → {rounded_translation: ann_token} for fast lookup.
+        sample_ann_map: Dict[str, Dict[tuple, str]] = {}
+        for sample_token in self.gt_boxes.sample_tokens:
+            sample = nusc.get('sample', sample_token)
+            pos_to_tok = {}
+            for ann_token in sample['anns']:
+                ann = nusc.get('sample_annotation', ann_token)
+                key = (round(ann['translation'][0], 2),
+                       round(ann['translation'][1], 2))
+                pos_to_tok[key] = ann_token
+            sample_ann_map[sample_token] = pos_to_tok
+
+        # Compute (t, v, a) and cache adaptive threshold per box per dist_th.
+        result: Dict[float, Dict[Tuple[str, int], float]] = {
+            d: {} for d in self.cfg.dist_ths
+        }
+
+        for sample_token in self.gt_boxes.sample_tokens:
+            pos_to_tok = sample_ann_map[sample_token]
+            for gt_idx, box in enumerate(self.gt_boxes[sample_token]):
+                key_pos = (round(box.translation[0], 2),
+                           round(box.translation[1], 2))
+                ann_token = pos_to_tok.get(key_pos)
+                if ann_token is None:
+                    continue  # fallback: keep base dist_th (entry absent → default)
+
+                t, v, a = _occ_metadata(nusc, ann_token)
+                for base_dist_th in self.cfg.dist_ths:
+                    adaptive = _adaptive_dist_th(base_dist_th, box.detection_name,
+                                                 t, v, a)
+                    result[base_dist_th][(sample_token, gt_idx)] = adaptive
+
+        return result
+
+    def evaluate(self):
+        """Override to pass adaptive per-GT thresholds to accumulate_with_ignore."""
+        import time
+        from nuscenes.eval.detection.algo import calc_ap, calc_tp
+        from nuscenes.eval.detection.data_classes import (
+            DetectionMetrics, DetectionMetricDataList,
+        )
+        from nuscenes.eval.detection.constants import TP_METRICS
+
+        start_time = time.time()
+        if self.verbose:
+            print('Accumulating metric data (adaptive thresholds)...')
+
+        metric_data_list = DetectionMetricDataList()
+        for class_name in self.cfg.class_names:
+            for dist_th in self.cfg.dist_ths:
+                md = accumulate_with_ignore(
+                    self.gt_boxes,
+                    self.pred_boxes,
+                    self._ignore_boxes,
+                    class_name,
+                    self.cfg.dist_fcn_callable,
+                    dist_th,
+                    per_gt_dist_ths=self._adaptive_dist_ths.get(dist_th),
+                )
+                metric_data_list.set(class_name, dist_th, md)
+
+        if self.verbose:
+            print('Calculating metrics...')
+
+        metrics = DetectionMetrics(self.cfg)
+        for class_name in self.cfg.class_names:
+            for dist_th in self.cfg.dist_ths:
+                metric_data = metric_data_list[(class_name, dist_th)]
+                ap = calc_ap(metric_data, self.cfg.min_recall, self.cfg.min_precision)
+                metrics.add_label_ap(class_name, dist_th, ap)
+
+            for metric_name in TP_METRICS:
+                metric_data = metric_data_list[(class_name, self.cfg.dist_th_tp)]
+                if class_name == 'traffic_cone' and metric_name in ('attr_err', 'vel_err', 'orient_err'):
+                    tp = np.nan
+                elif class_name == 'barrier' and metric_name in ('attr_err', 'vel_err'):
+                    tp = np.nan
+                else:
+                    tp = calc_tp(metric_data, self.cfg.min_recall, metric_name)
+                metrics.add_label_tp(class_name, metric_name, tp)
+
+        metrics.add_runtime(time.time() - start_time)
+        return metrics, metric_data_list
+
 
 class VisibleDetectionEval(_IgnoreAwareNuScenesEval):
-    """NuScenes detection evaluator on visible objects (num_lidar_pts >= 1).
-
-    Scores predictions against visible GT only (same GT set as the standard
-    nuScenes evaluator).  Predictions that fail to match visible GT but land
-    within dist_th of an occluded GT box are ignored rather than penalised as
-    FPs, via the three-outcome matching rule in accumulate_with_ignore().
-
-    This makes vis/mAP a fair comparison between a visible-only baseline and a
-    model trained on the full (visible + occluded) annotation set.
-    """
+    """NuScenes detection evaluator on visible objects (num_lidar_pts >= 1)."""
 
     def __init__(self, nusc, config, result_path, eval_set, output_dir, verbose):
         super().__init__(nusc, config, result_path, eval_set, output_dir, verbose)
 
-        # Parent filter_eval_boxes already set self.gt_boxes to visible-only.
         all_gt = load_gt(nusc, eval_set, DetectionBox, verbose=verbose)
         all_gt = add_center_dist(nusc, all_gt)
         self._ignore_boxes = self._filter_occluded_boxes(all_gt)
@@ -340,12 +492,7 @@ class VisibleDetectionEval(_IgnoreAwareNuScenesEval):
 
 
 class AllDetectionEval(NuScenesEval):
-    """NuScenes detection evaluator on all objects (visible + occluded, num_pts >= 0).
-
-    The parent __init__ calls filter_eval_boxes which removes every box with
-    num_pts < 1.  We reload GT afterwards and replace self.gt_boxes with all
-    boxes (class + distance filter only, no num_pts gate).
-    """
+    """NuScenes detection evaluator on all objects (visible + occluded)."""
 
     def __init__(self, nusc, config, result_path, eval_set, output_dir, verbose):
         super().__init__(nusc, config, result_path, eval_set, output_dir, verbose)
@@ -356,7 +503,6 @@ class AllDetectionEval(NuScenesEval):
         self.sample_tokens = self.gt_boxes.sample_tokens
 
     def _filter_all_gt(self, gt_boxes: EvalBoxes) -> EvalBoxes:
-        """Keep all GT boxes (visible + occluded) within their class distance range."""
         filtered = EvalBoxes()
         for sample_token in gt_boxes.sample_tokens:
             boxes = [
