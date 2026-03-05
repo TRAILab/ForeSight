@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_bs24_vishead_occfhtraineval',),
+                name='sparsedrive_r50_stage2_4gpu_bs24_sepheadvisobsiso_occptrainval',),
             interval=50)
     ],
 )
@@ -146,6 +146,27 @@ model = dict(
                 output_fc=not decouple_attn,
                 in_loops=1,
                 out_loops=4 if decouple_attn else 2,
+            ),
+            temporal_warmup_order=("gnn", "norm", "ffn", "norm", "refine"),
+            warmup_supervise_all=True,
+            warmup_ffn=dict(
+                type="AsymmetricFFN",
+                in_channels=embed_dims,
+                pre_norm=dict(type="LN"),
+                embed_dims=embed_dims,
+                feedforward_channels=embed_dims * 4,
+                num_fcs=2,
+                ffn_drop=drop_out,
+                act_cfg=dict(type="ReLU", inplace=True),
+            ),
+            warmup_refine_layer=dict(
+                type="SparseBox3DRefinementModule",
+                embed_dims=embed_dims,
+                num_cls=num_classes,
+                refine_yaw=True,
+                with_cls_branch=True,
+                with_quality_estimation=with_quality_estimation,
+                with_visibility_estimation=True,
             ),
             num_single_frame_decoder=num_single_frame_decoder,
             operation_order=(
@@ -647,7 +668,7 @@ data_basic_config = dict(
 )
 eval_config = dict(
     **data_basic_config,
-    ann_file=anno_root + 'nuscenes_infos_val_cvocc.pkl',
+    ann_file=anno_root + 'nuscenes_infos_val.pkl',
     pipeline=eval_pipeline,
     test_mode=True,
 )
@@ -667,7 +688,7 @@ data = dict(
     workers_per_gpu=6,
     train=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_train_cvocc.pkl",
+        ann_file=anno_root + "nuscenes_infos_train.pkl",
         pipeline=train_pipeline,
         test_mode=False,
         data_aug_conf=data_aug_conf,
@@ -678,7 +699,7 @@ data = dict(
     ),
     val=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_val_cvocc.pkl",
+        ann_file=anno_root + "nuscenes_infos_val.pkl",
         pipeline=test_pipeline,
         data_aug_conf=data_aug_conf,
         test_mode=True,
@@ -686,7 +707,7 @@ data = dict(
     ),
     test=dict(
         **data_basic_config,
-        ann_file=anno_root + "nuscenes_infos_val_cvocc.pkl",
+        ann_file=anno_root + "nuscenes_infos_val.pkl",
         pipeline=test_pipeline,
         data_aug_conf=data_aug_conf,
         test_mode=True,

@@ -57,6 +57,7 @@ class Sparse4DHead(BaseModule):
         temporal_warmup_order: Optional[List[str]] = None,
         warmup_refine_layer: dict = None,
         warmup_ffn: dict = None,
+        warmup_supervise_all: bool = False,
         init_cfg: dict = None,
         **kwargs,
     ):
@@ -159,6 +160,7 @@ class Sparse4DHead(BaseModule):
         else:
             self.warmup_fc_before = nn.Identity()
             self.warmup_fc_after = nn.Identity()
+        self.warmup_supervise_all = warmup_supervise_all
 
     def init_weights(self):
         for i, op in enumerate(self.operation_order):
@@ -372,6 +374,7 @@ class Sparse4DHead(BaseModule):
         classification = []
         quality = []
         visibility = []
+        num_warmup_preds = 0
         # If warmup produced a refine prediction on temporal instances, prepend it
         # so it gets supervised like any other intermediate decoder stage.
         # Pads non-temporal slots (num_ti:num_anchor) with initial anchor positions
@@ -423,6 +426,7 @@ class Sparse4DHead(BaseModule):
             prediction.append(warmup_pred)
             classification.append(warmup_cls)
             quality.append(warmup_qt)
+            num_warmup_preds = 1
             visibility.append(warmup_vis)
         num_main_decoder_refines = 0
         for i, op in enumerate(self.operation_order):
@@ -571,6 +575,7 @@ class Sparse4DHead(BaseModule):
                 "visibility": visibility,
                 "instance_feature": instance_feature,
                 "anchor_embed": anchor_embed,
+                "num_warmup_preds": num_warmup_preds,
             }
         )
 
@@ -592,16 +597,28 @@ class Sparse4DHead(BaseModule):
         reg_preds = model_outs["prediction"]
         quality = model_outs["quality"]
         vis_scores = model_outs.get("visibility", [None] * len(cls_scores))
+        num_warmup_preds = model_outs.get("num_warmup_preds", 0)
         output = {}
         for decoder_idx, (cls, reg, qt, vis) in enumerate(
             zip(cls_scores, reg_preds, quality, vis_scores)
         ):
             reg = reg[..., : len(self.reg_weights)]
+            if (
+                self.warmup_supervise_all
+                and num_warmup_preds <= decoder_idx < num_warmup_preds + self.num_single_frame_decoder
+                and self.gt_visibility_key in data
+            ):
+                gt_vis = data[self.gt_visibility_key]
+                gt_cls = [l[v > 0] for l, v in zip(data[self.gt_cls_key], gt_vis)]
+                gt_reg = [b[v > 0] for b, v in zip(data[self.gt_reg_key], gt_vis)]
+            else:
+                gt_cls = data[self.gt_cls_key]
+                gt_reg = data[self.gt_reg_key]
             cls_target, reg_target, reg_weights = self.sampler.sample(
                 cls,
                 reg,
-                data[self.gt_cls_key],
-                data[self.gt_reg_key],
+                gt_cls,
+                gt_reg,
             )
             reg_target = reg_target[..., : len(self.reg_weights)]
             reg_target_full = reg_target.clone()

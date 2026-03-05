@@ -271,6 +271,7 @@ model = dict(
                 type="CrossEntropyLoss",
                 use_sigmoid=True,
                 loss_weight=1.0,
+                pos_weight=0.6,
             ),
             decoder=dict(type="SparseBox3DDecoder"),
             reg_weights=[2.0] * 3 + [1.0] * 7,
