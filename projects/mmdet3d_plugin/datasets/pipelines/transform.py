@@ -159,6 +159,8 @@ class InstanceNameFilter(object):
         if "gt_agent_fut_trajs" in input_dict:
             input_dict["gt_agent_fut_trajs"] = input_dict["gt_agent_fut_trajs"][gt_bboxes_mask]
             input_dict["gt_agent_fut_masks"] = input_dict["gt_agent_fut_masks"][gt_bboxes_mask]
+        if "gt_visibility" in input_dict:
+            input_dict["gt_visibility"] = input_dict["gt_visibility"][gt_bboxes_mask]
         return input_dict
 
     def __repr__(self):
@@ -198,6 +200,8 @@ class CircleObjectRangeFilter(object):
         if "gt_agent_fut_trajs" in input_dict:
             input_dict["gt_agent_fut_trajs"] = input_dict["gt_agent_fut_trajs"][mask]
             input_dict["gt_agent_fut_masks"] = input_dict["gt_agent_fut_masks"][mask]
+        if "gt_visibility" in input_dict:
+            input_dict["gt_visibility"] = input_dict["gt_visibility"][mask]
         return input_dict
 
     def __repr__(self):
