@@ -9,7 +9,7 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 48
+total_batch_size = 24
 num_gpus = 4
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_notempmotion',),
+                name='sparsedrive_r50_stage2_4gpu_bs24_pt2',),
             interval=50)
     ],
 )
@@ -65,7 +65,7 @@ fut_ts = 12
 fut_mode = 6
 ego_fut_ts = 6
 ego_fut_mode = 6
-queue_length = 1 # history + current
+queue_length = 4 # history + current
 
 embed_dims = 256
 num_groups = 8
@@ -420,6 +420,7 @@ model = dict(
             ),
             operation_order=(
                 [
+                    "temp_gnn",
                     "gnn",
                     "norm",
                     "cross_gnn",
@@ -686,7 +687,7 @@ data = dict(
 # ================== training ========================
 optimizer = dict(
     type="AdamW",
-    lr=3e-4,
+    lr=1.5e-4,
     weight_decay=0.001,
     paramwise_cfg=dict(
         custom_keys={
@@ -722,4 +723,4 @@ evaluation = dict(
     eval_mode=eval_mode,
 )
 # ================== pretrained model ========================
-load_from = 'ckpt/sparsedrive_stage1.pth'
+load_from = 'ckpt/sparsedrive_stage1_dn.pth'
