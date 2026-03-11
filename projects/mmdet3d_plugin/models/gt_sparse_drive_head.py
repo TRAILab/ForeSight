@@ -10,20 +10,26 @@ from projects.mmdet3d_plugin.core.box3d import SIN_YAW, COS_YAW, YAW
 
 @HEADS.register_module()
 class GTSparseDriveHead(BaseModule):
-    """SparseDrive head that uses GT boxes as oracle detection inputs.
+    """SparseDrive head that uses GT boxes and optionally GT map as oracle inputs.
 
-    Bypasses the detection transformer and feeds GT bounding boxes
-    directly into the motion/planning head for oracle prediction evaluation.
+    Bypasses the detection transformer and feeds GT bounding boxes (and
+    optionally GT map polylines) directly into the motion/planning head
+    for oracle prediction evaluation.
 
     The det_head config is still required to provide:
       - anchor_encoder (SparseBox3DEncoder)
       - instance_bank (InstanceBank for temporal mask and anchor_handler)
       - sampler (for the indices interface expected by MotionTarget)
 
+    If map_head config is provided, its anchor_encoder and instance_bank
+    are used to encode GT map polylines into the map_output structure
+    expected by MotionPlanningHead (enables cross_gnn map attention).
+
     Args:
         task_config: Task flags (with_det, with_map, with_motion_plan).
         det_head:    Config for Sparse4DHead (used for sub-modules only).
-        map_head:    Unused; kept for API compatibility.
+        map_head:    Config for map Sparse4DHead (used for sub-modules only).
+                     If provided, GT map is injected into motion/planning head.
         motion_plan_head: Config for MotionPlanningHead.
         num_classes: Number of detection classes.
     """
@@ -35,6 +41,7 @@ class GTSparseDriveHead(BaseModule):
         map_head: dict = None,
         motion_plan_head: dict = None,
         num_classes: int = 10,
+        num_map_classes: int = 3,
         init_cfg=None,
         **kwargs,
     ):
@@ -53,11 +60,21 @@ class GTSparseDriveHead(BaseModule):
         for p in self.det_head.parameters():
             p.requires_grad_(False)
 
+        self.num_map_classes = num_map_classes
+        if map_head is not None:
+            self.map_head = build_head(map_head)
+            # Freeze map_head parameters: only anchor_encoder and
+            # instance_bank sub-modules are used (non-trainable).
+            for p in self.map_head.parameters():
+                p.requires_grad_(False)
+
         assert motion_plan_head is not None
         self.motion_plan_head = build_head(motion_plan_head)
 
     def init_weights(self):
         self.det_head.init_weights()
+        if hasattr(self, "map_head"):
+            self.map_head.init_weights()
         self.motion_plan_head.init_weights()
 
     # ------------------------------------------------------------------ #
@@ -66,6 +83,11 @@ class GTSparseDriveHead(BaseModule):
 
     def forward(self, feature_maps, metas: dict):
         batch_size = len(metas["img_metas"])
+        device = (
+            feature_maps[0].device
+            if isinstance(feature_maps[0], torch.Tensor)
+            else feature_maps[0][0].device
+        )
 
         # 1. Update instance_bank temporal mask.
         #    We discard the returned bank features; we only need self.mask.
@@ -83,10 +105,16 @@ class GTSparseDriveHead(BaseModule):
             feature_maps,
         )
 
-        # 4. Forward motion/planning head.
+        # 4. Build GT map_output if map_head sub-modules are available.
+        if hasattr(self, "map_head"):
+            map_output = self._build_gt_map_output(metas, batch_size, device)
+        else:
+            map_output = None
+
+        # 5. Forward motion/planning head.
         motion_output, planning_output = self.motion_plan_head(
             det_output,
-            None,  # no map output
+            map_output,
             feature_maps,
             metas,
             self.det_head.anchor_encoder,
@@ -94,7 +122,7 @@ class GTSparseDriveHead(BaseModule):
             self.det_head.instance_bank.anchor_handler,
         )
 
-        return det_output, None, motion_output, planning_output
+        return det_output, map_output, motion_output, planning_output
 
     # ------------------------------------------------------------------ #
     #  GT det_output construction helpers
@@ -188,6 +216,88 @@ class GTSparseDriveHead(BaseModule):
             "prediction": [anchors],
             "quality": [None],
             "instance_id": instance_id,
+        }
+
+    def _build_gt_map_output(
+        self, metas: dict, batch_size: int, device
+    ) -> dict:
+        """Build the map_output dict populated with GT map polylines.
+
+        GT map pts are encoded via the map_head's anchor_encoder into the
+        same anchor_embed space that MotionPlanningHead's cross_gnn expects.
+        Classification logits are set to +100 at the GT class so that the
+        confidence-based top-k selection in MotionPlanningHead picks the
+        true map elements.
+
+        Args:
+            metas: Batch metas containing 'gt_map_labels' and 'gt_map_pts'.
+                   gt_map_labels: list[Tensor(M_i,)]
+                   gt_map_pts:    list[Tensor(M_i, num_sample, 2)] (test)
+                                  or list[Tensor(M_i, num_perms, num_sample, 2)]
+                                  (train, when VectorizeMap has permute=True).
+        """
+        num_anchor = self.map_head.instance_bank.num_anchor  # 100
+        embed_dims = self.map_head.instance_bank.embed_dims  # 256
+        num_sample_x2 = self.map_head.anchor_encoder.input_dims  # num_sample * 2
+
+        gt_map_labels = metas["gt_map_labels"]  # list[Tensor(M_i,)]
+        gt_map_pts = metas["gt_map_pts"]        # list[Tensor(...)]
+
+        predictions = torch.zeros(
+            batch_size, num_anchor, num_sample_x2, device=device
+        )
+        cls_logits = torch.full(
+            (batch_size, num_anchor, self.num_map_classes), -100.0, device=device
+        )
+
+        for i in range(batch_size):
+            map_pts_i = gt_map_pts[i]
+            map_labels_i = gt_map_labels[i]
+
+            if not isinstance(map_pts_i, torch.Tensor):
+                map_pts_i = torch.tensor(
+                    map_pts_i, device=device, dtype=torch.float32
+                )
+            else:
+                map_pts_i = map_pts_i.to(device=device, dtype=torch.float32)
+
+            if not isinstance(map_labels_i, torch.Tensor):
+                map_labels_i = torch.tensor(
+                    map_labels_i, device=device, dtype=torch.long
+                )
+            else:
+                map_labels_i = map_labels_i.to(device=device)
+
+            M_i = len(map_pts_i)
+            if M_i == 0:
+                continue
+            M_i = min(M_i, num_anchor)
+            map_pts_i = map_pts_i[:M_i]
+            map_labels_i = map_labels_i[:M_i]
+
+            # Train pipeline uses permute=True: (M, num_perms, num_sample, 2).
+            # Take the first permutation (canonical polyline direction).
+            if map_pts_i.dim() == 4:
+                map_pts_i = map_pts_i[:, 0]  # (M, num_sample, 2)
+
+            predictions[i, :M_i] = map_pts_i.reshape(M_i, -1)
+            cls_logits[i, :M_i] = -100.0
+            cls_logits[i, torch.arange(M_i, device=device), map_labels_i] = 100.0
+
+        # Encode GT map point coordinates into positional embeddings.
+        anchor_embed = self.map_head.anchor_encoder(predictions)
+
+        # Instance features initialised to zero; cross_gnn will attend to
+        # anchor_embed (position) rather than learned instance content.
+        instance_feature = torch.zeros(
+            batch_size, num_anchor, embed_dims, device=device
+        )
+
+        return {
+            "instance_feature": instance_feature,
+            "anchor_embed": anchor_embed,
+            "classification": [cls_logits],
+            "prediction": [predictions],
         }
 
     @staticmethod
