@@ -111,7 +111,7 @@ model = dict(
     img_neck=dict(
         type="FPN",
         num_outs=num_levels,
-        start_level=0,
+        start_level=1,  # skip stride-4 so depth branch and gt_depth align at [8, 16, 32]
         out_channels=embed_dims,
         add_extra_convs="on_output",
         relu_before_extra_convs=True,
@@ -643,7 +643,7 @@ eval_config = dict(
     test_mode=True,
 )
 data_aug_conf = {
-    "resize_lim": (0.40, 0.47),
+    "resize_lim": (0.80, 0.94),
     "final_dim": input_shape[::-1],
     "bot_pct_lim": (0.0, 0.0),
     "rot_lim": (-5.4, 5.4),
