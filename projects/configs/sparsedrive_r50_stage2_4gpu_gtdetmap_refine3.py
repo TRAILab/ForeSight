@@ -9,7 +9,7 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 24
+total_batch_size = 48
 num_gpus = 4
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_bs24_predonly_deform',),
+                name='sparsedrive_r50_stage2_4gpu_gtdetmap_refine3',),
             interval=50)
     ],
 )
@@ -125,6 +125,7 @@ model = dict(
         type="GTSparseDriveHead",
         task_config=task_config,
         num_classes=num_classes,
+        num_map_classes=num_map_classes,
         det_head=dict(
             type="Sparse4DHead",
             cls_threshold_to_reg=0.05,
@@ -424,14 +425,12 @@ model = dict(
                     "temp_gnn",
                     "gnn",
                     "norm",
-                    "deformable",
+                    "cross_gnn",
                     "norm",
-                    "ffn",
+                    "ffn",                    
                     "norm",
-                ] * 3 +
-                [
                     "refine",
-                ]
+                ] * 3
             ),
             temp_graph_model=dict(
                 type="MultiheadAttention",
@@ -453,30 +452,6 @@ model = dict(
                 num_heads=num_groups,
                 batch_first=True,
                 dropout=drop_out,
-            ),
-            deformable_model=dict(
-                type="DeformableFeatureAggregation",
-                embed_dims=embed_dims,
-                num_groups=num_groups,
-                num_levels=num_levels,
-                num_cams=6,
-                attn_drop=0.15,
-                use_deformable_func=use_deformable_func,
-                use_camera_embed=True,
-                residual_mode="add",
-                kps_generator=dict(
-                    type="SparseBox3DKeyPointsGenerator",
-                    num_learnable_pts=6,
-                    fix_scale=[
-                        [0, 0, 0],
-                        [0.45, 0, 0],
-                        [-0.45, 0, 0],
-                        [0, 0.45, 0],
-                        [0, -0.45, 0],
-                        [0, 0, 0.45],
-                        [0, 0, -0.45],
-                    ],
-                ),
             ),
             norm_layer=dict(type="LN", normalized_shape=embed_dims),
             ffn=dict(
@@ -586,7 +561,7 @@ train_pipeline = [
             "focal",
             "gt_bboxes_3d",
             "gt_labels_3d",
-            'gt_map_labels',
+            'gt_map_labels', 
             'gt_map_pts',
             'gt_agent_fut_trajs',
             'gt_agent_fut_masks',
@@ -607,6 +582,14 @@ test_pipeline = [
         class_dist_thred=[55] * len(class_names),
     ),
     dict(type="InstanceNameFilter", classes=class_names),
+    dict(
+        type='VectorizeMap',
+        roi_size=roi_size,
+        simplify=False,
+        normalize=False,
+        sample_num=num_sample,
+        permute=True,
+    ),
     dict(type="NuScenesSparse4DAdaptor"),
     dict(
         type="Collect",
@@ -619,6 +602,8 @@ test_pipeline = [
             'gt_ego_fut_cmd',
             "gt_bboxes_3d",
             "gt_labels_3d",
+            'gt_map_labels',
+            'gt_map_pts',
         ],
         meta_keys=["T_global", "T_global_inv", "timestamp", "instance_id"],
     ),
@@ -636,7 +621,7 @@ eval_pipeline = [
         normalize=False,
     ),
     dict(
-        type='Collect',
+        type='Collect', 
         keys=[
             'vectors',
             "gt_bboxes_3d",
@@ -644,7 +629,7 @@ eval_pipeline = [
             'gt_agent_fut_trajs',
             'gt_agent_fut_masks',
             'gt_ego_fut_trajs',
-            'gt_ego_fut_masks',
+            'gt_ego_fut_masks', 
             'gt_ego_fut_cmd',
             'fut_boxes'
         ],
