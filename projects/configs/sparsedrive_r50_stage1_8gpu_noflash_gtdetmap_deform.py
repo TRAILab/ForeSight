@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage1_8gpu_noflash_gtdetmap',),
+                name='sparsedrive_r50_stage1_8gpu_noflash_gtdetmap_deform',),
             interval=50)
     ],
 )
@@ -615,7 +615,7 @@ test_pipeline = [
         simplify=False,
         normalize=False,
         sample_num=num_sample,
-        permute=False,
+        permute=True,
     ),
     dict(type="NuScenesSparse4DAdaptor"),
     dict(

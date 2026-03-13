@@ -590,7 +590,7 @@ test_pipeline = [
         simplify=False,
         normalize=False,
         sample_num=num_sample,
-        permute=False,
+        permute=True,
     ),
     dict(type="NuScenesSparse4DAdaptor"),
     dict(
