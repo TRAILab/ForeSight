@@ -62,6 +62,7 @@ class MotionPlanningHead(BaseModule):
         planning_decoder=None,
         num_det=50,
         num_map=10,
+        detach_mode_query=True,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -141,6 +142,7 @@ class MotionPlanningHead(BaseModule):
 
         self.num_det = num_det
         self.num_map = num_map
+        self.detach_mode_query = detach_mode_query
 
     def init_weights(self):
         for i, op in enumerate(self.operation_order):
@@ -349,11 +351,14 @@ class MotionPlanningHead(BaseModule):
                 planning_status.append(plan_status)
                 # Update mode anchor queries for the next decoder iteration.
                 # cumsum converts delta trajectories to absolute endpoints.
-                motion_anchor_upd = motion_reg.detach().cumsum(dim=-2)
+                motion_anchor_upd = motion_reg.cumsum(dim=-2)
+                plan_anchor_upd = plan_reg.cumsum(dim=-2)
+                if self.detach_mode_query:
+                    motion_anchor_upd = motion_anchor_upd.detach()
+                    plan_anchor_upd = plan_anchor_upd.detach()
                 motion_mode_query = self.motion_anchor_encoder(
                     gen_sineembed_for_position(motion_anchor_upd[..., -1, :])
                 )
-                plan_anchor_upd = plan_reg.detach().cumsum(dim=-2)
                 plan_mode_query = self.plan_anchor_encoder(
                     gen_sineembed_for_position(plan_anchor_upd[..., -1, :])
                 ).flatten(1, 2).unsqueeze(1)
