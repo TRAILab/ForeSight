@@ -414,6 +414,7 @@ model = dict(
             embed_dims=embed_dims,
             decouple_attn=decouple_attn_motion,
             detach_mode_query=False,
+            mode_query_grad_scale=0.1,
             instance_queue=dict(
                 type="InstanceQueue",
                 embed_dims=embed_dims,
