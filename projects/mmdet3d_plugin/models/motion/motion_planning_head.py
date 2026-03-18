@@ -62,8 +62,6 @@ class MotionPlanningHead(BaseModule):
         planning_decoder=None,
         num_det=50,
         num_map=10,
-        detach_mode_query=True,
-        mode_query_grad_scale=0.0,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -143,8 +141,6 @@ class MotionPlanningHead(BaseModule):
 
         self.num_det = num_det
         self.num_map = num_map
-        self.detach_mode_query = detach_mode_query
-        self.mode_query_grad_scale = mode_query_grad_scale
 
     def init_weights(self):
         for i, op in enumerate(self.operation_order):
@@ -353,19 +349,8 @@ class MotionPlanningHead(BaseModule):
                 planning_status.append(plan_status)
                 # Update mode anchor queries for the next decoder iteration.
                 # cumsum converts delta trajectories to absolute endpoints.
-                # Gradient flow is controlled by mode_query_grad_scale:
-                #   0.0 (detach_mode_query=True default) = fully detached
-                #   (0, 1] = scaled gradient to avoid cumsum amplification
                 motion_anchor_upd = motion_reg.detach().cumsum(dim=-2)
                 plan_anchor_upd = plan_reg.detach().cumsum(dim=-2)
-                if not self.detach_mode_query and self.mode_query_grad_scale > 0:
-                    s = self.mode_query_grad_scale
-                    motion_anchor_upd = motion_anchor_upd + s * (
-                        motion_reg.cumsum(dim=-2) - motion_reg.cumsum(dim=-2).detach()
-                    )
-                    plan_anchor_upd = plan_anchor_upd + s * (
-                        plan_reg.cumsum(dim=-2) - plan_reg.cumsum(dim=-2).detach()
-                    )
                 motion_mode_query = self.motion_anchor_encoder(
                     gen_sineembed_for_position(motion_anchor_upd[..., -1, :])
                 )
