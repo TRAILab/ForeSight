@@ -1190,11 +1190,12 @@ class NuScenes3DDataset(Dataset):
 
         if eval_mode.get('with_occlusion', False):
             thresh = eval_mode["motion_threshhold"]
-            if motion_result_files is None:
-                motion_result_files = self.format_motion_results(results, jsonfile_prefix=self.work_dir, thresh=thresh)
-            occluded_results_dict = self._evaluate_single_motion_occluded(
-                motion_result_files, self.work_dir, logger=logger)
-            results_dict.update(occluded_results_dict)
+            if eval_mode.get('with_motion', False):
+                if motion_result_files is None:
+                    motion_result_files = self.format_motion_results(results, jsonfile_prefix=self.work_dir, thresh=thresh)
+                occluded_results_dict = self._evaluate_single_motion_occluded(
+                    motion_result_files, self.work_dir, logger=logger)
+                results_dict.update(occluded_results_dict)
 
             if detection_result_files is not None:
                 if isinstance(detection_result_files, dict):
@@ -1219,9 +1220,10 @@ class NuScenes3DDataset(Dataset):
                         detection_result_files, logger=logger)
                     results_dict.update(all_det_dict)
 
-            all_results_dict = self._evaluate_single_motion_all(
-                motion_result_files, self.work_dir, logger=logger)
-            results_dict.update(all_results_dict)
+            if eval_mode.get('with_motion', False) and motion_result_files is not None:
+                all_results_dict = self._evaluate_single_motion_all(
+                    motion_result_files, self.work_dir, logger=logger)
+                results_dict.update(all_results_dict)
 
         if eval_mode['with_planning']:
             from .evaluation.planning.planning_eval import planning_eval
