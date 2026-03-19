@@ -1,6 +1,5 @@
 from .sparsedrive import SparseDrive
 from .sparsedrive_head import SparseDriveHead
-from .gt_sparse_drive_head import GTSparseDriveHead
 from .blocks import (
     DeformableFeatureAggregation,
     DenseDepthNet,
@@ -21,7 +20,6 @@ from .motion import *
 __all__ = [
     "SparseDrive",
     "SparseDriveHead",
-    "GTSparseDriveHead",
     "DeformableFeatureAggregation",
     "DenseDepthNet",
     "AsymmetricFFN",

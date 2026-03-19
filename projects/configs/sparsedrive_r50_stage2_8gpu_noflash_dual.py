@@ -9,8 +9,8 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 24
-num_gpus = 4
+total_batch_size = 48
+num_gpus = 8
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
 num_epochs = 10
@@ -27,11 +27,11 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_bs24_predonly_deform',),
+                name='sparsedrive_r50_stage2_8gpu_noflash_dual',),
             interval=50)
     ],
 )
-load_from = None
+load_from = 'ckpt/dual_stage1.pth'
 resume_from = None
 workflow = [("train", 1)]
 fp16 = dict(loss_scale=32.0)
@@ -85,9 +85,9 @@ decouple_attn_motion = True
 with_quality_estimation = True
 
 task_config = dict(
-    with_det=False,
-    with_map=False,
-    with_motion_plan=True, use_gt_det=True,
+    with_det=True,
+    with_map=True,
+    with_motion_plan=True,
 )
 
 model = dict(
@@ -124,7 +124,6 @@ model = dict(
     head=dict(
         type="SparseDriveHead",
         task_config=task_config,
-        num_classes=num_classes,
         det_head=dict(
             type="Sparse4DHead",
             cls_threshold_to_reg=0.05,
@@ -171,7 +170,7 @@ model = dict(
                 * (num_decoder - num_single_frame_decoder)
             )[2:],
             temp_graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -180,7 +179,7 @@ model = dict(
             if temporal
             else None,
             graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -312,7 +311,7 @@ model = dict(
                 * (num_decoder - num_single_frame_decoder_map)
             )[:],
             temp_graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn_map else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -321,7 +320,7 @@ model = dict(
             if temporal_map
             else None,
             graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn_map else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -424,9 +423,9 @@ model = dict(
                     "temp_gnn",
                     "gnn",
                     "norm",
-                    "deformable",
+                    "cross_gnn",
                     "norm",
-                    "ffn",
+                    "ffn",                    
                     "norm",
                 ] * 3 +
                 [
@@ -441,42 +440,18 @@ model = dict(
                 dropout=drop_out,
             ),
             graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn_motion else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
                 dropout=drop_out,
             ),
             cross_graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims,
                 num_heads=num_groups,
                 batch_first=True,
                 dropout=drop_out,
-            ),
-            deformable_model=dict(
-                type="DeformableFeatureAggregation",
-                embed_dims=embed_dims,
-                num_groups=num_groups,
-                num_levels=num_levels,
-                num_cams=6,
-                attn_drop=0.15,
-                use_deformable_func=use_deformable_func,
-                use_camera_embed=True,
-                residual_mode="add",
-                kps_generator=dict(
-                    type="SparseBox3DKeyPointsGenerator",
-                    num_learnable_pts=6,
-                    fix_scale=[
-                        [0, 0, 0],
-                        [0.45, 0, 0],
-                        [-0.45, 0, 0],
-                        [0, 0.45, 0],
-                        [0, -0.45, 0],
-                        [0, 0, 0.45],
-                        [0, 0, -0.45],
-                    ],
-                ),
             ),
             norm_layer=dict(type="LN", normalized_shape=embed_dims),
             ffn=dict(
@@ -586,7 +561,7 @@ train_pipeline = [
             "focal",
             "gt_bboxes_3d",
             "gt_labels_3d",
-            'gt_map_labels',
+            'gt_map_labels', 
             'gt_map_pts',
             'gt_agent_fut_trajs',
             'gt_agent_fut_masks',
@@ -602,11 +577,6 @@ test_pipeline = [
     dict(type="LoadMultiViewImageFromFiles", to_float32=True),
     dict(type="ResizeCropFlipImage"),
     dict(type="NormalizeMultiviewImage", **img_norm_cfg),
-    dict(
-        type="CircleObjectRangeFilter",
-        class_dist_thred=[55] * len(class_names),
-    ),
-    dict(type="InstanceNameFilter", classes=class_names),
     dict(type="NuScenesSparse4DAdaptor"),
     dict(
         type="Collect",
@@ -617,10 +587,8 @@ test_pipeline = [
             "image_wh",
             'ego_status',
             'gt_ego_fut_cmd',
-            "gt_bboxes_3d",
-            "gt_labels_3d",
         ],
-        meta_keys=["T_global", "T_global_inv", "timestamp", "instance_id"],
+        meta_keys=["T_global", "T_global_inv", "timestamp"],
     ),
 ]
 eval_pipeline = [
@@ -636,7 +604,7 @@ eval_pipeline = [
         normalize=False,
     ),
     dict(
-        type='Collect',
+        type='Collect', 
         keys=[
             'vectors',
             "gt_bboxes_3d",
@@ -644,7 +612,7 @@ eval_pipeline = [
             'gt_agent_fut_trajs',
             'gt_agent_fut_masks',
             'gt_ego_fut_trajs',
-            'gt_ego_fut_masks',
+            'gt_ego_fut_masks', 
             'gt_ego_fut_cmd',
             'fut_boxes'
         ],
@@ -742,9 +710,9 @@ runner = dict(
 
 # ================== eval ========================
 eval_mode = dict(
-    with_det=False,
-    with_tracking=False,
-    with_map=False,
+    with_det=True,
+    with_tracking=True,
+    with_map=True,
     with_motion=True,
     with_planning=True,
     tracking_threshold=0.2,

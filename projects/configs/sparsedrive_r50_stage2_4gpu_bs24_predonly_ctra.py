@@ -90,7 +90,7 @@ with_quality_estimation = True
 task_config = dict(
     with_det=False,
     with_map=False,
-    with_motion_plan=True,
+    with_motion_plan=True, use_gt_det=True,
 )
 
 model = dict(
@@ -125,7 +125,7 @@ model = dict(
         loss_weight=0.2,
     ),
     head=dict(
-        type="GTSparseDriveHead",
+        type="SparseDriveHead",
         task_config=task_config,
         num_classes=num_classes,
         det_head=dict(

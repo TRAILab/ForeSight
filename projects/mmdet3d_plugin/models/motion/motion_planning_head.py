@@ -142,6 +142,20 @@ class MotionPlanningHead(BaseModule):
         self.num_det = num_det
         self.num_map = num_map
 
+    @staticmethod
+    def build_gt_identity_indices(gt_labels, device):
+        """Build identity matching indices for the GT oracle branch.
+        Each anchor slot i maps directly to GT agent i, bypassing Hungarian matching."""
+        indices = []
+        for labels_i in gt_labels:
+            N_i = len(labels_i)
+            if N_i == 0:
+                indices.append([None, None])
+            else:
+                idx = torch.arange(N_i, device=device, dtype=torch.long)
+                indices.append([idx, idx])
+        return indices
+
     def init_weights(self):
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:

@@ -20,6 +20,7 @@ from mmdet.models import HEADS, LOSSES
 from mmdet.core import reduce_mean
 
 from ..blocks import DeformableFeatureAggregation as DFG
+from projects.mmdet3d_plugin.core.box3d import encode_gt_boxes
 
 __all__ = ["Sparse4DHead"]
 
@@ -161,6 +162,98 @@ class Sparse4DHead(BaseModule):
             self.warmup_fc_before = nn.Identity()
             self.warmup_fc_after = nn.Identity()
         self.warmup_supervise_all = warmup_supervise_all
+
+    def build_gt_det_output(self, metas, batch_size, device):
+        """Build a det_output dict from GT boxes, matching the format returned
+        by forward(). Used by the GT oracle (use_gt_det=True) branch."""
+        num_cls = next(m.num_cls for m in self.layers if hasattr(m, 'num_cls'))
+        num_anchor = self.instance_bank.num_anchor
+        gt_bboxes = metas[self.gt_reg_key]
+        gt_labels = metas[self.gt_cls_key]
+        anchors = torch.zeros(batch_size, num_anchor, 11, device=device)
+        cls_logits = anchors.new_full((batch_size, num_anchor, num_cls), -100.0)
+        for i in range(batch_size):
+            bboxes_i = gt_bboxes[i]
+            labels_i = gt_labels[i]
+            if not isinstance(bboxes_i, torch.Tensor):
+                bboxes_i = torch.tensor(bboxes_i, device=device, dtype=torch.float32)
+            else:
+                bboxes_i = bboxes_i.to(device=device, dtype=torch.float32)
+            if not isinstance(labels_i, torch.Tensor):
+                labels_i = torch.tensor(labels_i, device=device, dtype=torch.long)
+            else:
+                labels_i = labels_i.to(device=device)
+            N_i = min(len(bboxes_i), num_anchor)
+            if N_i == 0:
+                continue
+            anchors[i, :N_i] = encode_gt_boxes(bboxes_i[:N_i])
+            cls_logits[i, torch.arange(N_i, device=device), labels_i[:N_i]] = 100.0
+        anchor_embed = self.anchor_encoder(anchors)
+        instance_feature = torch.zeros(batch_size, num_anchor, self.embed_dims, device=device)
+        instance_id = self._get_gt_instance_ids(metas, batch_size, num_anchor, device)
+        return {
+            'instance_feature': instance_feature,
+            'anchor_embed': anchor_embed,
+            'classification': [cls_logits],
+            'prediction': [anchors],
+            'quality': [None],
+            'instance_id': instance_id,
+        }
+
+    def build_gt_map_output(self, metas, batch_size, device):
+        """Build a map_output dict from GT map annotations, matching the format
+        returned by forward(). Used by the GT oracle (use_gt_det=True) branch."""
+        num_cls = next(m.num_cls for m in self.layers if hasattr(m, 'num_cls'))
+        num_anchor = self.instance_bank.num_anchor
+        gt_map_pts = metas[self.gt_reg_key]
+        gt_map_labels = metas[self.gt_cls_key]
+        predictions = torch.zeros(
+            batch_size, num_anchor, self.anchor_encoder.input_dims, device=device)
+        cls_logits = torch.full(
+            (batch_size, num_anchor, num_cls), -100.0, device=device)
+        for i in range(batch_size):
+            map_pts_i = gt_map_pts[i]
+            map_labels_i = gt_map_labels[i]
+            if not isinstance(map_pts_i, torch.Tensor):
+                map_pts_i = torch.tensor(map_pts_i, device=device, dtype=torch.float32)
+            else:
+                map_pts_i = map_pts_i.to(device=device, dtype=torch.float32)
+            if not isinstance(map_labels_i, torch.Tensor):
+                map_labels_i = torch.tensor(map_labels_i, device=device, dtype=torch.long)
+            else:
+                map_labels_i = map_labels_i.to(device=device)
+            M_i = min(len(map_pts_i), num_anchor)
+            if M_i == 0:
+                continue
+            map_pts_i = map_pts_i[:M_i]
+            if map_pts_i.dim() == 4:
+                map_pts_i = map_pts_i[:, 0]
+            predictions[i, :M_i] = map_pts_i.reshape(M_i, -1)
+            cls_logits[i, torch.arange(M_i, device=device), map_labels_i[:M_i]] = 100.0
+        anchor_embed = self.anchor_encoder(predictions)
+        instance_feature = torch.zeros(batch_size, num_anchor, self.embed_dims, device=device)
+        return {
+            'instance_feature': instance_feature,
+            'anchor_embed': anchor_embed,
+            'classification': [cls_logits],
+            'prediction': [predictions],
+        }
+
+    @staticmethod
+    def _get_gt_instance_ids(metas, batch_size, num_anchor, device):
+        instance_id = torch.full(
+            (batch_size, num_anchor), -1, dtype=torch.long, device=device)
+        for i, img_meta in enumerate(metas['img_metas']):
+            gt_id = img_meta.get('instance_id', None)
+            if gt_id is None:
+                continue
+            if not isinstance(gt_id, torch.Tensor):
+                gt_id = torch.tensor(gt_id, dtype=torch.long, device=device)
+            else:
+                gt_id = gt_id.to(device=device)
+            N_i = min(len(gt_id), num_anchor)
+            instance_id[i, :N_i] = gt_id[:N_i]
+        return instance_id
 
     def init_weights(self):
         for i, op in enumerate(self.operation_order):
