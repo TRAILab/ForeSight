@@ -12,7 +12,7 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 64
+total_batch_size = 24
 num_gpus = 4
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
@@ -691,7 +691,7 @@ data = dict(
 # ================== training ========================
 optimizer = dict(
     type="AdamW",
-    lr=4e-4,
+    lr=1.5e-4,
     weight_decay=0.001,
     paramwise_cfg=dict(
         custom_keys={
