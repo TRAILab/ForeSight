@@ -19,6 +19,9 @@ CODE_DIR=/raid/home/spapais/ForeSight
 # Default command
 CMD=${@:-bash}
 
+# Load env if needed (e.g. when submitted via non-interactive SSH)
+[[ -f ~/.bashrc ]] && source ~/.bashrc
+
 # Run
 echo "Running: $CMD"
 singularity exec --nv -e --pwd /workspace/ForeSight/ \
