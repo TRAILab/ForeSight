@@ -724,7 +724,7 @@ evaluation = dict(
 load_from = 'ckpt/sparsedrive_stage1.pth'
 
 # === autoresearch overrides (auto_mar25_exp003_queue6) ===
-log_config['hooks'][1]['init_kwargs']['name'] = 'auto_mar25_exp003_queue6'
+log_config['hooks'] = [dict(type="TextLoggerHook", by_epoch=False)]
 # Increase temporal queue from 4 to 6 frames
 # More history improves agent tracking and ego-state estimation for planning
 queue_length = 6

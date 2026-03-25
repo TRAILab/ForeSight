@@ -724,7 +724,7 @@ evaluation = dict(
 load_from = 'ckpt/sparsedrive_stage1.pth'
 
 # === autoresearch overrides (auto_mar25_exp002_motion_loss_up) ===
-log_config['hooks'][1]['init_kwargs']['name'] = 'auto_mar25_exp002_motion_loss_up'
+log_config['hooks'] = [dict(type="TextLoggerHook", by_epoch=False)]
 # Increase motion loss weights to improve agent trajectory forecasting
 # Better agent state estimates feed into collision-aware planning
 model['head']['motion_plan_head']['motion_loss_reg']['loss_weight'] = 0.5

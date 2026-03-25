@@ -724,7 +724,7 @@ evaluation = dict(
 load_from = 'ckpt/sparsedrive_stage1.pth'
 
 # === autoresearch overrides (auto_mar25_exp001_plan_loss_up) ===
-log_config['hooks'][1]['init_kwargs']['name'] = 'auto_mar25_exp001_plan_loss_up'
+log_config['hooks'] = [dict(type="TextLoggerHook", by_epoch=False)]
 # Increase planning regression loss to directly optimize L2
 # Increase planning cls loss to improve trajectory mode selection
 model['head']['motion_plan_head']['plan_loss_reg']['loss_weight'] = 2.0
