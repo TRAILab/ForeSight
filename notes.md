@@ -51,3 +51,8 @@ sbatch scripts/dgx_run.sh bash ./tools/dist_train.sh projects/configs/sparsedriv
 # Data generation
 sbatch tools/dgx_run.sh python unitraj/inference.py --config-name=config_v1inference_3class
 ./scripts/local_run.sh python tools/data_converter/nuscenes_occlusion_converter.py convert --input data/infos/nuscenes_infos_val.pkl --output data/infos/nuscenes_infos_val_occ.pkl --predictions data/occlusions/nuscenes_predictions_trainval.npz
+
+# Autoresearch
+tmux new -s autoresearch (or) tmux attach -t autoresearch (to detach, press Ctrl+b then d or type "detach")
+claude
+/autoresearch --goal "improve val/L2 and val/obj_box_col" --base-config projects/configs/sparsedrive_r50_stage2_4gpu_nomap.py --max-experiments 5 --poll 30m

@@ -5,6 +5,9 @@ DATA_DIR=/scratch/hpc_nas/datasets/nuscenes/v1.0-trainval/
 CODE_DIR=/home/spapais/ForeSight/
 CMD=${@:-bash}
 
+# Load env if needed (e.g. when submitted via non-interactive SSH)
+[[ -f ~/.bashrc ]] && source ~/.bashrc
+
 # Run docker container
 docker run --gpus all -it --rm --shm-size=32g \
     -v $DATA_DIR:/workspace/ForeSight/data/nuscenes \
