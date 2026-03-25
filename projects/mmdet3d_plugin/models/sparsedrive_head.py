@@ -61,7 +61,7 @@ class SparseDriveHead(BaseModule):
         warmup_iters = self.task_config.get('gt_det_warmup_iters', 0)
         if warmup_iters > 0:
             return self.training and (self._iters_trained < warmup_iters)
-        return bool(self.task_config.get('use_gt_det', False))
+        return self.training and bool(self.task_config.get('use_gt_det', False))
 
     @property
     def _gt_det_active(self):
