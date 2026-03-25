@@ -1,0 +1,2 @@
+commit	val_L2	val_col%	car_ade	NDS	status	description
+baseline	0.5911	0.080	0.6189	0.5217	baseline	sparsedrive_r50_stage2_4gpu_nomap (bs48, 2026-02-17)
