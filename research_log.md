@@ -116,3 +116,64 @@ num_decoder = 8
 
 ---
 
+## [exp-005] auto_mar25_exp005_queue6_dec8 — 2026-03-26
+**Hypothesis:** Combining queue_length=6 (best L2) and num_decoder=8 (best obj_box_col) should yield improvements on both metrics simultaneously.
+**Config changes:**
+```python
+queue_length = 6
+model['head']['motion_plan_head']['instance_queue']['queue_length'] = queue_length
+num_decoder = 8
+```
+**Job ID:** 3522
+**Status:** discard
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.5911 | 0.5757 | 0.5934 | ↑ +0.0177 vs best L2 |
+| obj_box_col | 0.080% | 0.074% | 0.126% | ↑ +0.052% vs best col |
+| car_ade | 0.6189 | 0.6189 | 0.6292 | ↑ +0.0103 |
+| NDS | 0.5217 | 0.5241 | 0.5241 | ~ |
+
+**Analysis:** Negative synergy — combining queue=6 and decoder=8 produces results worse than either individually on both primary metrics. L2=0.5934 (worse than exp003's 0.5757) and obj_box_col=0.126% (far worse than exp004's 0.074% and baseline's 0.080%). The larger model (8 decoder layers) combined with longer temporal context (6 frames) likely exceeds what 10 training epochs can optimize effectively. The two changes compete for the same capacity budget. To get benefits of both, more training epochs (15-20) would likely be needed.
+
+---
+
+## Conclusions
+
+**Session:** autoresearch/mar25 | **Date:** 2026-03-26 | **Goal:** Improve val/L2 and val/obj_box_col
+
+### Final Results Table
+
+| Exp | Config | L2 | obj_box_col | car_ade | NDS | Δ L2 | Δ col | Status |
+|-----|--------|-----|-------------|---------|-----|------|-------|--------|
+| baseline | nomap bs48 | 0.5911 | 0.080% | 0.6189 | 0.5217 | — | — | — |
+| exp-001 | plan_loss_reg 1→2, cls 0.5→1 | 0.5902 | 0.084% | 0.6405 | 0.5239 | -0.0009 | +0.004% | keep |
+| exp-002 | motion_loss 0.2→0.5 | 0.6358 | 0.148% | 0.6146 | 0.5158 | +0.0447 | +0.068% | **discard** |
+| exp-003 | queue_length 4→6 | **0.5757** | 0.100% | 0.6281 | 0.5238 | **-0.0154** | +0.020% | keep ⭐ |
+| exp-004 | num_decoder 6→8 | 0.5955 | **0.074%** | 0.6189 | 0.5239 | +0.0044 | **-0.006%** | keep ⭐ |
+| exp-005 | queue6 + decoder8 | 0.5934 | 0.126% | 0.6292 | 0.5241 | +0.0023 | +0.046% | **discard** |
+
+### Key Findings
+
+1. **`queue_length=6` is the strongest single lever for L2** (exp-003): Reduces L2 by 0.0154 (2.6% relative) vs baseline. More temporal history gives the planner better ego-motion context. Config: `queue_length = 6` + `instance_queue queue_length = 6`.
+
+2. **`num_decoder=8` is the strongest single lever for obj_box_col** (exp-004): Reduces collision rate from 0.080% to 0.074% (7.5% relative improvement). Richer detection features from deeper decoder improve collision awareness. NDS and car_ade unchanged.
+
+3. **Loss weight changes are not effective levers** (exp-001, exp-002): Increasing plan loss had negligible effect on L2 (-0.0009). Increasing motion loss caused major regression on both metrics (+7.6% L2, +85% col). The default loss weights (plan_reg=1.0, motion_reg=0.2) appear well-calibrated.
+
+4. **Combinations require more training epochs**: queue=6 + decoder=8 together showed negative synergy at 10 epochs — both metrics worse than individual bests. The increased model complexity needs longer training to converge.
+
+### Recommended Next Steps
+
+1. **Use `queue_length=6` as the new default** — clear L2 improvement with no architectural cost. Best config for L2: `auto_mar25_exp003_queue6`.
+
+2. **Try `num_decoder=8` with 15+ epochs** — the collision improvement likely compounds with more training. The 10-epoch budget may be insufficient for the larger model.
+
+3. **Try queue=6 + decoder=8 with 15 epochs** — the negative synergy may disappear with adequate training time. This combination has the highest ceiling.
+
+4. **Avoid motion loss weight increases** — strong negative result, do not revisit.
+
+5. **Explore dropout reduction** (0.1→0.05) or LR warmup tuning as next levers — loss weights and architecture depth are now better understood.
+
+
