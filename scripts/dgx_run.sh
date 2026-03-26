@@ -9,6 +9,9 @@
 #SBATCH --mail-user="sandro.papais@robotics.utias.utoronto.ca"
 #SBATCH --mail-type=END,FAIL
 
+# Load env if needed (e.g. when submitted via non-interactive SSH)
+[[ -f ~/.bashrc ]] && source ~/.bashrc
+
 # Paths
 DATA_DIR=/raid/datasets/nuscenes
 CODE_DIR=/raid/home/spapais/ForeSight

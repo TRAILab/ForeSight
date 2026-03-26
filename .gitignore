@@ -22,3 +22,5 @@ __pycache__/
 
 job_scripts/
 temp_ops/
+
+.claude/scheduled_tasks.lock

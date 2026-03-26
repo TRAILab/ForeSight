@@ -56,3 +56,7 @@ sbatch tools/dgx_run.sh python unitraj/inference.py --config-name=config_v1infer
 tmux new -s autoresearch (or) tmux attach -t autoresearch (to detach, press Ctrl+b then d or type "detach")
 claude
 /autoresearch --goal "improve val/L2 and val/obj_box_col" --base-config projects/configs/sparsedrive_r50_stage2_4gpu_nomap.py --max-experiments 5 --poll 30m
+
+# Results synchronization folder
+sudo rsync -av --exclude='*.pkl' --exclude='*.pth' spapais@129.97.163.137:/home/spapais/ForeSight/work_dirs/ ./work_dirs/
+sudo rsync -av --exclude='*.pkl' --exclude='*.pth' spapais@192.168.42.200:/raid/home/spapais/ForeSight/work_dirs/ ./work_dirs/
