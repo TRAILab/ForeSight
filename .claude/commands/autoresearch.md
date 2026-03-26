@@ -29,6 +29,15 @@ commit	val_L2	val_col%	car_ade	NDS	status	description
 
 **Initialize `research_log.md`** if it doesn't exist. If it already exists, read it to catch up on prior experiments before proposing.
 
+**Read the project research review** to understand the full experimental landscape, confirmed wins, and known-bad ideas before proposing anything:
+```bash
+cat docs/research_review.md
+```
+Pay particular attention to:
+- **Section 3** (Experimental Findings): what has already been tried and what the results were — do NOT re-run experiments that are already documented here
+- **Section 7** (Prioritized Action Plan): the "Confirmed Wins" table and "Negative/Null Evidence" table — use the confirmed wins as a starting point and never propose ideas from the null/negative list
+- **Section 9** (Open Questions): unresolved questions worth answering
+
 ## Architecture
 - SparseDrive: ResNet → FPN → SparseDriveHead (detection + map + motion/planning)
 - Configs are Python files exec()'d by mmdet3d — appending lines at the end overrides earlier values
@@ -81,10 +90,18 @@ model['head']['det_head']['loss_reg']['loss_box']['loss_weight'] = 0.25
 Each iteration:
 
 ### Step 1 — Propose
-Based on the goal and all prior results in `research_log.md` and `results.tsv`, decide what to change. Test ONE hypothesis per experiment (1–3 parameter changes). Explicitly state:
+Based on the goal and all prior results in `research_log.md`, `results.tsv`, and `docs/research_review.md`, decide what to change. Test ONE hypothesis per experiment (1–3 parameter changes). Explicitly state:
 - What you're changing
 - Why (what mechanism should improve the metric)
 - What improvement you expect
+- That this has NOT already been tried (cross-check `docs/research_review.md` Section 3 and `research_log.md`)
+
+**Hard constraints from prior work (never propose these — results are already in):**
+- Do NOT remove map from both stages — planning catastrophically fails (L2: 0.600→6.61)
+- Do NOT use pretrainv3/v4-style prediction pretraining — degrades all metrics
+- Do NOT use separate head (sephead) — slightly worse across the board
+- Do NOT reduce map learning rate — map_mAP collapses to ~0.07
+- Do NOT add map head to stage2 when loaded from DN stage1 pretrain — L2 worsens to 0.700
 
 ### Step 2 — Create config
 Config stem format: `auto_<tag>_exp{NNN}_{short_suffix}` (suffix: alphanumeric+underscore, ≤20 chars)
@@ -166,9 +183,14 @@ If no work_dir log, fall back to SLURM log: `/raid/home/spapais/ForeSight/logs/f
 ---
 ```
 
-Commit the updated logs:
+**Update `docs/research_review.md`** — lightweight per-experiment update:
+1. Append a new row to the **Section 3.11 summary table** with this experiment's key metrics.
+2. If status is `keep` (new best), also update the **Section 7 "Best Current Recipe"** block to reflect the new leading config.
+3. If the result reveals a new hard constraint (something that clearly hurts), add it to the **Section 7 "Negative/Null Evidence"** table AND to the Step 1 hard constraints list in this file.
+
+Commit all updated logs together:
 ```bash
-git add results.tsv research_log.md
+git add results.tsv research_log.md docs/research_review.md
 git commit -m "autoresearch <tag> exp-NNN: log results (<status>)"
 git push
 ```
@@ -177,7 +199,21 @@ git push
 Go to Step 1.
 
 ## At the end (max-experiments reached or manually stopped)
-Append a `## Conclusions` section to `research_log.md` with final summary table and recommended next steps. Commit and push.
+Append a `## Conclusions` section to `research_log.md` with final summary table and recommended next steps.
+
+**Do a comprehensive update of `docs/research_review.md`:**
+- Add a new subsection under **Section 3** (e.g., `### 3.12 Auto-research <tag> Findings`) summarizing all experiments run this session with their metrics and key takeaways.
+- Update the **Section 3.11 summary table** to include all new rows (or replace stale ones).
+- Update **Section 7 "Confirmed Wins"** and **"Negative/Null Evidence"** tables based on what this session learned.
+- Update **Section 7 "Best Current Recipe"** if a new best config was found.
+- Update **Section 8 "Next Experiments"** to replace completed experiments with follow-ups suggested by the findings.
+- Update the header date line: `> Experimental findings updated: <today's date>`.
+
+```bash
+git add results.tsv research_log.md docs/research_review.md
+git commit -m "autoresearch <tag>: final session summary"
+git push
+```
 
 ## Rules
 - Never ask for confirmation — run fully autonomously
