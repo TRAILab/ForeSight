@@ -25,7 +25,17 @@ head -90 <base-config> && echo "---" && tail -50 <base-config>
 commit	val_L2	val_col%	car_ade	NDS	status	description
 ```
 
-**Establish the baseline**: check whether prior experiment logs exist in `work_dirs/` on DGX for the base config. If they do, read the metrics and record them as the first `results.tsv` row with status `baseline`. If not, note that no baseline is available and proceed.
+**Run the baseline** — always submit the base config as exp-000 before any experiments. This gives a reproducible reference on the same hardware and code version.
+
+Config stem: `auto_<tag>_exp000_baseline`
+
+Create the config (copy base config, only update the WandB name):
+```python
+# === autoresearch overrides (auto_<tag>_exp000_baseline) ===
+log_config['hooks'][1]['init_kwargs']['name'] = 'auto_<tag>_exp000_baseline'
+```
+
+Submit and wait for it to finish exactly as in Steps 3–6 below. Record results as the first `results.tsv` row with status `baseline`. This run does NOT count against `--max-experiments`.
 
 **Initialize `research_log.md`** if it doesn't exist. If it already exists, read it to catch up on prior experiments before proposing.
 
@@ -102,6 +112,8 @@ Based on the goal and all prior results in `research_log.md`, `results.tsv`, and
 - Do NOT use separate head (sephead) — slightly worse across the board
 - Do NOT reduce map learning rate — map_mAP collapses to ~0.07
 - Do NOT add map head to stage2 when loaded from DN stage1 pretrain — L2 worsens to 0.700
+- Do NOT increase motion_loss_reg or motion_loss_cls above 0.2 — large regression on both L2 and obj_box_col (mar25 exp002)
+- Do NOT use rotation augmentation (rot3d_range) — hurts both L2 and obj_box_col (prior work)
 
 ### Step 2 — Create config
 Config stem format: `auto_<tag>_exp{NNN}_{short_suffix}` (suffix: alphanumeric+underscore, ≤20 chars)
@@ -132,7 +144,7 @@ ssh trail_dgx "cd /raid/home/spapais/ForeSight && git fetch origin autoresearch/
 
 ### Step 4 — Submit
 ```bash
-ssh trail_dgx "cd /raid/home/spapais/ForeSight && sbatch scripts/dgx_run.sh bash ./tools/dist_train.sh projects/configs/<config_stem>.py 4 --deterministic"
+ssh trail_dgx "cd /raid/home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/dgx_run.sh bash ./tools/dist_train.sh projects/configs/<config_stem>.py 4 --deterministic"
 ```
 Parse job ID from `Submitted batch job <ID>`. Record it immediately in `research_log.md`.
 
