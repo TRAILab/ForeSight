@@ -51,3 +51,25 @@ model['head']['motion_plan_head']['plan_loss_cls']['loss_weight'] = 1.0
 
 ---
 
+## [exp-002] auto_mar25_exp002_motion_loss_up — 2026-03-26
+**Hypothesis:** Increasing motion loss weights (0.2→0.5) should improve agent trajectory forecasting, giving the planner better context for collision avoidance.
+**Config changes:**
+```python
+model['head']['motion_plan_head']['motion_loss_reg']['loss_weight'] = 0.5
+model['head']['motion_plan_head']['motion_loss_cls']['loss_weight'] = 0.5
+```
+**Job ID:** 3519
+**Status:** discard
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.5911 | 0.5902 | 0.6358 | ↑ +0.0456 |
+| obj_box_col | 0.080% | 0.080% | 0.148% | ↑ +0.068% |
+| car_ade | 0.6189 | 0.6405 | 0.6146 | ↓ -0.0259 |
+| NDS | 0.5217 | 0.5239 | 0.5158 | ↓ -0.0081 |
+
+**Analysis:** Strong negative result. Motion loss increase 0.2→0.5 dramatically hurts both L2 (+7.6%) and obj_box_col (+85% relative). Interestingly car_ade improved slightly (better motion forecasting), but planning quality collapsed — higher motion gradients appear to dominate and distort the planning head's learning. The 0.2 baseline motion loss weight seems well-calibrated. Do NOT increase motion loss weights. Next: try queue_length=6 for more temporal context.
+
+---
+
