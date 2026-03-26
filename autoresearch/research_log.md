@@ -177,3 +177,25 @@ num_decoder = 8
 5. **Explore dropout reduction** (0.1→0.05) or LR warmup tuning as next levers — loss weights and architecture depth are now better understood.
 
 
+
+---
+
+# AutoResearch Log — mar26
+**Goal:** Improve val/L2 and val/obj_box_col
+**Base config:** projects/configs/sparsedrive_r50_stage2_4gpu_nomap_queue6.py
+**Session branch:** autoresearch/mar26
+**Max experiments:** 5
+
+## Context from mar25
+- Best L2: 0.5757 (exp003, queue_length=6 — now baked into base config)
+- Best col: 0.074% (exp004, num_decoder=8)
+- Hard constraints: motion_loss >0.2 kills both metrics; queue6+decoder8 negative at 10 epochs
+- Untested ideas on queue=6 base: extended training, num_det=100, confidence_decay, plan_loss_up
+
+## Experiment Plan
+1. exp001: Extended training 10→15 epochs (addresses known bottleneck B2)
+2. exp002: Plan loss upweighting (plan_reg 1→2, plan_cls 0.5→1) on queue=6 base
+3. exp003: num_det=100 (more agents to planner, untested)
+4. exp004: confidence_decay=0.8 (better temporal tracking)
+5. exp005: Best combo of above
+
