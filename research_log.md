@@ -91,7 +91,28 @@ model['head']['motion_plan_head']['instance_queue']['queue_length'] = queue_leng
 | car_ade | 0.6189 | 0.6405 | 0.6281 | ↓ -0.0124 |
 | NDS | 0.5217 | 0.5239 | 0.5238 | ~ |
 
-**Analysis:** Strong positive result for L2 — queue_length=6 reduces L2 by 2.6% absolute vs baseline (new best: 0.5757). More temporal context clearly helps the planner produce more accurate trajectories. obj_box_col regressed slightly (0.100% vs 0.080%) — additional frames may shift optimization balance. Next: exp-004 tests num_decoder=8; exp-005 will combine queue=6 with plan_loss_reg=2.0 to see if the plan loss gain from exp001 stacks additively.
+**Analysis:** Strong positive result for L2 — queue_length=6 reduces L2 by 2.6% absolute vs baseline (new best: 0.5757). More temporal context clearly helps the planner produce more accurate trajectories. obj_box_col regressed slightly (0.100% vs 0.080%) — additional frames may shift optimization balance. Next: exp-004 tests num_decoder=8; exp-005 will combine queue=6 with decoder=8 to target both metrics simultaneously.
+
+---
+
+## [exp-004] auto_mar25_exp004_decoder8 — 2026-03-26
+**Hypothesis:** Increasing detection decoder depth from 6 to 8 layers produces richer instance features, improving detection quality and downstream motion/planning.
+**Config changes:**
+```python
+num_decoder = 8
+```
+**Job ID:** 3521
+**Status:** keep
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.5911 | 0.5757 | 0.5955 | ↑ +0.0198 vs best L2 |
+| obj_box_col | 0.080% | 0.080% | 0.074% | ↓ -0.006% (new best col) |
+| car_ade | 0.6189 | 0.6281 | 0.6189 | = baseline |
+| NDS | 0.5217 | 0.5239 | 0.5239 | ~ |
+
+**Analysis:** num_decoder=8 achieves best obj_box_col (0.074%, beating baseline 0.080%) and matching car_ade with baseline. However L2 is slightly worse than baseline (0.5955 vs 0.5911). The richer detection features help collision avoidance, but the larger model may need more epochs to converge on planning. Two clear winners emerge: queue=6 for L2, decoder=8 for obj_box_col — exp-005 combines both to target improvements on both metrics simultaneously.
 
 ---
 
