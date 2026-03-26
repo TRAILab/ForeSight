@@ -73,3 +73,25 @@ model['head']['motion_plan_head']['motion_loss_cls']['loss_weight'] = 0.5
 
 ---
 
+## [exp-003] auto_mar25_exp003_queue6 — 2026-03-26
+**Hypothesis:** Increasing temporal queue from 4 to 6 frames gives the model more historical ego-motion and agent state context, improving trajectory prediction and planning accuracy.
+**Config changes:**
+```python
+queue_length = 6
+model['head']['motion_plan_head']['instance_queue']['queue_length'] = queue_length
+```
+**Job ID:** 3520
+**Status:** keep
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.5911 | 0.5902 | 0.5757 | ↓ -0.0145 (new best) |
+| obj_box_col | 0.080% | 0.080% | 0.100% | ↑ +0.020% |
+| car_ade | 0.6189 | 0.6405 | 0.6281 | ↓ -0.0124 |
+| NDS | 0.5217 | 0.5239 | 0.5238 | ~ |
+
+**Analysis:** Strong positive result for L2 — queue_length=6 reduces L2 by 2.6% absolute vs baseline (new best: 0.5757). More temporal context clearly helps the planner produce more accurate trajectories. obj_box_col regressed slightly (0.100% vs 0.080%) — additional frames may shift optimization balance. Next: exp-004 tests num_decoder=8; exp-005 will combine queue=6 with plan_loss_reg=2.0 to see if the plan loss gain from exp001 stacks additively.
+
+---
+

@@ -2,3 +2,4 @@ commit	val_L2	val_col%	car_ade	NDS	status	description
 baseline	0.5911	0.080	0.6189	0.5217	baseline	sparsedrive_r50_stage2_4gpu_nomap (bs48, 2026-02-17)
 20260325	0.5902	0.084	0.6405	0.5239	keep	exp001: plan_loss_reg 1→2, plan_loss_cls 0.5→1 (marginal L2 gain)
 20260326	0.6358	0.148	0.6146	0.5158	discard	exp002: motion_loss_reg+cls 0.2→0.5 (both metrics much worse)
+20260326b	0.5757	0.100	0.6281	0.5238	keep	exp003: queue_length 4→6 (best L2 so far, col slightly worse)
