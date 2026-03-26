@@ -29,3 +29,25 @@
 
 ---
 
+## [exp-001] auto_mar25_exp001_plan_loss_up — 2026-03-25
+**Hypothesis:** Increasing planning regression loss (1.0→2.0) and cls loss (0.5→1.0) should directly reduce L2 by providing stronger supervision for trajectory regression and mode selection.
+**Config changes:**
+```python
+model['head']['motion_plan_head']['plan_loss_reg']['loss_weight'] = 2.0
+model['head']['motion_plan_head']['plan_loss_cls']['loss_weight'] = 1.0
+```
+**Job ID:** 3518
+**Status:** keep
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.5911 | 0.5911 | 0.5902 | ↓ -0.0009 |
+| obj_box_col | 0.080% | 0.080% | 0.084% | ↑ +0.004% |
+| car_ade | 0.6189 | 0.6189 | 0.6405 | ↑ +0.0216 |
+| NDS | 0.5217 | 0.5217 | 0.5239 | ↑ +0.0022 |
+
+**Analysis:** Doubling plan loss weights had negligible effect on L2 (-0.0009, within noise). obj_box_col slightly worsened and car_ade degraded — the increased planning loss may be causing gradient interference with motion prediction. The planning network appears near-optimal given current detection/motion quality; the bottleneck is likely upstream feature quality. Next: try boosting motion loss weights to improve agent forecasting quality that feeds into the planner.
+
+---
+
