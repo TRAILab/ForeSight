@@ -287,3 +287,24 @@ model['head']['motion_plan_head']['num_det'] = 100
 
 ---
 
+## [exp-004] auto_mar26_exp004_conf_decay08 — 2026-03-27
+**Hypothesis:** Slower confidence decay (0.6→0.8) reduces temporal forgetting, keeping good tracks alive longer, reducing ID switches and improving motion feature consistency for planning.
+**Config changes:**
+```python
+model['head']['det_head']['instance_bank']['confidence_decay'] = 0.8
+```
+**Job ID:** 3527
+**Status:** discard
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.5927 | 0.5676 | 0.5731 | ↑ +0.0055 |
+| obj_box_col | 0.104% | 0.091% | 0.120% | ↑ +0.029% (worse than baseline) |
+| car_ade | 0.6241 | 0.6307 | 0.6315 | ↑ +0.008 |
+| NDS | 0.5236 | 0.5231 | 0.5209 | ↓ -0.002 |
+
+**Analysis:** Negative result. FAF jumped from ~43 to 61.6 — slower decay keeps low-quality/stale instances alive longer, significantly increasing false alarms. More ghost detections confuse the planner and increase collision rate (0.104%→0.120%). The default confidence_decay=0.6 is well-calibrated for the planning task. Do NOT use confidence_decay=0.8. The L2 is between baseline and best (0.5731) — not better than exp001 or exp003. Add to negative evidence table.
+
+---
+
