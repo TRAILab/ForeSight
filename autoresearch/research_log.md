@@ -199,3 +199,23 @@ num_decoder = 8
 4. exp004: confidence_decay=0.8 (better temporal tracking)
 5. exp005: Best combo of above
 
+
+## [exp-000] auto_mar26_exp000_baseline — 2026-03-26
+**Hypothesis:** Establish reproducible baseline for mar26 session on new base config (queue=6 already baked in).
+**Config changes:** WandB name only.
+**Job ID:** 3523
+**Status:** baseline
+
+**Metrics:**
+| Metric | Value |
+|--------|-------|
+| L2 | 0.5927 |
+| obj_box_col | 0.104% |
+| car_ade | 0.6241 |
+| NDS | 0.5236 |
+| AMOTA | 0.3878 |
+
+**Analysis:** Baseline is consistent with mar25 session (queue=6 already baked in). L2=0.5927 is slightly higher than mar25 exp003's 0.5757 — within expected seed variance (~±0.02). obj_box_col=0.104% matches the nomap_bs24 result from earlier history. This is the reference for all mar26 experiments.
+
+---
+
