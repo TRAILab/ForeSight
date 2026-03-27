@@ -308,3 +308,72 @@ model['head']['det_head']['instance_bank']['confidence_decay'] = 0.8
 
 ---
 
+## [exp-005] auto_mar26_exp005_epochs15_plan_up — 2026-03-27
+**Hypothesis:** Combining all three confirmed positive changes (epochs15 + plan_loss_up + num_det=100) should yield improvements on both metrics greater than any individual change.
+**Config changes:**
+```python
+num_epochs = 15
+checkpoint_epoch_interval = 15
+runner = dict(type="IterBasedRunner", max_iters=num_iters_per_epoch * num_epochs)
+checkpoint_config = dict(interval=num_iters_per_epoch * checkpoint_epoch_interval)
+evaluation = dict(interval=num_iters_per_epoch * checkpoint_epoch_interval, eval_mode=eval_mode)
+model['head']['motion_plan_head']['plan_loss_reg']['loss_weight'] = 2.0
+model['head']['motion_plan_head']['plan_loss_cls']['loss_weight'] = 1.0
+model['head']['motion_plan_head']['num_det'] = 100
+```
+**Job ID:** 3528
+**Status:** discard
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.5927 | 0.5676 | 0.6109 | ↑ +0.043 (WORSE than baseline) |
+| obj_box_col | 0.104% | 0.091% | 0.107% | ↑ +0.016% (worse than baseline) |
+| car_ade | 0.6241 | 0.6307 | 0.6286 | — |
+| NDS | 0.5236 | 0.5231 | 0.5210 | ↓ -0.002 |
+
+**Analysis:** Strong negative synergy — combining all three positive changes produces results worse than baseline on both primary metrics. L2=0.6109 is the worst planning result this session. The plan_loss_up (2× regression gradient) appears to conflict with num_det=100's broader scene context over 15 epochs, causing over-optimization. This mirrors mar25 exp005 (queue6+decoder8 combo) where two individually positive changes combined negatively. The 100-agent input space requires careful gradient balancing — doubling the planning loss in this regime creates instability. Note: IDS improved to 842 (vs baseline 959), suggesting the combination does help tracking consistency through the longer training. Key lesson: for this architecture, individual improvements should be deployed one at a time rather than stacked.
+
+---
+
+## Conclusions
+
+**Session:** autoresearch/mar26 | **Date:** 2026-03-27 | **Goal:** Improve val/L2 and val/obj_box_col
+
+### Final Results Table
+
+| Exp | Config | L2 | obj_box_col | car_ade | NDS | Δ L2 | Δ col | Status |
+|-----|--------|-----|-------------|---------|-----|------|-------|--------|
+| baseline | nomap_queue6 bs48 | 0.5927 | 0.104% | 0.6241 | 0.5236 | — | — | — |
+| exp-001 | epochs 10→15 | 0.5738 | 0.099% | 0.6227 | 0.5253 | -0.019 | -0.005% | keep |
+| exp-002 | plan_loss_reg 1→2, cls 0.5→1 | 0.5904 | 0.094% | 0.6323 | 0.5218 | -0.002 | -0.010% | keep |
+| exp-003 | num_det 50→100 | **0.5676** | **0.091%** | 0.6307 | 0.5231 | **-0.025** | **-0.013%** | keep ⭐ |
+| exp-004 | confidence_decay 0.6→0.8 | 0.5731 | 0.120% | 0.6315 | 0.5209 | -0.020 | +0.016% | **discard** |
+| exp-005 | epochs15+plan_up+det100 | 0.6109 | 0.107% | 0.6286 | 0.5210 | +0.018 | +0.003% | **discard** |
+
+### Key Findings
+
+1. **`num_det=100` is the strongest single lever** (exp-003): Best result on BOTH metrics simultaneously. L2=0.5676 (-4.2% vs baseline) and obj_box_col=0.091% (-12.5% vs baseline). Doubling the agents surfaced to the planner provides richer scene context for trajectory planning and collision avoidance. This is a free improvement — no architectural change, no extra training cost.
+
+2. **Extended training (15 epochs) helps both metrics** (exp-001): L2=0.5738, col=0.099% — confirms stage-2 undertraining bottleneck B2. An extra 5 epochs brings meaningful gains.
+
+3. **Plan loss upweighting best for collision** (exp-002): Best obj_box_col in isolation (0.094%) at 10 epochs, but worse L2 than exp001/exp003. The 2× planning regression loss specifically helps mode selection for safety-critical scenarios.
+
+4. **confidence_decay=0.8 hurts planning** (exp-004): FAF spiked +18, col worsened vs baseline (0.120% vs 0.104%). Slower temporal decay keeps stale detections alive, flooding the planner with false alarms. The default 0.6 is well-calibrated.
+
+5. **Combining positive changes causes negative synergy** (exp-005): All three confirmed wins stacked together produced the worst result (L2=0.6109, worse than baseline). plan_loss_up conflicts with num_det=100 over 15 epochs. Same pattern as mar25 exp005.
+
+### Recommended Next Steps
+
+1. **Use `num_det=100` as the new default** — strongest single improvement, zero compute cost. Best config: `auto_mar26_exp003_num_det100`.
+
+2. **Try epochs15 + num_det=100 (without plan_loss_up)** — exp001 and exp003 are individually positive; their combination was not tested. This pair avoids the plan_loss_up conflict observed in exp005.
+
+3. **Try plan_loss_up + num_det=100 at 10 epochs** — exp002 (col best at 10 epochs) + exp003 (overall best); this is a smaller combo without the epochs instability.
+
+4. **Do NOT combine plan_loss_up with num_det=100 at 15 epochs** — confirmed negative.
+
+5. **Do NOT increase confidence_decay above 0.6** — FAF spikes and planning collision worsens.
+
+6. **Explore num_det further (100→150)** — if 50→100 was a strong positive, 100→150 may yield additional gains.
+

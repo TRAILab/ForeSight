@@ -10,3 +10,4 @@ e6e8521	0.5738	0.099	0.6227	0.5253	keep	exp001: epochs 10→15 (both metrics imp
 06d245d	0.5904	0.094	0.6323	0.5218	keep	exp002: plan_loss_reg 1→2, plan_cls 0.5→1 (new best col=0.094%, L2 behind exp001)
 bd7a91a	0.5676	0.091	0.6307	0.5231	keep	exp003: num_det 50→100 (new best BOTH metrics: L2=0.5676, col=0.091%)
 49995e7	0.5731	0.120	0.6315	0.5209	discard	exp004: confidence_decay 0.6→0.8 (L2 mid, col WORSE than baseline, FAF +18)
+67278f0	0.6109	0.107	0.6286	0.5210	discard	exp005: epochs15+plan_up+det100 combo (negative synergy, worse than baseline on both)
