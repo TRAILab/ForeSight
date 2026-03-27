@@ -723,6 +723,7 @@ evaluation = dict(
 # ================== pretrained model ========================
 load_from = 'ckpt/sparsedrive_stage1.pth'
 # === autoresearch overrides (auto_mar26_exp005_epochs15_plan_up) ===
+# Updated: combine ALL three confirmed wins from mar26: epochs15 + plan_loss_up + num_det=100
 log_config['hooks'][1]['init_kwargs']['name'] = 'auto_mar26_exp005_epochs15_plan_up'
 num_epochs = 15
 checkpoint_epoch_interval = 15
@@ -731,3 +732,4 @@ checkpoint_config = dict(interval=num_iters_per_epoch * checkpoint_epoch_interva
 evaluation = dict(interval=num_iters_per_epoch * checkpoint_epoch_interval, eval_mode=eval_mode)
 model['head']['motion_plan_head']['plan_loss_reg']['loss_weight'] = 2.0
 model['head']['motion_plan_head']['plan_loss_cls']['loss_weight'] = 1.0
+model['head']['motion_plan_head']['num_det'] = 100

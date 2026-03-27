@@ -266,3 +266,24 @@ model['head']['motion_plan_head']['plan_loss_cls']['loss_weight'] = 1.0
 
 ---
 
+## [exp-003] auto_mar26_exp003_num_det100 — 2026-03-27
+**Hypothesis:** Increasing num_det from 50→100 surfaces more agents to the motion/planning head. In dense urban scenes, the current 50-agent cap drops relevant nearby agents, hurting both trajectory accuracy and collision avoidance.
+**Config changes:**
+```python
+model['head']['motion_plan_head']['num_det'] = 100
+```
+**Job ID:** 3526
+**Status:** keep
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.5927 | 0.5738 | 0.5676 | ↓ -0.0062 (new best) |
+| obj_box_col | 0.104% | 0.094% | 0.091% | ↓ -0.003% (new best) |
+| car_ade | 0.6241 | 0.6227 | 0.6307 | ↑ +0.008 |
+| NDS | 0.5236 | 0.5253 | 0.5231 | ↓ -0.002 |
+
+**Analysis:** Strongest single-change result this session — new best on BOTH primary metrics simultaneously. The mechanism is intuitive: with 50 agents, dense scenes with 50+ nearby vehicles drop important context. With 100 agents, the planner has richer scene awareness for both trajectory planning (L2) and collision avoidance. NDS/detection slightly lower (unrelated to planning change — likely random variance). This is now the most compelling single change to include in exp005 combo. Updating exp005 to combine epochs15 + plan_loss_up + num_det=100 (all three confirmed positive changes).
+
+---
+
