@@ -219,3 +219,28 @@ num_decoder = 8
 
 ---
 
+## [exp-001] auto_mar26_exp001_epochs15 — 2026-03-27
+**Hypothesis:** Extending stage-2 training from 10→15 epochs addresses the known undertraining bottleneck (B2). More optimizer steps should improve motion and planning quality.
+**Config changes:**
+```python
+num_epochs = 15
+checkpoint_epoch_interval = 15
+runner = dict(type="IterBasedRunner", max_iters=num_iters_per_epoch * num_epochs)
+checkpoint_config = dict(interval=num_iters_per_epoch * checkpoint_epoch_interval)
+evaluation = dict(interval=num_iters_per_epoch * checkpoint_epoch_interval, eval_mode=eval_mode)
+```
+**Job ID:** 3524
+**Status:** keep
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.5927 | 0.5927 | 0.5738 | ↓ -0.0189 (new best) |
+| obj_box_col | 0.104% | 0.104% | 0.099% | ↓ -0.005% (new best) |
+| car_ade | 0.6241 | 0.6241 | 0.6227 | ↓ -0.001 |
+| NDS | 0.5236 | 0.5236 | 0.5253 | ↑ +0.002 |
+
+**Analysis:** Clear win on both primary metrics. +50% more training (15 vs 10 epochs) reduces L2 by 3.2% and collision by ~5% relative. Confirms the stage-2 undertraining bottleneck (B2). Detection also slightly improves (NDS +0.002), suggesting the additional epochs help the joint optimization converge better. Next question: does plan_loss_up stack with extended training? exp002 tests plan_loss_up in isolation first (10 epochs), then exp005 will combine if exp001+exp002 are both positive.
+
+---
+
