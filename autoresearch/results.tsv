@@ -7,3 +7,4 @@ baseline	0.5911	0.080	0.6189	0.5217	baseline	sparsedrive_r50_stage2_4gpu_nomap (
 20260326d	0.5934	0.126	0.6292	0.5241	discard	exp005: queue6+decoder8 combo (negative synergy, both worse than individual bests)
 1e50489	0.5927	0.104	0.6241	0.5236	baseline	mar26 baseline: nomap_queue6 bs48 (queue=6 now in base config)
 e6e8521	0.5738	0.099	0.6227	0.5253	keep	exp001: epochs 10→15 (both metrics improved, new best)
+06d245d	0.5904	0.094	0.6323	0.5218	keep	exp002: plan_loss_reg 1→2, plan_cls 0.5→1 (new best col=0.094%, L2 behind exp001)

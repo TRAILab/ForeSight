@@ -244,3 +244,25 @@ evaluation = dict(interval=num_iters_per_epoch * checkpoint_epoch_interval, eval
 
 ---
 
+## [exp-002] auto_mar26_exp002_plan_loss_up — 2026-03-27
+**Hypothesis:** Increasing planning loss weights (plan_reg 1→2, plan_cls 0.5→1) provides stronger direct supervision for trajectory regression and mode selection, improving both L2 and collision rate on the queue=6 base.
+**Config changes:**
+```python
+model['head']['motion_plan_head']['plan_loss_reg']['loss_weight'] = 2.0
+model['head']['motion_plan_head']['plan_loss_cls']['loss_weight'] = 1.0
+```
+**Job ID:** 3525
+**Status:** keep
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.5927 | 0.5738 | 0.5904 | ↑ +0.0166 vs exp001 |
+| obj_box_col | 0.104% | 0.099% | 0.094% | ↓ -0.005% (new best) |
+| car_ade | 0.6241 | 0.6227 | 0.6323 | ↑ +0.010 |
+| NDS | 0.5236 | 0.5253 | 0.5218 | ↓ -0.004 |
+
+**Analysis:** Divergent result — plan_loss_up achieves new best obj_box_col (0.094% vs 0.099%) but L2 is worse than exp001 (0.5904 vs 0.5738). The upweighted planning cls loss specifically helps collision avoidance (better mode selection for safety). Extended training (exp001) is better for L2 accuracy. NDS/AMOTA slightly worse — the stronger planning gradients may compete slightly with detection. Both exp001 and exp002 are independently positive vs baseline, suggesting their combination in exp005 (epochs15 + plan_loss_up) should achieve best on both metrics simultaneously.
+
+---
+
