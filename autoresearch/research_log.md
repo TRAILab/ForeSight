@@ -377,3 +377,25 @@ model['head']['motion_plan_head']['num_det'] = 100
 
 6. **Explore num_det further (100→150)** — if 50→100 was a strong positive, 100→150 may yield additional gains.
 
+
+---
+
+# AutoResearch Log — mar27
+**Goal:** Improve val/L2 and val/obj_box_col
+**Base config:** projects/configs/sparsedrive_r50_stage2_4gpu_bs24.py (WITH map, queue=4, bs=24)
+**Session branch:** autoresearch/mar27
+**Max experiments:** 5
+
+## Context from prior sessions
+- bs24 baseline: L2=0.636, col=0.133%
+- bs24 best (plan_loss_up, already done): L2=0.590, col=0.084% — NOT re-running
+- nomap on bs24 (already done): L2=0.588, col=0.103%
+- All-time best R50: L2=0.568, col=0.091% (mar26 exp003, nomap_queue6 + num_det=100)
+
+## Experiment Plan
+1. exp001: num_det=100 (strongest win from mar26, untested on bs24)
+2. exp002: queue_length=6 (confirmed on nomap, untested on bs24 WITH map)
+3. exp003: nomap + plan_loss_up combo (both individually confirmed on bs24, combo untested)
+4. exp004: epochs=15 (confirmed on nomap_queue6, untested on bs24)
+5. exp005: epochs15 + num_det=100 (top recommendation from mar26 conclusions)
+
