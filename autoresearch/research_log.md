@@ -399,3 +399,23 @@ model['head']['motion_plan_head']['num_det'] = 100
 4. exp004: epochs=15 (confirmed on nomap_queue6, untested on bs24)
 5. exp005: epochs15 + num_det=100 (top recommendation from mar26 conclusions)
 
+
+## [exp-000] auto_mar27_exp000_baseline — 2026-03-28
+**Job ID:** 3529
+**Status:** baseline
+
+**Metrics:**
+| Metric | Value |
+|--------|-------|
+| L2 | 0.6274 |
+| obj_box_col | 0.107% |
+| car_ade | 0.6313 |
+| NDS | 0.5233 |
+| AMOTA | 0.3713 |
+| mAP_normal | 0.5508 |
+| FAF | 77.7 |
+
+**Analysis:** Slightly better than historical baseline (L2=0.636, col=0.133%) due to code evolution. High FAF=77.7 reflects the with-map config generating more false alarms vs nomap baseline (~43-46 FAF). mAP_normal=0.5508 confirms map head is active and healthy. Using these numbers as the mar27 session reference.
+
+---
+
