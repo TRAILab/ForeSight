@@ -12,3 +12,4 @@ bd7a91a	0.5676	0.091	0.6307	0.5231	keep	exp003: num_det 50→100 (new best BOTH 
 49995e7	0.5731	0.120	0.6315	0.5209	discard	exp004: confidence_decay 0.6→0.8 (L2 mid, col WORSE than baseline, FAF +18)
 67278f0	0.6109	0.107	0.6286	0.5210	discard	exp005: epochs15+plan_up+det100 combo (negative synergy, worse than baseline on both)
 cca6623	0.6274	0.107	0.6313	0.5233	baseline	mar27 baseline: bs24 with-map queue=4 (L2=0.6274, col=0.107%)
+eb576cb	0.6159	0.091	0.6261	0.5258	keep	exp001: num_det 50→100 (L2↓1.8%, col↓15%, IDS 990→577, FAF 77→45)

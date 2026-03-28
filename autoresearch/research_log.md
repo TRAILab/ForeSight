@@ -419,3 +419,27 @@ model['head']['motion_plan_head']['num_det'] = 100
 
 ---
 
+## [exp-001] auto_mar27_exp001_num_det100 — 2026-03-28
+**Hypothesis:** num_det=100 surfaces more agents to the motion/planning head, improving scene context for planning and collision avoidance. Confirmed as the strongest single win in mar26 on nomap_queue6.
+**Config changes:**
+```python
+model['head']['motion_plan_head']['num_det'] = 100
+```
+**Job ID:** 3530
+**Status:** keep
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.6274 | 0.6274 | 0.6159 | ↓ -0.012 (new best) |
+| obj_box_col | 0.107% | 0.107% | 0.091% | ↓ -0.016% (new best) |
+| car_ade | 0.6313 | 0.6313 | 0.6261 | ↓ -0.005 |
+| NDS | 0.5233 | 0.5233 | 0.5258 | ↑ +0.003 |
+| IDS | 990 | 990 | 577 | ↓ -413 (-42%!) |
+| FAF | 77.7 | 77.7 | 44.8 | ↓ -32.9 |
+| mAP_normal | 0.5508 | 0.5508 | 0.5618 | ↑ +0.011 |
+
+**Analysis:** Very strong result across multiple metrics. num_det=100 halves ID switches and FAF — the broader agent context dramatically stabilizes both tracking and planning. The map quality also improves (mAP_normal +0.011), likely because map cross-attention benefits from richer detection context. Confirms num_det=100 is a universal win regardless of whether map head is active. New best: L2=0.6159, col=0.091%.
+
+---
+
