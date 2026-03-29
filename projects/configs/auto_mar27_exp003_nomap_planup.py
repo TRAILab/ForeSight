@@ -729,3 +729,4 @@ log_config['hooks'][1]['init_kwargs']['name'] = 'auto_mar27_exp003_nomap_planup'
 model['head']['task_config']['with_map'] = False
 model['head']['motion_plan_head']['plan_loss_reg']['loss_weight'] = 2.0
 model['head']['motion_plan_head']['plan_loss_cls']['loss_weight'] = 1.0
+find_unused_parameters = True
