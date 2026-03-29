@@ -402,6 +402,7 @@ Base config: `sparsedrive_r50_stage2_4gpu_nomap_queue6.py` (queue=6 already bake
 | mar27 exp001 num_det=100 | 0.5258 | 0.4133 | 0.3751 | 577 | 0.616 | **0.091%** |
 | mar27 exp002 queue=6 | 0.5262 | 0.4133 | 0.3751 | 995 | 0.623 | 0.147% |
 | mar27 exp003 nomap+planup | — | — | — | — | crash | crash (DDP incompatibility) |
+| mar27 exp003b plan_loss_up | 0.5271 | 0.4171 | 0.3836 | 691 | 0.622 | 0.110% |
 
 ---
 

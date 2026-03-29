@@ -485,3 +485,29 @@ model['head']['motion_plan_head']['plan_loss_cls']['loss_weight'] = 1.0
 The nomap_queue6 base config works because it was *built* without map head, not because it overrides `with_map=False` at runtime. **Hard constraint: do NOT set `with_map=False` via config override on a base config that has map head — requires a different base config.** Config updated to plan_loss_up alone (no nomap) for resubmission.
 
 ---
+
+## [exp-003b] auto_mar27_exp003_nomap_planup (plan_loss_up only) — 2026-03-29
+**Hypothesis:** plan_loss_reg 1→2, plan_loss_cls 0.5→1 on bs24. Historically confirmed win. Testing without nomap (nomap incompatible with DDP on bs24 base).
+**Config changes:**
+```python
+model['head']['motion_plan_head']['plan_loss_reg']['loss_weight'] = 2.0
+model['head']['motion_plan_head']['plan_loss_cls']['loss_weight'] = 1.0
+```
+**Job ID:** 3535
+**Status:** discard
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.6274 | 0.6159 | 0.6223 | ↑ +0.006 (worse) |
+| obj_box_col | 0.107% | 0.091% | 0.110% | ↑ +0.019% (worse) |
+| car_ade | 0.6313 | 0.6261 | 0.6375 | ↑ +0.011 (worse) |
+| NDS | 0.5233 | 0.5258 | 0.5271 | ↑ +0.001 |
+| IDS | 990 | 577 | 691 | ↑ +114 (worse vs exp001, but -30% vs baseline) |
+| FAF | 77.7 | 44.8 | 46.3 | ↑ +1.5 (worse vs exp001) |
+| AMOTA | 0.3713 | 0.3751 | 0.3836 | ↑ +0.009 (better!) |
+| mAP_normal | 0.5508 | 0.5618 | 0.5554 | ↓ -0.006 |
+
+**Analysis:** plan_loss_up alone improves L2 vs baseline (-0.005) but doesn't beat num_det=100. Collision rate actually slightly worsens vs baseline (0.110% vs 0.107%). IDS improves substantially vs baseline (991→691, -30%) — suggesting plan_loss_up helps tracking indirectly. AMOTA boost (+0.012 vs baseline) is notable. num_det=100 remains the strongest single lever on this config. Moving to exp004 (epochs=15) and exp005 (epochs15 + num_det=100).
+
+---
