@@ -725,8 +725,9 @@ evaluation = dict(
 # ================== pretrained model ========================
 load_from = 'ckpt/sparsedrive_stage1.pth'
 # === autoresearch overrides (auto_mar27_exp003_nomap_planup) ===
+# NOTE: nomap dropped — with_map=False on bs24 base causes DDP issues (map head
+# weights remain registered but unused, find_unused_parameters doesn't help).
+# Testing plan_loss_up alone instead: historically confirmed win on bs24.
 log_config['hooks'][1]['init_kwargs']['name'] = 'auto_mar27_exp003_nomap_planup'
-model['head']['task_config']['with_map'] = False
 model['head']['motion_plan_head']['plan_loss_reg']['loss_weight'] = 2.0
 model['head']['motion_plan_head']['plan_loss_cls']['loss_weight'] = 1.0
-find_unused_parameters = True

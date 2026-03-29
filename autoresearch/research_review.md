@@ -401,6 +401,7 @@ Base config: `sparsedrive_r50_stage2_4gpu_nomap_queue6.py` (queue=6 already bake
 | mar27 baseline (bs24+map+queue4) | 0.5233 | 0.4133 | 0.3713 | 990 | 0.627 | 0.107% |
 | mar27 exp001 num_det=100 | 0.5258 | 0.4133 | 0.3751 | 577 | 0.616 | **0.091%** |
 | mar27 exp002 queue=6 | 0.5262 | 0.4133 | 0.3751 | 995 | 0.623 | 0.147% |
+| mar27 exp003 nomap+planup | — | — | — | — | crash | crash (DDP incompatibility) |
 
 ---
 
@@ -770,6 +771,7 @@ Based on all results, the best R50 nomap configuration for planning is:
 | confidence_decay=0.8 | FAF +18, col 0.120% vs 0.104% (mar26 exp004) | Do not increase confidence_decay above 0.6 |
 | Combining plan_loss_up + num_det=100 + epochs15 | L2=0.611 worse than baseline (mar26 exp005) | Negative synergy — deploy changes one at a time |
 | queue_length=6 with map head active (bs24) | col 0.091%→0.147%, IDS stays high (mar27 exp002) | Do NOT increase queue_length when map head is active |
+| with_map=False via config override on bs24 base | 3× DDP crash: map head weights remain registered, find_unused_parameters doesn't fix (mar27 exp003) | Do NOT set with_map=False via override — requires a base config built without map head |
 
 ### Remaining High-Value Ideas (untested)
 

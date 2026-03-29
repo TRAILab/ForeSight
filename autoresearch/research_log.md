@@ -467,3 +467,21 @@ queue_length = 6
 **Analysis:** queue=6 is harmful with the map head active. Collision rate worsens to 0.147% (worst so far), IDS nearly matches baseline (995 vs 990), FAF stays high (74.4). This contrasts sharply with exp001's dramatic improvements. Hypothesis: with the map head active, the temporal attention has to process more input from both map queries AND 6 frames of instance state, overwhelming the planner with noisy context. Without map (nomap_queue6 base), queue=6 was beneficial. With map, it compounds gradient competition. Hard constraint added: do NOT increase queue_length with map head active.
 
 ---
+
+## [exp-003] auto_mar27_exp003_nomap_planup — 2026-03-29
+**Hypothesis:** nomap (with_map=False) + plan_loss_up (plan_loss_reg 1→2, plan_loss_cls 0.5→1) on bs24. Both individually confirmed wins. Cross-gnn is skipped when map_output=None.
+**Config changes:**
+```python
+model['head']['task_config']['with_map'] = False
+model['head']['motion_plan_head']['plan_loss_reg']['loss_weight'] = 2.0
+model['head']['motion_plan_head']['plan_loss_cls']['loss_weight'] = 1.0
+```
+**Job IDs:** 3532 (crash: UnboundLocalError), 3533 (crash: DDP unused params), 3534 (crash: DDP mark-ready-twice)
+**Status:** crash (×3)
+
+**Analysis:** with_map=False on the bs24 base config is fundamentally incompatible with DDP: the map head module (including cross_gnn attention layers) still exists as a registered submodule with parameters. Fixes attempted:
+1. Added `continue` guard in cross_gnn branch → DDP error: unused parameters
+2. Added `find_unused_parameters=True` → DDP error: mark-ready-twice (PyTorch 1.13 limitation)
+The nomap_queue6 base config works because it was *built* without map head, not because it overrides `with_map=False` at runtime. **Hard constraint: do NOT set `with_map=False` via config override on a base config that has map head — requires a different base config.** Config updated to plan_loss_up alone (no nomap) for resubmission.
+
+---
