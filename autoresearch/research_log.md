@@ -443,3 +443,27 @@ model['head']['motion_plan_head']['num_det'] = 100
 
 ---
 
+
+## [exp-002] auto_mar27_exp002_queue6 — 2026-03-29
+**Hypothesis:** Longer temporal context (queue=6 vs 4) should help planning by providing more past frame context for trajectory prediction. Confirmed on nomap_queue6 base config in mar25.
+**Config changes:**
+```python
+queue_length = 6
+```
+**Job ID:** 3531
+**Status:** discard
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.6274 | 0.6159 | 0.6230 | ↑ +0.007 (worse) |
+| obj_box_col | 0.107% | 0.091% | 0.147% | ↑ +0.056% (much worse) |
+| car_ade | 0.6313 | 0.6261 | 0.6406 | ↑ +0.015 (worse) |
+| NDS | 0.5233 | 0.5258 | 0.5262 | ↑ +0.000 |
+| IDS | 990 | 577 | 995 | ↑ +418 (worse!) |
+| FAF | 77.7 | 44.8 | 74.4 | ↑ +29.6 (worse) |
+| mAP_normal | 0.5508 | 0.5618 | 0.5519 | ↓ -0.010 |
+
+**Analysis:** queue=6 is harmful with the map head active. Collision rate worsens to 0.147% (worst so far), IDS nearly matches baseline (995 vs 990), FAF stays high (74.4). This contrasts sharply with exp001's dramatic improvements. Hypothesis: with the map head active, the temporal attention has to process more input from both map queries AND 6 frames of instance state, overwhelming the planner with noisy context. Without map (nomap_queue6 base), queue=6 was beneficial. With map, it compounds gradient competition. Hard constraint added: do NOT increase queue_length with map head active.
+
+---
