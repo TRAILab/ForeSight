@@ -725,10 +725,9 @@ evaluation = dict(
 # ================== pretrained model ========================
 load_from = 'ckpt/sparsedrive_stage1.pth'
 # === autoresearch overrides (auto_mar27_exp005_epochs15_det100) ===
+# NOTE: epochs=15 dropped (hurts on bs24 with-map, mar27 exp004).
+# Testing num_det=100 + plan_loss_up instead — combining the two best individual wins.
 log_config['hooks'][1]['init_kwargs']['name'] = 'auto_mar27_exp005_epochs15_det100'
-num_epochs = 15
-checkpoint_epoch_interval = 15
-runner = dict(type="IterBasedRunner", max_iters=num_iters_per_epoch * num_epochs)
-checkpoint_config = dict(interval=num_iters_per_epoch * checkpoint_epoch_interval)
-evaluation = dict(interval=num_iters_per_epoch * checkpoint_epoch_interval, eval_mode=eval_mode)
 model['head']['motion_plan_head']['num_det'] = 100
+model['head']['motion_plan_head']['plan_loss_reg']['loss_weight'] = 2.0
+model['head']['motion_plan_head']['plan_loss_cls']['loss_weight'] = 1.0

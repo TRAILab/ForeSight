@@ -511,3 +511,32 @@ model['head']['motion_plan_head']['plan_loss_cls']['loss_weight'] = 1.0
 **Analysis:** plan_loss_up alone improves L2 vs baseline (-0.005) but doesn't beat num_det=100. Collision rate actually slightly worsens vs baseline (0.110% vs 0.107%). IDS improves substantially vs baseline (991→691, -30%) — suggesting plan_loss_up helps tracking indirectly. AMOTA boost (+0.012 vs baseline) is notable. num_det=100 remains the strongest single lever on this config. Moving to exp004 (epochs=15) and exp005 (epochs15 + num_det=100).
 
 ---
+
+## [exp-004] auto_mar27_exp004_epochs15 — 2026-03-29
+**Hypothesis:** 15 epochs instead of 10 on bs24 with-map. Confirmed win in mar26 on nomap_queue6. Testing if it transfers to this config.
+**Config changes:**
+```python
+num_epochs = 15
+checkpoint_epoch_interval = 15
+runner = dict(type="IterBasedRunner", max_iters=num_iters_per_epoch * num_epochs)
+checkpoint_config = dict(interval=num_iters_per_epoch * checkpoint_epoch_interval)
+evaluation = dict(interval=num_iters_per_epoch * checkpoint_epoch_interval, eval_mode=eval_mode)
+```
+**Job ID:** 3536
+**Status:** discard
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.6274 | 0.6159 | 0.6353 | ↑ +0.019 (worse than baseline!) |
+| obj_box_col | 0.107% | 0.091% | 0.143% | ↑ +0.052% (much worse) |
+| car_ade | 0.6313 | 0.6261 | 0.6302 | ↑ +0.004 |
+| NDS | 0.5233 | 0.5258 | 0.5255 | ↓ -0.000 |
+| IDS | 990 | 577 | 778 | ↑ +201 (worse vs exp001) |
+| FAF | 77.7 | 44.8 | 45.2 | ↑ +0.4 |
+| AMOTA | 0.3713 | 0.3751 | 0.3829 | ↑ +0.008 vs baseline |
+| mAP_normal | 0.5508 | 0.5618 | 0.5550 | ↓ -0.007 |
+
+**Analysis:** epochs=15 HURTS on bs24 with-map — both primary metrics are worse than baseline. This contradicts mar26 findings where epochs=15 improved both metrics. Key difference: with map head active, 5 additional epochs amplify map head gradient competition with planning, degrading both. The map optimization may converge to a worse local minimum for planning. Hard constraint added: do NOT increase epochs on bs24 with-map base config. exp005 plan changed from epochs15+det100 to num_det=100+plan_loss_up (combining the two best individual wins from this session).
+
+---
