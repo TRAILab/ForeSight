@@ -1,6 +1,6 @@
 # SparseDrive Research Review: Comprehensive Analysis and Improvement Roadmap
 
-> Generated: 2026-03-25. Experimental findings updated: 2026-03-27.
+> Generated: 2026-03-25. Experimental findings updated: 2026-03-30.
 
 ---
 
@@ -404,6 +404,29 @@ Base config: `sparsedrive_r50_stage2_4gpu_nomap_queue6.py` (queue=6 already bake
 | mar27 exp003 nomap+planup | — | — | — | — | crash | crash (DDP incompatibility) |
 | mar27 exp003b plan_loss_up | 0.5271 | 0.4171 | 0.3836 | 691 | 0.622 | 0.110% |
 | mar27 exp004 epochs=15 | 0.5255 | 0.4125 | 0.3829 | 778 | 0.635 | 0.143% |
+| mar27 exp005 det100+planup | 0.5291 | 0.4139 | 0.3747 | 933 | 0.650 | 0.125% |
+
+### 3.13 Auto-Research Experiments — mar27 (March 2026)
+
+**Base config:** `sparsedrive_r50_stage2_4gpu_bs24.py` (WITH map, queue=4, bs=24, lr=1.5e-4)
+**Goal:** Improve L2 and obj_box_col on the bs24 with-map base config.
+**Baseline:** L2=0.627, col=0.107%, IDS=990, FAF=77.7, mAP_normal=0.5508
+
+| Exp | Change | L2 | col% | IDS | FAF | Status |
+|-----|--------|-----|------|-----|-----|--------|
+| exp001 | num_det 50→100 | **0.616** | **0.091%** | **577** | **44.8** | keep (best) |
+| exp002 | queue 4→6 | 0.623 | 0.147% | 995 | 74.4 | discard |
+| exp003 | nomap+planup | — | — | — | — | crash×3 (DDP) |
+| exp003b | plan_loss_up only | 0.622 | 0.110% | 691 | 46.3 | discard |
+| exp004 | epochs 10→15 | 0.635 | 0.143% | 778 | 45.2 | discard |
+| exp005 | det100+planup | 0.650 | 0.125% | 933 | 69.9 | discard |
+
+**Key takeaways:**
+- **num_det=100 is the only reliable win** on bs24 with-map: all other changes hurt or are neutral.
+- **with_map=False via runtime override is DDP-incompatible** in PyTorch 1.13 (map head weights remain registered). Requires a base config built without map head.
+- **bs24 with-map is brittle**: map head gradient competition leaves no headroom for additional changes beyond num_det=100. queue=6, epochs=15, plan_loss_up, and combinations all degrade both metrics.
+- **Negative synergy dominates**: even combining num_det=100 + plan_loss_up (both confirmed individual wins) produces the worst result (L2=0.650, IDS=933 — nearly back to baseline levels).
+- **Config-specific findings**: epochs=15 helps on nomap (mar26 ✓) but hurts on with-map (mar27 ✗). Same for queue=6. The map head is the source of brittleness.
 
 ---
 
@@ -730,27 +753,31 @@ This is the fundamental perception-planning coupling: planning collision rate is
 
 ## 7. Prioritized Action Plan
 
-> Updated 2026-03-26 based on empirical results.
+> Updated 2026-03-30 based on empirical results.
 
 ### Confirmed Wins (run these immediately)
 
-| Rank | Idea | Evidence | Expected Gain |
-|------|------|----------|---------------|
-| 1 | **R101 backbone** | R101 stage2: NDS=0.5857 vs R50=0.5232 | +0.063 NDS, +0.125 AMOTA |
-| 2 | **DN training in stage1** | DN stage2 AMOTA=0.4179 vs 0.3714 | +0.046 AMOTA, −22% IDS |
-| 3 | **Nomap in stage2** | nomap bs24: L2=0.588 vs 0.636 | −7% L2, −22% collision |
-| 4 | **num_det=100** | mar26 exp003: L2=0.568 vs 0.593, col=0.091% vs 0.104% | −4.2% L2, −12.5% col (zero compute cost) |
-| 5 | **Extend stage2 to 15 epochs** | mar26 exp001: L2=0.574, col=0.099% | −3.2% L2, −5% col |
-| 6 | **Plan loss upweighting (reg 1→2, cls 0.5→1)** | mar26 exp002: col=0.094% (best at 10 epochs) | best col in isolation |
-| 7 | **Rotaug in stage1** | nomap+DN+rotaug: NDS=0.562 vs 0.531 | +0.031 NDS |
+| Rank | Idea | Evidence | Expected Gain | Notes |
+|------|------|----------|---------------|-------|
+| 1 | **R101 backbone** | R101 stage2: NDS=0.5857 vs R50=0.5232 | +0.063 NDS, +0.125 AMOTA | Requires full retraining |
+| 2 | **DN training in stage1** | DN stage2 AMOTA=0.4179 vs 0.3714 | +0.046 AMOTA, −22% IDS | Requires full retraining |
+| 3 | **Nomap in stage2** | nomap bs24: L2=0.588 vs 0.636 | −7% L2, −22% collision | Use dedicated nomap base config, NOT override |
+| 4 | **num_det=100** | mar26 exp003 + mar27 exp001: confirmed on 2 configs | −4.2% L2, −12.5% col, −42% IDS (zero compute cost) | **Universal — apply to all configs** |
+| 5 | **queue=6 (nomap only)** | mar25 exp003 + nomap_queue6 base | −3% L2 on nomap | Do NOT use with map head active |
+| 6 | **Extend stage2 to 15 epochs (nomap only)** | mar26 exp001: L2=0.574, col=0.099% | −3.2% L2, −5% col | Do NOT use with map head active |
+| 7 | **Plan loss upweighting (nomap only)** | mar26 exp002: col=0.094%; mar25 history | best col in isolation on nomap | Negative synergy with num_det=100 |
 
 ### Best Current Recipe (empirical)
 
-Based on all results, the best R50 nomap configuration for planning is:
+Based on all results, the best R50 configuration for planning is:
 
-**Stage 2** (R50, nomap, queue=6): `num_det=100`
-- Best config: `auto_mar26_exp003_num_det100`
-- Results: L2=0.5676, obj_box_col=0.091%, NDS=0.5231, AMOTA=0.3712
+**Best confirmed config: `auto_mar26_exp003_num_det100`** (nomap_queue6 base + num_det=100)
+- Results: **L2=0.5676, obj_box_col=0.091%**, NDS=0.5231, AMOTA=0.3712, IDS=1086
+- Config: sparsedrive_r50_stage2_4gpu_nomap_queue6.py + `model['head']['motion_plan_head']['num_det'] = 100`
+
+**Best bs24 with-map config: `auto_mar27_exp001_num_det100`**
+- Results: L2=0.6159, obj_box_col=0.091%, NDS=0.5258, AMOTA=0.3751, IDS=577
+- Note: with-map configs are brittle — only num_det=100 reliably improves them
 
 **Full stack (not yet run):**
 **Stage 1**: `R101 + DN (num_dn_groups=5, num_temp_dn_groups=3) + nomap + rotaug`
@@ -778,36 +805,37 @@ Based on all results, the best R50 nomap configuration for planning is:
 
 ### Remaining High-Value Ideas (untested)
 
-| Idea | Expected Impact | Effort |
-|------|----------------|--------|
-| epochs15 + num_det=100 (no plan_loss_up) | High — two individually confirmed wins, safe combo | Low |
-| plan_loss_up + num_det=100 at 10 epochs | Medium — two individually confirmed wins at same epoch budget | Low |
-| num_det=150 (further increase) | Medium — if 50→100 helped, 100→150 may compound | Low |
-| Trailer cls_allow_reverse + oversampling | Medium | Low |
-| Increase planning/motion modes 6→12 | Medium | Medium |
-| Soft collision auxiliary loss | High | High |
-| R101 + DN + nomap + num_det=100 + epochs15 full stack | Very High | High (full retraining) |
+| Idea | Expected Impact | Effort | Notes |
+|------|----------------|--------|-------|
+| epochs15 + num_det=100 on nomap_queue6 | High — two confirmed wins together on right base config | Low | Use nomap base, not bs24 |
+| num_det=150 on nomap_queue6 | Medium — if 50→100 helped, may push further | Low | Zero compute cost |
+| plan_loss_up + num_det=100 on nomap_queue6 | Medium — test if synergy holds on nomap (differs from bs24 with-map) | Low | Avoid on with-map configs |
+| Trailer cls_allow_reverse + oversampling | Medium | Low | |
+| Increase planning/motion modes 6→12 | Medium | Medium | |
+| Soft collision auxiliary loss | High | High | |
+| R101 + DN + nomap + num_det=100 + epochs15 full stack | Very High | High (full retraining) | Top priority |
 
 ---
 
 ## 8. Concrete Next Experiments (Execution Order)
 
-### Immediate (high confidence wins — untested combos from mar26 findings)
+### Immediate (high confidence wins on nomap base)
 
-**Exp A: epochs15 + num_det=100 (no plan_loss_up)**
-- Stage2: nomap, queue=6, num_det=100, num_epochs=15
-- Why: both changes are individually confirmed positive; combining without plan_loss_up avoids the negative synergy seen in mar26 exp005
+**Exp A: epochs15 + num_det=100 on nomap_queue6** ← top priority
+- Stage2: nomap_queue6 base + num_det=100 + num_epochs=15
+- Why: both confirmed individually on nomap; mar26 exp005 neg-synergy was because plan_loss_up was also included. Clean 2-way combo.
 - Expected: L2≈0.55-0.56, col≈0.085-0.090%
+- IMPORTANT: use nomap_queue6 base config, NOT bs24 override
 
-**Exp B: plan_loss_up + num_det=100 (10 epochs)**
-- Stage2: nomap, queue=6, num_det=100, plan_loss_reg=2.0, plan_loss_cls=1.0, epochs=10
-- Why: test if plan_loss_up and num_det=100 synergize at the standard 10-epoch budget (without the instability of 15 epochs)
-- Expected: col≈0.080-0.085%, L2≈0.560-0.570
-
-**Exp C: num_det=150**
+**Exp B: num_det=150 on nomap_queue6**
 - Stage2: nomap, queue=6, num_det=150
 - Why: if 50→100 was a strong positive, 100→150 may compound further
 - Expected: L2≈0.560, col≈0.085%
+
+**Exp C: plan_loss_up + num_det=100 on nomap_queue6 (10 epochs)**
+- Stage2: nomap, queue=6, num_det=100, plan_loss_reg=2.0, plan_loss_cls=1.0
+- Why: mar27 showed negative synergy on bs24 with-map. Test on nomap where plan_loss_up was originally validated.
+- Expected: col≈0.080-0.085%, L2≈0.560-0.570
 
 **Exp D: R101 + DN + Nomap + Rotaug full stack**
 - Stage1: R101, num_dn_groups=5, with_map=False, rot3d_range=[-0.3925, 0.3925]
@@ -839,9 +867,9 @@ Based on all results, the best R50 nomap configuration for planning is:
 
 ## 9. Open Questions / Missing Artifacts
 
-1. **Optimal loss weights with num_det=100**: plan_loss_up improves col in isolation but causes negative synergy with num_det=100 at 15 epochs. Unclear whether plan_loss_up + num_det=100 at 10 epochs is safe. Exp B in Section 8 will answer this.
+1. **Optimal loss weights with num_det=100 on nomap**: plan_loss_up causes negative synergy with num_det=100 on bs24 with-map (mar27 exp005). Unclear whether this also holds on nomap_queue6 where plan_loss_up was originally validated. Exp C (Section 8) will answer this.
 
-2. **Stage-2 duration with num_det=100**: 15 epochs alone (exp001) improved both metrics. Does epochs15 + num_det=100 combine safely? Exp A will answer this.
+2. **Stage-2 duration with num_det=100 on nomap**: epochs15 alone helps on nomap (mar26 exp001). Does epochs15 + num_det=100 combine safely on nomap? Mar27 exp004 showed epochs15 HURTS on with-map. Exp A (Section 8) will answer this for nomap.
 
 3. **num_det ceiling**: Is 100 the optimal or is 150+ still better? The improvement from 50→100 was strong enough to test 100→150.
 

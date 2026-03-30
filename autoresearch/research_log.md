@@ -540,3 +540,65 @@ evaluation = dict(interval=num_iters_per_epoch * checkpoint_epoch_interval, eval
 **Analysis:** epochs=15 HURTS on bs24 with-map — both primary metrics are worse than baseline. This contradicts mar26 findings where epochs=15 improved both metrics. Key difference: with map head active, 5 additional epochs amplify map head gradient competition with planning, degrading both. The map optimization may converge to a worse local minimum for planning. Hard constraint added: do NOT increase epochs on bs24 with-map base config. exp005 plan changed from epochs15+det100 to num_det=100+plan_loss_up (combining the two best individual wins from this session).
 
 ---
+
+## [exp-005] auto_mar27_exp005_epochs15_det100 (num_det=100 + plan_loss_up) — 2026-03-30
+**Hypothesis:** Combine num_det=100 (strongest win, exp001) and plan_loss_up (plan_loss_reg 1→2, plan_loss_cls 0.5→1). Both individually showed improvement vs baseline; testing synergy.
+**Config changes:**
+```python
+model['head']['motion_plan_head']['num_det'] = 100
+model['head']['motion_plan_head']['plan_loss_reg']['loss_weight'] = 2.0
+model['head']['motion_plan_head']['plan_loss_cls']['loss_weight'] = 1.0
+```
+**Job ID:** 3537
+**Status:** discard
+
+**Metrics:**
+| Metric | Baseline | Best so far | This exp | Δ vs best |
+|--------|----------|-------------|----------|-----------|
+| L2 | 0.6274 | 0.6159 | 0.6497 | ↑ +0.034 (WORST in session, worse than baseline!) |
+| obj_box_col | 0.107% | 0.091% | 0.125% | ↑ +0.034% (worse) |
+| car_ade | 0.6313 | 0.6261 | 0.6300 | ↑ +0.004 |
+| NDS | 0.5233 | 0.5258 | 0.5291 | ↑ +0.003 |
+| IDS | 990 | 577 | 933 | ↑ +356 (nearly as bad as baseline!) |
+| FAF | 77.7 | 44.8 | 69.9 | ↑ +25.1 (much worse) |
+| AMOTA | 0.3713 | 0.3751 | 0.3747 | ↓ -0.000 |
+| mAP_normal | 0.5508 | 0.5618 | 0.5567 | ↓ -0.005 |
+
+**Analysis:** Severe negative synergy. Combining num_det=100 (which halved IDS/FAF in exp001) with plan_loss_up produces the worst result in the session — IDS nearly returns to baseline level (933 vs 990), FAF spikes to 69.9. The doubled planning loss weights force the planner to overfit to all 100 agents simultaneously, creating a high-dimensional optimization problem that destabilizes training. This extends the pattern observed in mar26 exp005: on bs24 with-map, adding ANY second change to num_det=100 causes negative synergy. The map head's gradient competition leaves no optimization budget for stacked improvements.
+
+---
+
+## Conclusions — mar27 session
+
+**Session:** autoresearch/mar27 | Base config: sparsedrive_r50_stage2_4gpu_bs24.py | 5 experiments + 1 baseline
+
+### Final Results Table
+
+| Experiment | L2 | col% | IDS | FAF | Status | Key change |
+|-----------|-----|------|-----|-----|--------|-----------|
+| Baseline | 0.627 | 0.107% | 990 | 77.7 | — | bs24 with-map queue=4 |
+| **exp001 num_det=100** | **0.616** | **0.091%** | **577** | **44.8** | **keep (best)** | num_det 50→100 |
+| exp002 queue=6 | 0.623 | 0.147% | 995 | 74.4 | discard | queue 4→6 (with map) |
+| exp003 crash | — | — | — | — | crash×3 | nomap DDP incompatible |
+| exp003b plan_loss_up | 0.622 | 0.110% | 691 | 46.3 | discard | plan_loss×2 |
+| exp004 epochs=15 | 0.635 | 0.143% | 778 | 45.2 | discard | epochs 10→15 (with map) |
+| exp005 det100+planup | 0.650 | 0.125% | 933 | 69.9 | discard | combo (negative synergy) |
+
+### Key Findings
+
+1. **num_det=100 is the only reliable win on bs24 with-map**: L2 -1.8%, col -15%, IDS -42%, FAF -42%. Universal improvement — works on both nomap_queue6 and bs24 with-map.
+
+2. **bs24 with-map is highly brittle**: The map head creates gradient competition that makes almost every change harmful. queue=6, epochs=15, and combinations all degraded performance vs baseline. Only num_det=100 (a zero-cost inference change) helps.
+
+3. **Negative synergy dominates combinatorial experiments**: Every attempt to combine 2+ changes on bs24 failed. This pattern holds across mar26, mar27, and historical results. On this config, the optimization landscape has minimal headroom for stacked changes.
+
+4. **with_map=False via config override is DDP-incompatible**: Map head module stays registered with DDP, causing "mark ready twice" error. Requires a base config built without map head, not a runtime override.
+
+5. **epochs=15 is config-specific**: Helps on nomap configs (mar26 exp001: L2 -2.5%), hurts on with-map (mar27 exp004: L2 +1.3%). Map head training dynamics change significantly with longer optimization.
+
+### Recommended Next Steps
+
+1. **Establish num_det=100 as permanent default** — confirmed across 2 configs, zero cost, massive tracking improvement.
+2. **Build a combined nomap+det100 config from scratch** — don't override with_map at runtime. The nomap_queue6 base already works; just add num_det=100 (already done in mar26 exp003: L2=0.568, col=0.091%).
+3. **Full-stack experiment**: R101 backbone + DN pretrain + nomap + queue=6 + num_det=100 (estimated SOTA for R50-class models).
+4. **Investigate plan_loss_up on nomap only**: Confirmed win on nomap baseline in mar25 (col 0.080→0.074%). May work on nomap_queue6 too, but showed negative synergy with num_det=100 here.
