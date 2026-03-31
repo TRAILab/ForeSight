@@ -1,6 +1,6 @@
 # SparseDrive Research Review: Comprehensive Analysis and Improvement Roadmap
 
-> Generated: 2026-03-25. Experimental findings updated: 2026-03-26.
+> Generated: 2026-03-25. Experimental findings updated: 2026-03-30.
 
 ---
 
@@ -342,19 +342,46 @@ Multiple variants trained/evaluated with occluded-object detection (occptrainval
 
 ---
 
-### 3.10 Auto-Research Experiments (March 2026)
+### 3.10 Auto-Research Experiments — mar25 (March 2026)
 
-| Config | NDS | AMOTA | L2 | obj_box_col |
-|--------|-----|-------|----|-------------|
-| bs24 (baseline) | 0.5232 | 0.3776 | 0.636 | 0.133% |
-| **exp001 (plan_loss_up)** | 0.5239 | 0.3741 | **0.590** | **0.084%** |
-| exp002 (motion_loss_up) | running | — | — | — |
+Base config: `sparsedrive_r50_stage2_4gpu_nomap.py` (queue=4, bs=48). Baseline: L2=0.5911, col=0.080%.
 
-`exp001` (plan_loss_up) achieves the best planning performance in the DGX experiment set: L2=0.590 and obj_box_col=0.084%, compared to the baseline 0.636/0.133%. This suggests planning loss upweighting is a clear win. exp002 (motion_loss_up) was launched 2026-03-26 and results are pending.
+| Config | NDS | AMOTA | L2 | obj_box_col | Status |
+|--------|-----|-------|----|-------------|--------|
+| nomap bs48 (baseline) | 0.5239 | 0.3741 | 0.5911 | 0.080% | baseline |
+| exp001: plan_loss_reg 1→2, cls 0.5→1 | 0.5239 | 0.3741 | 0.5902 | 0.084% | keep |
+| exp002: motion_loss 0.2→0.5 | 0.5158 | — | 0.6358 | 0.148% | discard |
+| exp003: queue_length 4→6 | 0.5238 | — | **0.5757** | 0.100% | keep ⭐ |
+| exp004: num_decoder 6→8 | 0.5239 | — | 0.5955 | **0.074%** | keep ⭐ |
+| exp005: queue6 + decoder8 | 0.5241 | — | 0.5934 | 0.126% | discard |
+
+**Mar25 key findings:** queue=6 is best for L2; decoder=8 is best for col; combinations negative at 10 epochs; motion_loss >0.2 kills both metrics.
 
 ---
 
-### 3.11 Summary Table
+### 3.11 Auto-Research Experiments — mar26 (March 2026)
+
+Base config: `sparsedrive_r50_stage2_4gpu_nomap_queue6.py` (queue=6 already baked in, bs=48). Baseline: L2=0.5927, col=0.104%.
+
+| Config | NDS | AMOTA | L2 | obj_box_col | IDS | Status |
+|--------|-----|-------|----|-------------|-----|--------|
+| nomap_queue6 (baseline) | 0.5236 | 0.3878 | 0.5927 | 0.104% | 959 | baseline |
+| exp001: epochs 10→15 | 0.5253 | 0.3791 | 0.5738 | 0.099% | 960 | keep |
+| exp002: plan_loss_reg 1→2, cls 0.5→1 | 0.5218 | 0.3691 | 0.5904 | **0.094%** | 1087 | keep |
+| **exp003: num_det 50→100** | 0.5231 | 0.3712 | **0.5676** | **0.091%** | 1086 | **keep ⭐** |
+| exp004: confidence_decay 0.6→0.8 | 0.5209 | 0.3725 | 0.5731 | 0.120% | 1018 | discard |
+| exp005: epochs15+plan_up+det100 | 0.5210 | 0.3765 | 0.6109 | 0.107% | 842 | discard |
+
+**Mar26 key findings:**
+- `num_det=100` is the best single change: improves both L2 (-4.2%) and col (-12.5%) vs baseline simultaneously at zero compute cost.
+- Extended training (15 epochs) helps both metrics individually.
+- Plan loss upweighting best for col in isolation but not L2.
+- confidence_decay=0.8 causes FAF spike (+18) and collision regression — default 0.6 is optimal.
+- Combining all three positive changes (exp005) causes negative synergy — same pattern as mar25 exp005.
+
+---
+
+### 3.12 Summary Table
 
 | Experiment | NDS | mAP | AMOTA | IDS | L2 | obj_box_col |
 |-----------|-----|-----|-------|-----|-----|-------------|
@@ -368,7 +395,38 @@ Multiple variants trained/evaluated with occluded-object detection (occptrainval
 | Pretrainv4 (8GPU) | 0.5128 | 0.4047 | 0.3611 | 1035 | 0.713 | 0.163% |
 | R101 stage2 (4GPU) | 0.5857 | 0.4954 | 0.5020 | 586 | 0.598 | 0.081% |
 | R101+nomap (4GPU) | 0.5936 | 0.4989 | 0.5032 | 651 | 0.592 | 0.103% |
-| exp001 plan_loss_up | 0.5239 | 0.4124 | 0.3741 | 862 | **0.590** | **0.084%** |
+| mar25 exp003 queue=6 | 0.5238 | 0.4131 | — | — | 0.576 | 0.100% |
+| mar25 exp004 decoder=8 | 0.5239 | 0.4131 | — | — | 0.596 | **0.074%** |
+| **mar26 exp003 num_det=100** | 0.5231 | 0.4111 | 0.3712 | 1086 | **0.568** | **0.091%** |
+| mar27 baseline (bs24+map+queue4) | 0.5233 | 0.4133 | 0.3713 | 990 | 0.627 | 0.107% |
+| mar27 exp001 num_det=100 | 0.5258 | 0.4133 | 0.3751 | 577 | 0.616 | **0.091%** |
+| mar27 exp002 queue=6 | 0.5262 | 0.4133 | 0.3751 | 995 | 0.623 | 0.147% |
+| mar27 exp003 nomap+planup | — | — | — | — | crash | crash (DDP incompatibility) |
+| mar27 exp003b plan_loss_up | 0.5271 | 0.4171 | 0.3836 | 691 | 0.622 | 0.110% |
+| mar27 exp004 epochs=15 | 0.5255 | 0.4125 | 0.3829 | 778 | 0.635 | 0.143% |
+| mar27 exp005 det100+planup | 0.5291 | 0.4139 | 0.3747 | 933 | 0.650 | 0.125% |
+
+### 3.13 Auto-Research Experiments — mar27 (March 2026)
+
+**Base config:** `sparsedrive_r50_stage2_4gpu_bs24.py` (WITH map, queue=4, bs=24, lr=1.5e-4)
+**Goal:** Improve L2 and obj_box_col on the bs24 with-map base config.
+**Baseline:** L2=0.627, col=0.107%, IDS=990, FAF=77.7, mAP_normal=0.5508
+
+| Exp | Change | L2 | col% | IDS | FAF | Status |
+|-----|--------|-----|------|-----|-----|--------|
+| exp001 | num_det 50→100 | **0.616** | **0.091%** | **577** | **44.8** | keep (best) |
+| exp002 | queue 4→6 | 0.623 | 0.147% | 995 | 74.4 | discard |
+| exp003 | nomap+planup | — | — | — | — | crash×3 (DDP) |
+| exp003b | plan_loss_up only | 0.622 | 0.110% | 691 | 46.3 | discard |
+| exp004 | epochs 10→15 | 0.635 | 0.143% | 778 | 45.2 | discard |
+| exp005 | det100+planup | 0.650 | 0.125% | 933 | 69.9 | discard |
+
+**Key takeaways:**
+- **num_det=100 is the only reliable win** on bs24 with-map: all other changes hurt or are neutral.
+- **with_map=False via runtime override is DDP-incompatible** in PyTorch 1.13 (map head weights remain registered). Requires a base config built without map head.
+- **bs24 with-map is brittle**: map head gradient competition leaves no headroom for additional changes beyond num_det=100. queue=6, epochs=15, plan_loss_up, and combinations all degrade both metrics.
+- **Negative synergy dominates**: even combining num_det=100 + plan_loss_up (both confirmed individual wins) produces the worst result (L2=0.650, IDS=933 — nearly back to baseline levels).
+- **Config-specific findings**: epochs=15 helps on nomap (mar26 ✓) but hurts on with-map (mar27 ✗). Same for queue=6. The map head is the source of brittleness.
 
 ---
 
@@ -695,29 +753,38 @@ This is the fundamental perception-planning coupling: planning collision rate is
 
 ## 7. Prioritized Action Plan
 
-> Updated 2026-03-26 based on empirical results.
+> Updated 2026-03-30 based on empirical results.
 
 ### Confirmed Wins (run these immediately)
 
-| Rank | Idea | Evidence | Expected Gain |
-|------|------|----------|---------------|
-| 1 | **R101 backbone** | R101 stage2: NDS=0.5857 vs R50=0.5232 | +0.063 NDS, +0.125 AMOTA |
-| 2 | **DN training in stage1** | DN stage2 AMOTA=0.4179 vs 0.3714 | +0.046 AMOTA, −22% IDS |
-| 3 | **Nomap in stage2** | nomap bs24: L2=0.588 vs 0.636 | −7% L2, −22% collision |
-| 4 | **Plan/motion loss upweighting** | exp001: L2=0.590, col=0.084% | −37% collision vs baseline |
-| 5 | **Rotaug in stage1** | nomap+DN+rotaug: NDS=0.562 vs 0.531 | +0.031 NDS |
+| Rank | Idea | Evidence | Expected Gain | Notes |
+|------|------|----------|---------------|-------|
+| 1 | **R101 backbone** | R101 stage2: NDS=0.5857 vs R50=0.5232 | +0.063 NDS, +0.125 AMOTA | Requires full retraining |
+| 2 | **DN training in stage1** | DN stage2 AMOTA=0.4179 vs 0.3714 | +0.046 AMOTA, −22% IDS | Requires full retraining |
+| 3 | **Nomap in stage2** | nomap bs24: L2=0.588 vs 0.636 | −7% L2, −22% collision | Use dedicated nomap base config, NOT override |
+| 4 | **num_det=100** | mar26 exp003 + mar27 exp001: confirmed on 2 configs | −4.2% L2, −12.5% col, −42% IDS (zero compute cost) | **Universal — apply to all configs** |
+| 5 | **queue=6 (nomap only)** | mar25 exp003 + nomap_queue6 base | −3% L2 on nomap | Do NOT use with map head active |
+| 6 | **Extend stage2 to 15 epochs (nomap only)** | mar26 exp001: L2=0.574, col=0.099% | −3.2% L2, −5% col | Do NOT use with map head active |
+| 7 | **Plan loss upweighting (nomap only)** | mar26 exp002: col=0.094%; mar25 history | best col in isolation on nomap | Negative synergy with num_det=100 |
 
 ### Best Current Recipe (empirical)
 
-Based on all results, the best configuration strategy is:
+Based on all results, the best R50 configuration for planning is:
 
+**Best confirmed config: `auto_mar26_exp003_num_det100`** (nomap_queue6 base + num_det=100)
+- Results: **L2=0.5676, obj_box_col=0.091%**, NDS=0.5231, AMOTA=0.3712, IDS=1086
+- Config: sparsedrive_r50_stage2_4gpu_nomap_queue6.py + `model['head']['motion_plan_head']['num_det'] = 100`
+
+**Best bs24 with-map config: `auto_mar27_exp001_num_det100`**
+- Results: L2=0.6159, obj_box_col=0.091%, NDS=0.5258, AMOTA=0.3751, IDS=577
+- Note: with-map configs are brittle — only num_det=100 reliably improves them
+
+**Full stack (not yet run):**
 **Stage 1**: `R101 + DN (num_dn_groups=5, num_temp_dn_groups=3) + nomap + rotaug`
 - Expected: NDS≈0.62+, AMOTA≈0.55+
 
-**Stage 2**: `nomap + upweighted plan/motion loss`
-- Expected: L2≈0.55-0.58, obj_box_col≈0.07-0.09%
-
-This combination chains all confirmed wins. Not yet run as a full end-to-end stack.
+**Stage 2**: `nomap + queue=6 + num_det=100 + 15 epochs`
+- Expected: L2≈0.54-0.56, obj_box_col≈0.07-0.08%
 
 ### Ideas with Negative or Null Evidence (deprioritize)
 
@@ -729,47 +796,62 @@ This combination chains all confirmed wins. Not yet run as a full end-to-end sta
 | Stage2 with map from DN pretrain (bs24_pt2) | L2=0.700 (worse) | Map head in stage2 hurts |
 | Map LR reduction (maplrdiv4) | map_mAP collapses | Do not use |
 | GT oracle → planning improvement | L2 unchanged | Detection not the bottleneck |
+| motion_loss_reg/cls > 0.2 | L2 +7.6%, col +85% (mar25 exp002) | Never increase motion loss weights |
+| confidence_decay=0.8 | FAF +18, col 0.120% vs 0.104% (mar26 exp004) | Do not increase confidence_decay above 0.6 |
+| Combining plan_loss_up + num_det=100 + epochs15 | L2=0.611 worse than baseline (mar26 exp005) | Negative synergy — deploy changes one at a time |
+| queue_length=6 with map head active (bs24) | col 0.091%→0.147%, IDS stays high (mar27 exp002) | Do NOT increase queue_length when map head is active |
+| epochs=15 with map head active (bs24) | L2=0.635 and col=0.143% — WORSE than 10-epoch baseline (mar27 exp004) | Do NOT increase epochs on bs24 with-map — map/planning gradient competition compounds |
+| with_map=False via config override on bs24 base | 3× DDP crash: map head weights remain registered, find_unused_parameters doesn't fix (mar27 exp003) | Do NOT set with_map=False via override — requires a base config built without map head |
 
 ### Remaining High-Value Ideas (untested)
 
-| Idea | Expected Impact | Effort |
-|------|----------------|--------|
-| Extend stage2 to 20-25 epochs | Medium-High | Low (compute only) |
-| Trailer cls_allow_reverse + oversampling | Medium | Low |
-| Increase planning/motion modes 6→12 | Medium | Medium |
-| Soft collision auxiliary loss | High | High |
-| Longer temporal queue (4→8 frames) | Medium | Medium |
-| Cross-attention from planner to image features | High | High |
+| Idea | Expected Impact | Effort | Notes |
+|------|----------------|--------|-------|
+| epochs15 + num_det=100 on nomap_queue6 | High — two confirmed wins together on right base config | Low | Use nomap base, not bs24 |
+| num_det=150 on nomap_queue6 | Medium — if 50→100 helped, may push further | Low | Zero compute cost |
+| plan_loss_up + num_det=100 on nomap_queue6 | Medium — test if synergy holds on nomap (differs from bs24 with-map) | Low | Avoid on with-map configs |
+| Trailer cls_allow_reverse + oversampling | Medium | Low | |
+| Increase planning/motion modes 6→12 | Medium | Medium | |
+| Soft collision auxiliary loss | High | High | |
+| R101 + DN + nomap + num_det=100 + epochs15 full stack | Very High | High (full retraining) | Top priority |
 
 ---
 
 ## 8. Concrete Next Experiments (Execution Order)
 
-### Immediate (high confidence wins)
+### Immediate (high confidence wins on nomap base)
 
-**Exp A: R101 + DN + Nomap + Rotaug full stack**
+**Exp A: epochs15 + num_det=100 on nomap_queue6** ← top priority
+- Stage2: nomap_queue6 base + num_det=100 + num_epochs=15
+- Why: both confirmed individually on nomap; mar26 exp005 neg-synergy was because plan_loss_up was also included. Clean 2-way combo.
+- Expected: L2≈0.55-0.56, col≈0.085-0.090%
+- IMPORTANT: use nomap_queue6 base config, NOT bs24 override
+
+**Exp B: num_det=150 on nomap_queue6**
+- Stage2: nomap, queue=6, num_det=150
+- Why: if 50→100 was a strong positive, 100→150 may compound further
+- Expected: L2≈0.560, col≈0.085%
+
+**Exp C: plan_loss_up + num_det=100 on nomap_queue6 (10 epochs)**
+- Stage2: nomap, queue=6, num_det=100, plan_loss_reg=2.0, plan_loss_cls=1.0
+- Why: mar27 showed negative synergy on bs24 with-map. Test on nomap where plan_loss_up was originally validated.
+- Expected: col≈0.080-0.085%, L2≈0.560-0.570
+
+**Exp D: R101 + DN + Nomap + Rotaug full stack**
 - Stage1: R101, num_dn_groups=5, with_map=False, rot3d_range=[-0.3925, 0.3925]
-- Stage2: nomap, plan_loss_reg/cls upweighted (×2-3), motion_loss upweighted (×2-3)
-- Expected: NDS≈0.60+, AMOTA≈0.55+, L2≈0.55-0.58, obj_box_col≈0.07%
-- This is the most promising single experiment
-
-**Exp B: Wait for exp002 (motion_loss_up) results**
-- Determine optimal motion loss weight
-- Combine with plan_loss_up from exp001 to find joint optimum
+- Stage2: nomap, num_det=100, epochs=15
+- Expected: NDS≈0.60+, AMOTA≈0.55+, L2≈0.52-0.55, obj_box_col≈0.060-0.075%
+- This is the most promising end-to-end experiment
 
 ### Short-term (untested ideas)
 
-**Exp C: Stage2 duration ablation (20 vs 30 epochs)**
-- Extend stage2 for the R50 bs24 baseline from 10→20 epochs
-- Check if planning still improves — expected yes given exp001 result
-
-**Exp D: Trailer cls_allow_reverse**
+**Exp E: Trailer cls_allow_reverse**
 - Add trailer to `cls_allow_reverse` list alongside barriers
 - Expected: AMOTA recovery from ~0.001 to 0.05-0.10
 
-**Exp E: Increased planning/motion modes (12 modes)**
+**Exp F: Increased planning/motion modes (12 modes)**
 - Regenerate kmeans anchors with k=12
-- Retrain stage2 with same recipe as Exp A but with 12 modes
+- Retrain stage2 with num_det=100 recipe
 
 ### Science / Paper Requirements
 
@@ -785,23 +867,25 @@ This combination chains all confirmed wins. Not yet run as a full end-to-end sta
 
 ## 9. Open Questions / Missing Artifacts
 
-1. **Optimal loss weights**: exp001 (plan_loss_up) shows upweighting helps. exp002 (motion_loss_up) is running. Need to explore joint upweighting and find the Pareto-optimal weighting.
+1. **Optimal loss weights with num_det=100 on nomap**: plan_loss_up causes negative synergy with num_det=100 on bs24 with-map (mar27 exp005). Unclear whether this also holds on nomap_queue6 where plan_loss_up was originally validated. Exp C (Section 8) will answer this.
 
-2. **Stage-2 duration**: 10 epochs is short. Whether 20 or 30 epochs still improves is unknown. Should run a 20-epoch ablation on the best R50 recipe.
+2. **Stage-2 duration with num_det=100 on nomap**: epochs15 alone helps on nomap (mar26 exp001). Does epochs15 + num_det=100 combine safely on nomap? Mar27 exp004 showed epochs15 HURTS on with-map. Exp A (Section 8) will answer this for nomap.
 
-3. **Rotation augmentation in stage2**: `nomap_rotaug` doesn't help in stage2. Understanding why (optimization conflict?) would clarify if rotaug should only go in stage1.
+3. **num_det ceiling**: Is 100 the optimal or is 150+ still better? The improvement from 50→100 was strong enough to test 100→150.
 
-4. **Why planning L2 worsens with GT perception**: GT perception improves motion by 40% but planning L2 slightly degrades. This suggests the planner overfits to noisy detection signals during training. Worth investigating whether the planning head can better exploit clean GT features with fine-tuning.
+4. **Rotation augmentation in stage2**: `nomap_rotaug` doesn't help in stage2. Understanding why (optimization conflict?) would clarify if rotaug should only go in stage1.
 
-5. **Occlusion detection mechanism**: Current system cannot detect occluded objects. What would a principled architecture look like? Possible directions: (a) explicit memory queries for extrapolated trajectories, (b) occupancy-based prediction for hidden areas, (c) uncertainty-aware detection that propagates occluded agent hypotheses.
+5. **Why planning L2 worsens with GT perception**: GT perception improves motion by 40% but planning L2 slightly degrades. This suggests the planner overfits to noisy detection signals during training. Worth investigating whether the planning head can better exploit clean GT features with fine-tuning.
 
-6. **Anchor quality for trailers**: Trailer AMOTA ≈ 0 persists across all experiments. Unknown whether any of the 900 kmeans detection anchors correspond to trailer shapes. Visualize anchor clusters in BEV.
+6. **Occlusion detection mechanism**: Current system cannot detect occluded objects. What would a principled architecture look like? Possible directions: (a) explicit memory queries for extrapolated trajectories, (b) occupancy-based prediction for hidden areas, (c) uncertainty-aware detection that propagates occluded agent hypotheses.
 
-7. **CV/CTRV baselines**: No classical motion prediction baselines run yet. Required to claim learned model beats physics priors.
+7. **Anchor quality for trailers**: Trailer AMOTA ≈ 0 persists across all experiments. Unknown whether any of the 900 kmeans detection anchors correspond to trailer shapes. Visualize anchor clusters in BEV.
 
-8. **Multi-seed variance**: All current experiments are single-seed. Paper claims require ±std reporting.
+8. **CV/CTRV baselines**: No classical motion prediction baselines run yet. Required to claim learned model beats physics priors.
 
-9. **R101 + best recipe**: The best combination (R101 + DN + nomap + rotaug + loss upweighting) has not been run as a single experiment. This is the clearest path to a new state-of-the-art on this codebase.
+9. **Multi-seed variance**: All current experiments are single-seed. Paper claims require ±std reporting.
+
+10. **R101 + best recipe**: The best combination (R101 + DN + nomap + rotaug + num_det=100 + epochs15) has not been run as a single experiment. This is the clearest path to a new state-of-the-art on this codebase.
 
 ---
 

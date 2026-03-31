@@ -308,6 +308,8 @@ class MotionPlanningHead(BaseModule):
             elif op == "norm" or op == "ffn":
                 instance_feature = self.layers[i](instance_feature)
             elif op == "cross_gnn":
+                if map_output is None:
+                    continue
                 instance_feature = self.layers[i](
                     instance_feature,
                     key=map_instance_feature_selected,
