@@ -169,7 +169,7 @@ All experiments fork from one of two baselines:
 - **DGX 4GPU** (`stage2_4gpu_bs24`): NDS=0.5232, AMOTA=0.3776, map=0.5528, L2=0.636, obj_box_col=0.133%
 - **Apollo 8GPU** (`stage2_8gpu_noflash`): NDS=0.5187, AMOTA=0.3714, map=0.5471, L2=0.600, obj_box_col=0.104%
 
-The 4GPU bs=12/GPU config (`stage2_4gpu`) is a **known failure mode**: the map head is highly sensitive to per-GPU batch size and fails to converge at bs<6/GPU. All 4GPU experiments must use bs=24 total.
+The 4GPU bs=12/GPU config (`stage2_4gpu`) is a **known failure mode**: the map head fails to converge at per-GPU BS=12, yielding map mAP=0.078 vs 0.553 at per-GPU BS=6. Root cause under investigation (see Section 3.13). All 4GPU experiments must use bs=24 total until resolved.
 
 ---
 
@@ -406,7 +406,69 @@ Base config: `sparsedrive_r50_stage2_4gpu_nomap_queue6.py` (queue=6 already bake
 | mar27 exp004 epochs=15 | 0.5255 | 0.4125 | 0.3829 | 778 | 0.635 | 0.143% |
 | mar27 exp005 det100+planup | 0.5291 | 0.4139 | 0.3747 | 933 | 0.650 | 0.125% |
 
-### 3.13 Auto-Research Experiments — mar27 (March 2026)
+### 3.13 Map Head Failure at Per-GPU Batch Size > 6 (Investigation — April 2026)
+
+#### Observed Problem
+
+The `sparsedrive_r50_stage2_4gpu.py` config (total_batch_size=48, 4 GPUs → **12 samples/GPU**, lr=3e-4) produces catastrophically poor map performance despite detection performing normally. The `sparsedrive_r50_stage2_4gpu_bs24.py` config (total_batch_size=24, 4 GPUs → **6 samples/GPU**, lr=1.5e-4) works correctly.
+
+| Config | per-GPU BS | LR | ped_crossing | divider | boundary | map mAP | map_loss_line_5 (end) |
+|--------|-----------|-----|-------------|---------|----------|---------|----------------------|
+| `4gpu` (bs48) | **12** | 3e-4 | 0.033 | 0.085 | 0.115 | **0.078** | ~0.70 (not converged) |
+| `4gpu_maplrdiv4` (bs48, loss/4) | **12** | 3e-4 | 0.025 | 0.087 | 0.110 | **0.074** | — |
+| `4gpu_bs24` | **6** | 1.5e-4 | 0.488 | 0.580 | 0.591 | **0.553** | ~0.10 (converged) |
+| `8gpu_noflash` | **6** | 3e-4 | 0.483 | 0.584 | 0.575 | **0.547** | — |
+
+The training losses confirm non-convergence: at iteration 51, `map_loss_line_0` is 0.81 for bs48 vs 0.26 for bs24, and it barely decreases throughout all 5860 iterations of training. Detection loss converges normally in both cases (det mAP ~0.41 for all).
+
+#### Isolation of the Variable
+
+The 8GPU config (total_batch_size=48, **6 samples/GPU**, lr=3e-4) achieves map mAP=0.547 — good performance with the **same total batch size and same LR** as the failing 4GPU config. This rules out total batch size and learning rate as root causes.
+
+The only consistent predictor across all configs is **per-GPU batch size**:
+- per-GPU BS = 6 → map works (4gpu_bs24, 8gpu_noflash)
+- per-GPU BS = 12 → map fails (4gpu bs48, maplrdiv4)
+- per-GPU BS = 16 → map also fails (stage1 4gpu, per user observation)
+
+#### What Was Ruled Out
+
+1. **LR too high**: The 8gpu config uses lr=3e-4 (same as failing 4gpu) and works fine.
+2. **Total batch size**: The 8gpu config has total_batch_size=48 (same as failing 4gpu) and works fine.
+3. **Map loss weight too high**: `maplrdiv4` divided both map loss weights by 4 — no improvement (0.074 vs 0.078).
+4. **Temporal instance bank gradient flow**: `cache()` explicitly detaches all features before storing (`instance_feature = instance_feature.detach()`), so no gradients flow across the temporal boundary regardless of `feat_grad`.
+5. **`feat_grad=True` on temporal features**: With `num_temp_instances=0` in stage1 (no temporal caching), `cache()` returns early — no temporal mechanism exists at all. Yet the issue still appears in stage1 at bs=16/GPU. This fully rules out temporal feature gradient accumulation as the cause.
+6. **`feat_grad` itself as a temporal mechanism**: Code inspection confirmed `feat_grad` only controls whether `self.instance_feature` (a single `[num_anchor, embed_dims]` nn.Parameter used to initialize all queries) is trainable. It has no connection to temporal caching.
+
+#### Most Likely Root Cause: BN Statistics
+
+With `norm_eval=False` and standard (non-sync) BN in the backbone, each GPU independently estimates batch normalization running statistics from its local batch. Per-GPU BN statistics shift the backbone feature distribution when batch size changes from 6 to 12 samples per GPU.
+
+The detection head is robust to this shift because it uses many redundant 3D anchors spread across diverse spatial locations (`feat_grad=False`, no sensitivity to feature initialization). The map head is uniquely sensitive because:
+- Its deformable keypoints are all constrained to a **fixed ground plane** (`ground_height=-1.84023`) via `SparsePoint3DKeyPointsGenerator` — systematic BN-induced feature degradation at ground-plane projected coordinates collapses all 100 anchors simultaneously
+- `feat_grad=True` means the shared anchor initialization parameter receives gradient updates, which may amplify BN-induced feature drift
+
+#### Pending Experiments (running as of 2026-04-01)
+
+Four ablation configs, all based on `sparsedrive_r50_stage2_4gpu.py` (bs48, 4GPU, per-GPU BS=12):
+
+| Config | Change | Tests | Confidence |
+|--------|--------|-------|------------|
+| `4gpu_gradacc` | `cumulative_iters=2` | Directly replicates per-GPU BS=6 for both BN stats and gradient updates simultaneously | **Highest** |
+| `4gpu_normeval` | `norm_eval=True` in backbone | Freezes BN running stats, isolates whether BN stats are the root cause | High |
+| `4gpu_mapfeatnograd` | `feat_grad=False` in map instance bank | Freezes map anchor init parameter, tests whether its gradient updates destabilize training | Medium |
+
+If `gradacc` works → per-GPU batch size confirmed as root cause, `cumulative_iters=2` is a practical fix.
+If `normeval` works but `gradacc` doesn't → BN statistics are the cause; production fix is SyncBN.
+If `mapfeatnograd` works but `normeval` doesn't → the shared anchor init parameter is being destabilized by conflicting gradients from diverse scenes at larger batch sizes.
+
+#### Actionable Fix Once Confirmed
+
+- **Short-term**: Use `cumulative_iters=2` to run 4GPU bs48 without map degradation, or keep using 4GPU bs24.
+- **Proper fix if BN confirmed**: Replace `norm_cfg=dict(type="BN")` with `norm_cfg=dict(type="SyncBN")` in the backbone — this pools BN statistics across all GPUs (effective batch = 4×12=48), making per-GPU batch size irrelevant to BN.
+
+---
+
+### 3.14 Auto-Research Experiments — mar27 (March 2026)
 
 **Base config:** `sparsedrive_r50_stage2_4gpu_bs24.py` (WITH map, queue=4, bs=24, lr=1.5e-4)
 **Goal:** Improve L2 and obj_box_col on the bs24 with-map base config.
@@ -496,9 +558,11 @@ This is the fundamental perception-planning coupling: planning collision rate is
 
 **Evidence**: The `_rotaug` config variants exist but the main `sparsedrive_small_stage1/2.py` configs don't include 3D rotation augmentation as standard. There's also a known float64 bug in the rotation augmentation path (documented in MEMORY.md). This means models trained on the main recipe aren't using 3D rotation augmentation.
 
-### B10. Map Head Inconsistency
+### B10. Map Head Failure at Per-GPU Batch Size > 6
 
-**Evidence**: `decouple_attn_map=False` while `decouple_attn=True` for detection and `decouple_attn_motion=True`. Map head also has `feat_grad=True` while detection has `feat_grad=False`. These inconsistencies may limit map quality.
+**Evidence**: Systematic comparison across four configs (see Section 3.13) shows map mAP collapses from 0.553 to 0.078 when per-GPU batch size increases from 6 to 12, with all other variables controlled. Map loss never converges at bs=12/GPU. Detection is unaffected. The cause is isolated to per-GPU batch size — not total batch size, not LR, not loss weights, not temporal gradient flow (which is always detached in `cache()`). Most likely mechanism: backbone BN statistics differ at bs=12/GPU vs bs=6/GPU, degrading ground-plane projected feature quality that the map head's `SparsePoint3DKeyPointsGenerator` depends on. Experiments confirming the cause are pending (see Section 3.13).
+
+**Note on `decouple_attn_map=False`**: Map head uses `decouple_attn=False` while det/motion use `True`. This architectural inconsistency may independently limit map quality but is not the cause of the batch-size-dependent failure.
 
 ### B11. Top-k Agent Selection = 50
 
