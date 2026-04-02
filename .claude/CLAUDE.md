@@ -54,8 +54,10 @@ ForeSight is an autonomous driving research project built on [SparseDrive](https
 ### VPN
 Both VPNs are kept always-on — never disconnect them. Use `/connect-server` to bring one up if it's down. Apollo VPN requires interactive login — tell the user to run it manually, never automate it.
 
-### Code sync (git)
-Push from local, pull on server — no rsync needed for code:
+### Code management (git)
+
+Work locally on the code with git to manage code changes. Always ask for confirmation before committing and pushing changes. Use `git add <files>` to stage changes, `git commit -m "<message>"` to commit changes, and `git push` to push changes from local. Use `git pull` to pull changes to the servers.
+
 ```bash
 git push && ssh <host> "cd <remote_repo> && git pull"
 ```
