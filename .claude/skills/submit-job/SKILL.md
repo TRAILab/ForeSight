@@ -1,0 +1,51 @@
+Submit a training or evaluation job to a remote server.
+
+## Arguments
+Parse from: $ARGUMENTS
+- `--server` (required): `dgx` | `apollo` | `narval`
+- `--config` (required): config file path relative to repo root (e.g. `projects/configs/sparsedrive_r50_stage2_4gpu.py`)
+- `--gpus` (default: infer from server — DGX: 4, Apollo: 8, CC: 4)
+- `--test`: if present, run evaluation instead of training; requires `--ckpt`
+- `--ckpt`: checkpoint path (required when `--test`)
+
+## Before submission
+1. Run `/connect-server --server <server>` to ensure VPN and SSH are active. Stop if it fails.
+2. Confirm the config file exists on the remote:
+```bash
+ssh <host> "test -f <remote_repo>/<config> && echo exists || echo MISSING"
+```
+If missing, tell the user to push the branch and pull on the server:
+```bash
+git push
+ssh <host> "cd <remote_repo> && git pull"
+```
+
+## Behavior
+
+Derive the inner command:
+- Train: `bash ./tools/dist_train.sh <config> <gpus> --deterministic`
+- Test:  `bash ./tools/dist_test.sh <config> <ckpt> <gpus> --deterministic --eval bbox`
+
+Then wrap with the server's run script and submit.
+
+### DGX (SLURM)
+```bash
+ssh trail_dgx "source ~/.bashrc && cd /raid/home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/dgx_run.sh <inner_cmd>"
+```
+- Parse job ID from `Submitted batch job <ID>`
+- Print: "Submitted DGX job <ID> — monitor with `/check-runs --server dgx` or `/parse-metrics --server dgx --job <ID>`"
+
+### Apollo (Docker, no SLURM)
+```bash
+ssh spapais@129.97.163.137 "cd /home/spapais/ForeSight && ./scripts/apollo_run.sh <inner_cmd>"
+```
+- No job ID. Job runs in foreground over SSH.
+- Warn: "Apollo runs synchronously — keep SSH session alive or use tmux on Apollo."
+
+### Narval (SLURM)
+```bash
+ssh spapais@narval.alliancecan.ca "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/cc_run.sh <inner_cmd>"
+```
+- Parse job ID from `Submitted batch job <ID>`
+- Note: Narval runs WANDB in offline mode (set in cc_run.sh).
+- Print: "Submitted Narval job <ID>"

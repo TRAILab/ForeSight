@@ -132,7 +132,7 @@ log_config['hooks'][1]['init_kwargs']['name'] = '<config_stem>'
 <your parameter changes>
 ```
 
-### Step 3 — Commit, push, sync DGX
+### Step 3 — Commit, push, pull on DGX
 ```bash
 git add projects/configs/<config_stem>.py
 git commit -m "autoresearch <tag> exp-NNN: <suffix>
@@ -143,10 +143,11 @@ ssh trail_dgx "cd /raid/home/spapais/ForeSight && git fetch origin autoresearch/
 ```
 
 ### Step 4 — Submit
-```bash
-ssh trail_dgx "cd /raid/home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/dgx_run.sh bash ./tools/dist_train.sh projects/configs/<config_stem>.py 4 --deterministic"
+Use the `/submit-job` skill:
 ```
-Parse job ID from `Submitted batch job <ID>`. Record it immediately in `research_log.md`.
+/submit-job --server dgx --config projects/configs/<config_stem>.py
+```
+Parse job ID from the skill output. Record it immediately in `research_log.md`.
 
 ### Step 5 — Wait
 Use the `/loop` skill to poll for job completion at the `--poll` interval:
@@ -156,11 +157,10 @@ Use the `/loop` skill to poll for job completion at the `--poll` interval:
 The loop will wake Claude every `--poll` interval. When the job leaves the queue, Claude continues automatically to Step 6.
 
 ### Step 6 — Parse metrics
-```bash
-LOG=$(ssh trail_dgx "ls -t /raid/home/spapais/ForeSight/work_dirs/<config_stem>/*.log 2>/dev/null | head -1")
-ssh trail_dgx "cat $LOG" | grep -E "NDS|mAP|ade=|epa=|L2|obj_box_col|mAP_normal" | tail -30
+Use the `/parse-metrics` skill:
 ```
-If no work_dir log, fall back to SLURM log: `/raid/home/spapais/ForeSight/logs/foresight-<JOB_ID>.log`
+/parse-metrics --server dgx --job <JOB_ID> --config <config_stem>
+```
 
 ### Step 7 — Log results
 
