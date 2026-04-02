@@ -10,8 +10,8 @@ Two experiments are prepared from the bs24 baseline. The first adds three-stage 
 
 | # | Config | L2 | obj_box_col | car_ade | NDS | Status | Notes | Job ID |
 |---|--------|----|-------------|---------|-----|--------|-------|--------|
-| 1 | sparsedrive_r50_stage2_4gpu_bs24_planrefine3 | — | — | — | — | submitted | bs24 baseline + 3-stage cumulative planning refinement | 58789115 |
-| 2 | sparsedrive_r50_stage2_4gpu_bs24_plantrajdeform | — | — | — | — | submitted | planrefine3 + endpoint deformable image attention | 58789117 |
+| 1 | sparsedrive_r50_stage2_4gpu_bs24_planrefine3 | — | — | — | — | submitted | bs24 baseline + 3-stage cumulative planning refinement | narval: 58789115; dgx: 3572 |
+| 2 | sparsedrive_r50_stage2_4gpu_bs24_plantrajdeform | — | — | — | — | submitted | planrefine3 + endpoint deformable image attention | narval: 58789117; dgx: 3573 |
 
 ## Discussion
 _(filled at the end)_
