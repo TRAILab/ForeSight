@@ -7,7 +7,7 @@ Parse:
 - `--goal` (required): research objective
 - `--base-config` (default: `projects/configs/sparsedrive_r50_stage2_4gpu.py`)
 - `--max-experiments` (default: 5)
-- `--poll` (default: 30m): how often to check job status (e.g. `30m`, `1h`)
+- `--poll` (default: 1h): how often to check job status (e.g. `30m`, `1h`)
 
 **Agree on a run tag** based on today's date (e.g. `mar25`). The branch `autoresearch/<tag>` must not already exist.
 

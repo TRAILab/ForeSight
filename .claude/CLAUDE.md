@@ -19,17 +19,11 @@ ForeSight is an autonomous driving research project built on [SparseDrive](https
 | File | Purpose |
 |------|---------|
 | `projects/mmdet3d_plugin/models/sparsedrive_head.py` | Main head dispatcher |
-| `projects/mmdet3d_plugin/models/gt_sparse_drive_head.py` | GT oracle head |
 | `projects/mmdet3d_plugin/models/detection3d/detection3d_head.py` | Sparse4DHead |
 | `projects/mmdet3d_plugin/models/motion/motion_planning_head.py` | MotionPlanningHead |
 | `projects/mmdet3d_plugin/models/motion/instance_queue.py` | Temporal tracking queue |
 | `projects/mmdet3d_plugin/models/instance_bank.py` | Instance feature bank |
 | `projects/mmdet3d_plugin/datasets/nuscenes_3d_dataset.py` | Dataset + evaluation |
-| `projects/mmdet3d_plugin/datasets/evaluation/planning/planning_eval.py` | Planning metrics |
-| `projects/mmdet3d_plugin/datasets/evaluation/det/occluded_det_eval.py` | Det eval with occlusion |
-| `projects/mmdet3d_plugin/datasets/evaluation/motion/motion_eval_uniad.py` | Motion eval |
-| `projects/mmdet3d_plugin/datasets/pipelines/augment.py` | BBoxRotation, traj_rotate |
-| `projects/mmdet3d_plugin/datasets/pipelines/transform.py` | NuScenesSparse4DAdaptor |
 
 ## Key Metrics (nuScenes val)
 
