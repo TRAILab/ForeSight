@@ -14,7 +14,7 @@ For each target server (DGX uses SLURM; Apollo does NOT — skip Apollo always):
 ssh trail_dgx "source ~/.bashrc && squeue -u spapais -o '%.10i %.20j %.8T %.10M %.6D %R' 2>/dev/null"
 
 # Narval
-ssh spapais@narval.alliancecan.ca "squeue -u spapais -o '%.10i %.20j %.8T %.10M %.6D %R' 2>/dev/null"
+ssh narval "squeue -u spapais -o '%.10i %.20j %.8T %.10M %.6D %R' 2>/dev/null"
 ```
 
 ### 2. Map job IDs to config stems
@@ -25,7 +25,7 @@ For each running/pending job, find the associated work_dir to identify the confi
 ssh trail_dgx "ls -dt /raid/home/spapais/ForeSight/work_dirs/*/ 2>/dev/null | head -10"
 
 # Narval
-ssh spapais@narval.alliancecan.ca "ls -dt /home/spapais/ForeSight/work_dirs/*/ 2>/dev/null | head -10"
+ssh narval "ls -dt /home/spapais/ForeSight/work_dirs/*/ 2>/dev/null | head -10"
 ```
 
 Cross-reference by modification time against job start time where possible.

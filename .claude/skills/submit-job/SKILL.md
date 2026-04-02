@@ -37,14 +37,14 @@ ssh trail_dgx "source ~/.bashrc && cd /raid/home/spapais/ForeSight && sbatch --e
 
 ### Apollo (Docker, no SLURM)
 ```bash
-ssh spapais@129.97.163.137 "cd /home/spapais/ForeSight && ./scripts/apollo_run.sh <inner_cmd>"
+ssh apollo "cd /home/spapais/ForeSight && ./scripts/apollo_run.sh <inner_cmd>"
 ```
 - No job ID. Job runs in foreground over SSH.
 - Warn: "Apollo runs synchronously — keep SSH session alive or use tmux on Apollo."
 
 ### Narval (SLURM)
 ```bash
-ssh spapais@narval.alliancecan.ca "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/narval_run.sh <inner_cmd>"
+ssh narval "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/narval_run.sh <inner_cmd>"
 ```
 - Parse job ID from `Submitted batch job <ID>`
 - Note: Narval runs WANDB in offline mode (set in narval_run.sh).

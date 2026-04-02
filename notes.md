@@ -7,7 +7,7 @@ wget https://github.com/swc-17/SparseDrive/releases/download/v1.0/sparsedrive_st
 sh scripts/create_data.sh
 sh scripts/kmeans.sh
 sudo openconnect -v vpn.uwaterloo.ca -u s2papais
-rsync -av ForeSight/ spapais@129.97.163.137:/home/spapais/ForeSight/
+rsync -av ForeSight/ apollo:/home/spapais/ForeSight/
 
 # Build images
 docker build -f docker/Dockerfile -t foresight:latest .
@@ -15,8 +15,8 @@ sudo singularity build docker/foresight.sif docker-daemon://foresight:latest
 
 # Sync the code to the Apollo server
 sudo openconnect -v vpn.uwaterloo.ca -u s2papais
-rsync -av projects scripts docker tools ckpt data requirement.txt spapais@129.97.163.137:/home/spapais/ForeSight/
-rsync -av --exclude='*.pyc' projects scripts spapais@129.97.163.137:/home/spapais/ForeSight/
+rsync -av projects scripts docker tools ckpt data requirement.txt apollo:/home/spapais/ForeSight/
+rsync -av --exclude='*.pyc' projects scripts apollo:/home/spapais/ForeSight/
 
 # Sync the code to the DGX server
 sudo nmcli con up id utias-robotics && rsync -av projects scripts docker tools ckpt data requirement.txt spapais@192.168.42.200:/raid/home/spapais/ForeSight/ && sudo nmcli con down id utias-robotics
@@ -60,6 +60,6 @@ claude
 /autoresearch --goal "improve val/L2 and val/obj_box_col" --base-config projects/configs/sparsedrive_r50_stage2_4gpu_nomap_queue6.py --max-experiments 5 --poll 30m
 
 # Results synchronization folder
-sudo rsync -av --exclude='*.pkl' --exclude='*.pth' spapais@129.97.163.137:/home/spapais/ForeSight/work_dirs/ ./work_dirs/
+sudo rsync -av --exclude='*.pkl' --exclude='*.pth' apollo:/home/spapais/ForeSight/work_dirs/ ./work_dirs/
 sudo rsync -av --exclude='*.pkl' --exclude='*.pth' spapais@192.168.42.200:/raid/home/spapais/ForeSight/work_dirs/ ./work_dirs/
 sudo rsync -av --exclude='*.pkl' --exclude='*.pth' spapais@narval.alliancecan.ca:/home/spapais/ForeSight/work_dirs/ ./work_dirs/

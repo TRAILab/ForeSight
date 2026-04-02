@@ -14,10 +14,10 @@ Parse from: $ARGUMENTS
 rsync -av --exclude='*.pkl' --exclude='*.pth' spapais@192.168.42.200:/raid/home/spapais/ForeSight/work_dirs/ ./work_dirs/
 
 # Apollo
-rsync -av --exclude='*.pkl' --exclude='*.pth' spapais@129.97.163.137:/home/spapais/ForeSight/work_dirs/ ./work_dirs/
+rsync -av --exclude='*.pkl' --exclude='*.pth' apollo:/home/spapais/ForeSight/work_dirs/ ./work_dirs/
 
 # Narval
-rsync -av --exclude='*.pkl' --exclude='*.pth' spapais@narval.alliancecan.ca:/home/spapais/ForeSight/work_dirs/ ./work_dirs/
+rsync -av --exclude='*.pkl' --exclude='*.pth' narval:/home/spapais/ForeSight/work_dirs/ ./work_dirs/
 ```
 
 For `--server all`, run all three in sequence.

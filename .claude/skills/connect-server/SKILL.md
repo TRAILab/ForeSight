@@ -27,7 +27,7 @@ VPN: UW `openconnect` — should always stay on, never disconnect it.
 
 1. Check if active (test SSH directly):
 ```bash
-ssh -o ConnectTimeout=5 spapais@129.97.163.137 "echo ok" 2>/dev/null && echo "up" || echo "down"
+ssh -o ConnectTimeout=5 apollo "echo ok" 2>/dev/null && echo "up" || echo "down"
 ```
 2. If down: openconnect is interactive (prompts for password/2FA) — **do not run it automatically**. Instead, tell the user:
    > "Apollo VPN is down. Please run in a terminal: `sudo openconnect -v vpn.uwaterloo.ca -u s2papais`"
@@ -40,7 +40,7 @@ No VPN needed.
 
 1. Verify SSH:
 ```bash
-ssh -o ConnectTimeout=10 spapais@narval.alliancecan.ca "echo ok"
+ssh -o ConnectTimeout=10 narval "echo ok"
 ```
 2. Report success or failure.
 

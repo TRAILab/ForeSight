@@ -47,7 +47,7 @@ ForeSight is an autonomous driving research project built on [SparseDrive](https
 
 | Key | DGX | Apollo | Narval |
 |-----|-----|--------|-------------|
-| **ssh_host** | `trail_dgx` | `spapais@129.97.163.137` | `spapais@narval.alliancecan.ca` |
+| **ssh_host** | `trail_dgx` | `apollo` | `narval` |
 | **remote_repo** | `/raid/home/spapais/ForeSight` | `/home/spapais/ForeSight` | `/home/spapais/ForeSight` |
 | **job_system** | SLURM | Docker (direct) | SLURM |
 | **run_script** | `scripts/dgx_run.sh` | `scripts/apollo_run.sh` | `scripts/narval_run.sh` |
@@ -69,10 +69,10 @@ Both VPNs are kept always-on — never disconnect them. Use `/connect-server` to
 ssh trail_dgx "source ~/.bashrc && cd /raid/home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/dgx_run.sh <cmd>"
 
 # Apollo (no SLURM, no job ID)
-ssh spapais@129.97.163.137 "cd /home/spapais/ForeSight && ./scripts/apollo_run.sh <cmd>"
+ssh apollo "cd /home/spapais/ForeSight && ./scripts/apollo_run.sh <cmd>"
 
 # Narval
-ssh spapais@narval.alliancecan.ca "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/narval_run.sh <cmd>"
+ssh narval "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/narval_run.sh <cmd>"
 ```
 
 ### Code sync (git)
