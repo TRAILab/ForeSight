@@ -44,6 +44,7 @@ sbatch scripts/dgx_run.sh bash ./tools/dist_train.sh projects/configs/sparsedriv
 ./scripts/local_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage2_1gpu.py 1 --deterministic
 ./scripts/apollo_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage2_8gpu_noflash.py 8 --deterministic
 sbatch scripts/dgx_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage2_4gpu.py 4 --deterministic
+sbatch scripts/narval_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage2_2gpu_nomap.py 2 --deterministic
 
 # Visualize
 ./scripts/apollo_run.sh scripts/visualize.sh

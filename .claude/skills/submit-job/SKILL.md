@@ -44,8 +44,8 @@ ssh spapais@129.97.163.137 "cd /home/spapais/ForeSight && ./scripts/apollo_run.s
 
 ### Narval (SLURM)
 ```bash
-ssh spapais@narval.alliancecan.ca "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/cc_run.sh <inner_cmd>"
+ssh spapais@narval.alliancecan.ca "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/narval_run.sh <inner_cmd>"
 ```
 - Parse job ID from `Submitted batch job <ID>`
-- Note: Narval runs WANDB in offline mode (set in cc_run.sh).
+- Note: Narval runs WANDB in offline mode (set in narval_run.sh).
 - Print: "Submitted Narval job <ID>"

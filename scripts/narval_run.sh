@@ -3,10 +3,10 @@
 #SBATCH --account=rrg-swasland
 #SBATCH --ntasks=1
 #SBATCH --mem=120gb
-#SBATCH --time=2:59:00 # 3 hours or 12 hours max recommended
+#SBATCH --time=11:59:00 # 3 hours or 12 hours max recommended
 #SBATCH --output=/home/spapais/ForeSight/logs/%x-%j.log
 #SBATCH --cpus-per-task=12
-#SBATCH --gres=gpu:a100:4 # gpu:h100:4 (trillium) or gpu:a100:4 (narval)
+#SBATCH --gres=gpu:a100:2
 #SBATCH --mail-user="sandro.papais@robotics.utias.utoronto.ca"
 #SBATCH --mail-type=END,FAIL
 
