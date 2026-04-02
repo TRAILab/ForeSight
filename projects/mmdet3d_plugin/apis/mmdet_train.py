@@ -145,6 +145,8 @@ def custom_train_detector(
         )
     elif distributed and "type" not in cfg.optimizer_config:
         optimizer_config = OptimizerHook(**cfg.optimizer_config)
+    elif "type" in cfg.optimizer_config:
+        optimizer_config = build_from_cfg(cfg.optimizer_config, HOOKS)
     else:
         optimizer_config = cfg.optimizer_config
 
