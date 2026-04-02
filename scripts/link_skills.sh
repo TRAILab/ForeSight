@@ -4,7 +4,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-ln -sf "$REPO/.claude/CLAUDE.md" "$REPO/AGENTS.md"
+cp "$REPO/.claude/CLAUDE.md" "$REPO/AGENTS.md"
 
 for dest in "$REPO/.agents/skills" "$HOME/.codex/skills" "$HOME/.agents/skills"; do
   mkdir -p "$dest"
@@ -12,7 +12,7 @@ for dest in "$REPO/.agents/skills" "$HOME/.codex/skills" "$HOME/.agents/skills";
     skill=$(basename "$skill_dir")
     mkdir -p "$dest/$skill"
     for file in "$skill_dir"*; do
-      [ -f "$file" ] && ln -sf "$file" "$dest/$skill/$(basename "$file")"
+      [ -f "$file" ] && cp "$file" "$dest/$skill/$(basename "$file")"
     done
   done
 done
