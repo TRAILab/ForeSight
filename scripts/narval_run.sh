@@ -28,6 +28,7 @@ docker/foresight.sif CMD
 # Extract dataset
 SECONDS=0
 echo "Extracting data"
+mkdir -p $TMP_DATA_DIR
 for file in $DATA_DIR/*.zip; do
     duration=$SECONDS
     echo "[$((duration/3600))h$((duration%3600/60))m]: Unzipping $file to $TMP_DATA_DIR"
