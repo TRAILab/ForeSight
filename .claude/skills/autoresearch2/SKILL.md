@@ -1,23 +1,18 @@
 ---
 name: autoresearch2
 description: One-shot ML experiment batch for ForeSight — survey prior work, propose a batch of experiments, create all configs, queue all jobs on SLURM, then log all results. Two mandatory confirmation checkpoints before any compute is used.
-allowed-tools: Read, Write, Edit, Bash(git:*), Bash(ssh:*), Bash(date:*), Bash(cat:*), Bash(head:*), Bash(tail:*), Bash(ls:*)
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(ssh:*), Bash(cp:*), Bash(date:*), Bash(cat:*), Bash(head:*), Bash(tail:*), Bash(ls:*)
 ---
 
 Arguments: $ARGUMENTS
-Parse:
-- `--goal` (required): what is underperforming or missing functionality
-- `--base-config` (default: `projects/configs/sparsedrive_r50_stage2_4gpu.py`)
-- `--server` (default: `narval`)
 
-Objective: improve key metrics below. All experiments must serve this goal.
-- **L2**: ego planning L2 error in meters (lower = better) ← primary metric
-- **obj_box_col**: planning collision rate % (lower = better) ← primary metric
-- **car_ade / ped_ade**: agent motion ADE in meters (lower = better)
-- **car_epa / ped_epa**: motion end-point accuracy (higher = better)
-- **NDS**: nuScenes detection score (higher = better)
-- **mAP**: detection mean AP (higher = better)
-- **mAP_normal**: map prediction mAP (higher = better)
+| Arg | Required | Default |
+|-----|----------|---------|
+| `--goal` | yes | — |
+| `--base-config` | no | `projects/configs/sparsedrive_r50_stage2_4gpu.py` |
+| `--server` | no | `narval` |
+
+**Objective:** All experiments must serve `--goal` and improve the primary metrics. See CLAUDE.md for full metric definitions.
 
 ---
 
@@ -25,23 +20,15 @@ Objective: improve key metrics below. All experiments must serve this goal.
 
 ### 1. Read the base config
 
-Read the full base config to understand the current model setup:
-
 ```bash
 cat <base-config>
 ```
 
-### 2. Review the model architecture
+Record current values of: `total_batch_size`, `num_epochs`, `with_map`, `queue_length`, `num_det`, `num_decoder`, all loss weights, backbone `type`, and LR schedule.
 
-If `--goal` involves a specific component (detection, map, motion, or planning), also read the relevant source file from the **Key Source Files** table:
-| File | Purpose |
-|------|---------|
-| `projects/mmdet3d_plugin/models/sparsedrive_head.py` | Main head dispatcher |
-| `projects/mmdet3d_plugin/models/detection3d/detection3d_head.py` | Sparse4DHead |
-| `projects/mmdet3d_plugin/models/motion/motion_planning_head.py` | MotionPlanningHead |
-| `projects/mmdet3d_plugin/models/motion/instance_queue.py` | Temporal tracking queue |
-| `projects/mmdet3d_plugin/models/instance_bank.py` | Instance feature bank |
-| `projects/mmdet3d_plugin/datasets/nuscenes_3d_dataset.py` | Dataset + evaluation |
+### 2. Read the model architecture
+
+If `--goal` involves a specific component (detection, map, motion, or planning), read the relevant source file. See CLAUDE.md for the key source files table.
 
 ### 3. Read prior research findings
 
@@ -50,13 +37,14 @@ If `--goal` involves a specific component (detection, map, motion, or planning),
 cat reports/2026_02_16_baselines.md
 ```
 
-From the baseline report, extract the specific metric values for each experiment (use these as your baseline reference).
+Extract the specific metric values for each experiment (use these as your baseline reference).
 
-Then list all available reports and read the ones relevant to `--goal`:
+Then list and read all reports relevant to `--goal`:
 
 ```bash
 ls -1 reports/
 ```
+
 From each report, extract: which changes worked and which did not, and any failure modes documented.
 
 ---
@@ -65,28 +53,25 @@ From each report, extract: which changes worked and which did not, and any failu
 
 ### 1. State the problem
 
-Based on `--goal` and all survey findings:
-
 > **Problem:** `<one sentence — what is underperforming or missing functionality>`
 > **Approach:** `<one sentence — the improvements these experiments will test>`
 
 ### 2. Propose all experiments
 
-Design 1-3 experiments. Each must test **one independent hypothesis** (1-3 parameter changes). Present them as a table:
+Use the $ARGUMENTS to design 1–3 experiments. Prefer fewer — one experiment is enough when the hypothesis is sharp. Add more only when sweeping a parameter range or comparing competing approaches. Each experiment must test one hypothesis with config changes, new components, or new loss formulations:
 
 | # | Config suffix | Change | Mechanism | Expected effect |
 |---|--------------|--------|-----------|-----------------|
-| 1 | `<suffix_1>` | `<param>: <old> → <new>` | `<why this helps>` | `<metric direction>` |
+| 1 | `<suffix_1>` | `<change>: <old> → <new>` | `<why this helps>` | `<metric direction>` |
 | 2 | `<suffix_2>` | ... | ... | ... |
-| N | `<suffix_N>` | ... | ... | ... |
 
 Rules:
 - Experiments are independent — no experiment depends on the result of another in this batch
-- Propose experiments that are most likely to improve the primary metrics
+- Do not propose ideas already in `reports/0000_00_00_research_review.md` Confirmed Findings or Avoid lists
 
 ---
 
-**CHECKPOINT 1:** Print the problem statement and the full experiment table. Ask: "Does this look correct? Reply 'yes' to proceed or give feedback to revise." Do not proceed until confirmed.
+**CHECKPOINT 1:** Print the problem statement, planned solution, and the full experiment table. Ask: "Does this look correct? Reply 'yes' to proceed or give feedback to revise." Do not proceed until confirmed.
 
 ---
 
@@ -94,7 +79,7 @@ Rules:
 
 ### 1. Create the session branch
 
-Derive `<feature>` from the goal: a short snake_case label (e.g. `planning_loss`, `temporal_queue`, `map_stability`).
+Derive `<feature>` from `--goal` as a short snake_case label (e.g. `planning_loss`, `temporal_queue`).
 
 ```bash
 git checkout -b sd_<feature>
@@ -106,7 +91,7 @@ git checkout -b sd_<feature>
 date +%Y_%m_%d
 ```
 
-Create `reports/<YYYY_MM_DD>_<feature>.md` (referred to as `<report>` throughout). This file accumulates all logging for the session:
+Create `reports/<YYYY_MM_DD>_<feature>.md` (referred to as `<report>` throughout):
 
 ```markdown
 # <feature> — <YYYY-MM-DD>
@@ -115,41 +100,41 @@ Create `reports/<YYYY_MM_DD>_<feature>.md` (referred to as `<report>` throughout
 Describe the problem and the experiments.
 
 ## Method
-
 Describe the method used to test the hypotheses.
 
 ## Results
 
-Create a table with the results of the baseline and experiments:
-
 | # | Config | L2 | obj_box_col | car_ade | NDS | Status | Notes | Job ID |
 |---|--------|----|-------------|---------|-----|--------|-------|--------|
+
+## Discussion
+_(filled at the end)_
 
 ## Future Work
 _(filled at the end)_
 ```
 
-### 3. Create all configs
+### 3. Create all configs and any code changes needed
 
-`<config_stem>` = `<base_config_stem>_<suffix>` where `<base_config_stem>` is the filename stem of `<base-config>` (e.g. `sparsedrive_r50_stage2_4gpu`) and `<suffix>` matches the suffix column from the proposal table.
+`<config_stem>` = `<base_config_stem>_<suffix>` where `<base_config_stem>` is the filename stem of `<base-config>` and `<suffix>` matches the suffix column from the proposal table.
 
 For **each** experiment:
-1. Use the **Shell tool** to copy the base config: `cp <base-config> projects/configs/<config_stem>.py`
-2. Use the **StrReplace tool** to make each targeted change in place — edit only the lines that differ from the base config
-3. Also update the WandB run name in place: find the `name=` line inside `log_config` and replace it with `'<config_stem>'`
+1. Copy the base config: `cp <base-config> projects/configs/<config_stem>.py`
+2. Use the **Edit tool** to make each targeted change — edit only the lines that differ from the base config
+3. Update the WandB run name: find the `name=` line inside `log_config` and replace it with `'<config_stem>'`
 
 After editing all configs, re-read each one to confirm every change is correct and no unintended lines were modified.
 
 ---
 
-**CHECKPOINT 2:** List all config files to be committed. Ask: "Ready to commit and push? Reply 'yes' to proceed or give feedback to revise." Do not commit or push until confirmed.
+**CHECKPOINT 2:** Summarize the code changes. Ask: "Ready to commit and push? Reply 'yes' to proceed or give feedback to revise." Do not commit or push until confirmed.
 
 ---
 
 ### 4. Commit, push, and pull on server
 
 ```bash
-git add projects/configs/<config_stem_1>.py projects/configs/<config_stem_2>.py ...
+git add projects/configs/<config_stem_1>.py projects/configs/<config_stem_2>.py ... <any changed source files>
 git commit -m "sd_<feature>: add experiment configs
 
 <brief description of what is being tested>"
@@ -161,46 +146,49 @@ ssh <server> "source ~/.bashrc && cd /home/spapais/ForeSight && git fetch origin
 
 ## Phase 4 — Submit
 
-Submit all jobs using the `/submit-job` skill. Run one submission per config:
+Submit all jobs using the `/submit-job` skill:
 
 ```
 /submit-job --server <server> --config projects/configs/<config_stem_1>.py
 /submit-job --server <server> --config projects/configs/<config_stem_2>.py
-...
 ```
 
-Record all returned job IDs in the **Job IDs** table in `<report>`.
+Record all returned job IDs in the **Results** table in `<report>`.
 
 ---
 
 ## Phase 5 — Poll & Triage
 
-Poll until **all** jobs have either completed or been written off. Use the `/loop` skill at a 1h interval:
+Use the `/loop` skill to poll at a 1h interval:
 
 ```
-/loop 1h Check SLURM job statuses: ssh <server> "squeue -j <JOB_ID_1>,<JOB_ID_2>,... -h -o '%i %T' 2>/dev/null" and ssh <server> "sacct -j <JOB_ID_1>,<JOB_ID_2>,... --format=JobID,State --noheader 2>/dev/null" — triage any newly finished or failed jobs per the Phase 5 rules, then if all jobs are resolved continue the autoresearch2 skill by logging results for branch sd_<feature>
+/loop 1h Check SLURM statuses for jobs <JOB_IDS> on <server>: run squeue and sacct, triage any newly finished or failed jobs per the Phase 5 triage table, then if all jobs are resolved exit the loop and proceed to Phase 6 of the autoresearch2 skill for branch sd_<feature>.
 ```
 
-On each wake, for every job that has left `squeue`, check its final state via `sacct` and apply the following:
+**Triage table:**
 
 | `sacct` State | Action |
 |---------------|--------|
 | `COMPLETED` | Mark done. |
 | `FAILED` | Diagnose and fix (see below). |
+| `TIMEOUT` | Treat as FAILED — tail log, fix if possible, resubmit once. |
+| `CANCELLED` | Mark as `crash`, no resubmit. |
 
-**For every `FAILED` job**, tail the log to find the cause:
+**For every `FAILED` or `TIMEOUT` job**, tail the log to find the cause:
 
 ```bash
 ssh <server> "tail -80 /home/spapais/ForeSight/logs/foresight-<JOB_ID>.log"
 ```
 
-Fix the root cause — whether it's a config typo, import error, assertion, or code bug — then resubmit:
+Fix the root cause, then resubmit:
 
 ```
 /submit-job --server <server> --config projects/configs/<config_stem>.py
 ```
 
-Update the Job IDs table in `<report>` with the new job ID. If the fix requires a non-trivial code change, commit it before resubmitting:
+Each job may be resubmitted **at most once**. If a resubmitted job also fails, mark it as `crash` and move on.
+
+Update the Results table in `<report>` with the new job ID. If the fix requires a non-trivial code change, commit it before resubmitting:
 
 ```bash
 git add <changed files>
@@ -208,15 +196,11 @@ git commit -m "sd_<feature>: fix <config_stem> (<one-line error>)"
 git push && ssh <server> "source ~/.bashrc && cd /home/spapais/ForeSight && git pull"
 ```
 
-Each job may be resubmitted **at most once**. If a resubmitted job also fails, mark it as `crash` and move on.
-
-When all jobs are either `COMPLETED` or written off as `crash`, proceed to Phase 6.
-
 ---
 
 ## Phase 6 — Log Results
 
-Process **all** experiments. Do not skip any, even if they crashed.
+Process **all** experiments — do not skip any, even if they crashed.
 
 ### 1. Parse metrics for each experiment
 
@@ -224,36 +208,13 @@ Process **all** experiments. Do not skip any, even if they crashed.
 /parse-metrics --server <server> --job <JOB_ID> --config <config_stem>
 ```
 
-If a job was marked `crash` during Phase 5 triage, skip metric parsing and use the error summary already recorded in `<report>`.
+If a job was marked `crash` during Phase 5, skip metric parsing and use the error summary already recorded in `<report>`.
 
 ### 2. Update `<report>` for each experiment
 
-Add a subsection per experiment and fill its row in the Experiments table:
+Fill in the metrics for the experiment in the Results table.
 
-```markdown
-### <config_stem>
-**Hypothesis:** <what and why>
-**Config changes:**
-\`\`\`python
-<appended lines>
-\`\`\`
-**Status:** keep / discard / crash
-**Metrics:**
-| Metric | Baseline | This exp | Δ |
-|--------|----------|----------|---|
-| L2 | x.xx | x.xx | ↓/↑ |
-| obj_box_col | x.xx | x.xx | ↓/↑ |
-| car_ade | x.xx | x.xx | ↓/↑ |
-| NDS | x.xx | x.xx | ↓/↑ |
-**Analysis:** <what this tells us>
-```
-
-Status key:
-- `keep` — primary metrics (L2, obj_box_col) improved vs baseline
-- `discard` — no improvement
-- `crash` — job failed or no metrics found
-
-### 3. Fill `## Conclusions` in `<report>`
+### 3. Fill `## Discussion` and `## Future Work` in `<report>`
 
 Write a cross-experiment summary: which hypotheses were confirmed, which were not, and recommended next steps.
 
@@ -272,7 +233,7 @@ git commit -m "sd_<feature>: log results"
 git push
 ```
 
-### 6. Print a summary
+### 6. Print summary
 
 Print a concise table of all experiments with their key metrics and status. State the overall conclusion in one sentence.
 
@@ -283,4 +244,3 @@ Print a concise table of all experiments with their key metrics and status. Stat
 - Never git reset after a bad result — keep all branches regardless of outcome
 - All session logging goes into `<report>` (`reports/<YYYY_MM_DD>_<feature>.md`)
 - Each experiment must test a single independent hypothesis
-- Never propose ideas already documented in `reports/0000_00_00_research_review.md` Confirmed Findings or Avoid lists
