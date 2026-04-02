@@ -1,5 +1,5 @@
 ---
-name: autoresearch2
+name: run-experiments
 description: One-shot ML experiment batch for ForeSight — survey prior work, propose a batch of experiments, create all configs, queue all jobs on SLURM, then log all results. Two mandatory confirmation checkpoints before any compute is used.
 allowed-tools: Read, Write, Edit, Bash(git:*), Bash(ssh:*), Bash(cp:*), Bash(date:*), Bash(cat:*), Bash(head:*), Bash(tail:*), Bash(ls:*)
 ---
