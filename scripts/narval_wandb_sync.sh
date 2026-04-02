@@ -21,12 +21,13 @@ do
     for RUN_DIR in "${RUN_DIRS[@]}"; do
         [[ -d "$RUN_DIR" ]] || continue
         FOUND=1
+        CONTAINER_RUN_DIR="/workspace/ForeSight/${RUN_DIR#$REPO_DIR/}"
         echo "Syncing $RUN_DIR"
         apptainer --silent exec --nv -c -e --pwd /workspace/ForeSight/ \
             --env "WANDB_API_KEY=$WANDB_API_KEY" \
             --bind="$REPO_DIR":/workspace/ForeSight/ \
             "$SING_IMG" \
-            wandb sync "$RUN_DIR"
+            wandb sync "$CONTAINER_RUN_DIR"
     done
     [[ $FOUND -eq 0 ]] && echo "No offline wandb runs found in $WANDB_DIR"
     echo "Done syncing — sleeping for ${SLEEP_INTERVAL}s"
