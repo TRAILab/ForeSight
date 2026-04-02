@@ -1,0 +1,1 @@
+/home/trail/workspace/ForeSight/.claude/CLAUDE.md

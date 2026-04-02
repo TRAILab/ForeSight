@@ -9,7 +9,7 @@ Arguments: $ARGUMENTS
 | Arg | Required | Default |
 |-----|----------|---------|
 | `--goal` | yes | — |
-| `--base-config` | no | `projects/configs/sparsedrive_r50_stage2_4gpu.py` |
+| `--base-config` | no | `projects/configs/sparsedrive_r50_stage2_4gpu_bs24.py` |
 | `--server` | no | `narval` |
 
 **Objective:** All experiments must serve `--goal` and improve the primary metrics. See CLAUDE.md for full metric definitions.

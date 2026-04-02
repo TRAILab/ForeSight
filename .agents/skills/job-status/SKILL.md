@@ -1,0 +1,1 @@
+/home/trail/workspace/ForeSight/.claude/skills/job-status/SKILL.md

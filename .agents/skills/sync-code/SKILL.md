@@ -1,0 +1,1 @@
+/home/trail/workspace/ForeSight/.claude/skills/sync-code/SKILL.md
