@@ -11,6 +11,7 @@
 #SBATCH --mail-type=END,FAIL
 
 # Parameters
+TMP_DIR=$SLURM_TMPDIR/tmp
 TMP_DATA_DIR=$SLURM_TMPDIR/data
 # TMP_DATA_DIR=/home/spapais/scratch/temp_data # Temporary data directory alternative
 DATA_DIR=/home/spapais/projects/rrg-swasland/datasets/nuscenes/
@@ -23,7 +24,8 @@ CMD=${@:-bash}
 CONTAINER_CMD="apptainer exec --nv -c -e --pwd /workspace/ForeSight/ \
 --env "WANDB_API_KEY=$WANDB_API_KEY"
 --env "WANDB_MODE=offline"
---env "TMPDIR=$SLURM_TMPDIR"
+--env "TMPDIR=/tmp"
+--bind=$TMP_DIR:/tmp \
 --bind=/home/spapais/ForeSight:/workspace/ForeSight/ \
 --bind=$TMP_DATA_DIR:/workspace/ForeSight/data/nuscenes \
 docker/foresight.sif $CMD
@@ -32,7 +34,7 @@ docker/foresight.sif $CMD
 # Extract dataset
 SECONDS=0
 echo "Extracting data"
-mkdir -p $TMP_DATA_DIR
+mkdir -p $TMP_DATA_DIR $TMP_DIR
 for file in $DATA_DIR/*.zip; do
     duration=$SECONDS
     echo "[$((duration/3600))h$((duration%3600/60))m]: Unzipping $file to $TMP_DATA_DIR"
