@@ -92,13 +92,3 @@ git push && ssh <host> "cd <remote_repo> && git pull"
 | `/check-runs [--server dgx\|cc\|all]` | List active SLURM jobs |
 | `/autoresearch --goal "..." --max-experiments N` | Autonomous experiment loop |
 
-## Experiment Hard Constraints
-
-Results already in — never re-propose these:
-- **No map removal** from both stages — planning catastrophically fails (L2: 0.600→6.61)
-- **No pretrainv3/v4** prediction pretraining — degrades all metrics
-- **No separate head** (sephead) — slightly worse across the board
-- **No reduced map LR** — map_mAP collapses to ~0.07
-- **No map head in stage2** when loaded from DN stage1 pretrain — L2 worsens to 0.700
-- **No motion_loss_reg/cls > 0.2** — large regression on L2 and obj_box_col
-- **No rotation augmentation** (rot3d_range) — hurts both L2 and obj_box_col
