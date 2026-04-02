@@ -695,7 +695,7 @@ optimizer = dict(
         }
     ),
 )
-optimizer_config = dict(grad_clip=dict(max_norm=25, norm_type=2), cumulative_iters=2)
+optimizer_config = dict(type='GradientCumulativeOptimizerHook', cumulative_iters=2, grad_clip=dict(max_norm=25, norm_type=2))
 lr_config = dict(
     policy="CosineAnnealing",
     warmup="linear",
