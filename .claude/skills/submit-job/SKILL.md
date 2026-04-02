@@ -1,3 +1,8 @@
+---
+name: submit-job
+description: Submit a training or evaluation job to DGX, Apollo, or Narval.
+---
+
 Submit a training or evaluation job to a remote server.
 
 ## Arguments

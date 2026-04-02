@@ -1,3 +1,8 @@
+---
+name: parse-metrics
+description: Parse training/evaluation metrics from a remote server job log and format them as a results table.
+---
+
 Parse training/evaluation metrics from a remote server job log and format them as a results table.
 
 ## Arguments

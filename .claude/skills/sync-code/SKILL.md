@@ -1,3 +1,8 @@
+---
+name: sync-code
+description: Push the current local git branch and pull it on one or all remote servers (DGX, Apollo, Narval).
+---
+
 Push the current local branch and pull it on a remote server.
 
 ## Arguments

@@ -1,3 +1,8 @@
+---
+name: sync-results
+description: Pull work_dirs (logs and metrics, excluding checkpoints) from a remote server back to local.
+---
+
 Pull work_dirs from a remote server back to local, excluding large binary files.
 
 ## Arguments

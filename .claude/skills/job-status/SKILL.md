@@ -1,3 +1,8 @@
+---
+name: job-status
+description: Check running and queued training/evaluation jobs on DGX, Apollo, or Narval.
+---
+
 Check running and queued jobs on a remote server.
 
 ## Arguments

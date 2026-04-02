@@ -1,3 +1,8 @@
+---
+name: connect-server
+description: Ensure VPN is active and SSH connectivity works for a remote server. Use before any remote operation on DGX, Apollo, or Narval.
+---
+
 Ensure VPN is active and SSH connectivity works for a remote server.
 
 ## Arguments

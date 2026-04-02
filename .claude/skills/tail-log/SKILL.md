@@ -1,3 +1,8 @@
+---
+name: tail-log
+description: Stream a live or recent training/evaluation job log from a remote server.
+---
+
 Stream a live or recent job log from a remote server.
 
 ## Arguments
