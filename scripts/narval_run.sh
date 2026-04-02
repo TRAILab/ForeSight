@@ -28,13 +28,11 @@ docker/foresight.sif CMD
 # Extract dataset
 SECONDS=0
 echo "Extracting data"
-if [ "$DATASET" = "nuscenes" ]; then
-    for file in $DATA_DIR/*.zip; do
-        duration=$SECONDS
-        echo "[$((duration/3600))h$((duration%3600/60))m]: Unzipping $file to $TMP_DATA_DIR"
-        unzip -qq $file -d $TMP_DATA_DIR
-    done
-fi
+for file in $DATA_DIR/*.zip; do
+    duration=$SECONDS
+    echo "[$((duration/3600))h$((duration%3600/60))m]: Unzipping $file to $TMP_DATA_DIR"
+    unzip -qq $file -d $TMP_DATA_DIR
+done
 echo "Done extracting data"
 
 # Run command
