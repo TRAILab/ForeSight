@@ -22,7 +22,7 @@ CONTAINER_CMD="apptainer exec --nv -c -e --pwd /workspace/ForeSight/ \
 --env "WANDB_MODE=offline"
 --bind=/home/spapais/ForeSight:/workspace/ForeSight/ \
 --bind=$TMP_DATA_DIR:/workspace/ForeSight/data/nuscenes \
-docker/foresight.sif CMD
+docker/foresight.sif $CMD
 "
 
 # Extract dataset
