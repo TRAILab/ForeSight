@@ -20,6 +20,7 @@ CMD=${@:-bash}
 CONTAINER_CMD="apptainer exec --nv -c -e --pwd /workspace/ForeSight/ \
 --env "WANDB_API_KEY=$WANDB_API_KEY"
 --env "WANDB_MODE=offline"
+--env "TMPDIR=$SLURM_TMPDIR"
 --bind=/home/spapais/ForeSight:/workspace/ForeSight/ \
 --bind=$TMP_DATA_DIR:/workspace/ForeSight/data/nuscenes \
 docker/foresight.sif $CMD
