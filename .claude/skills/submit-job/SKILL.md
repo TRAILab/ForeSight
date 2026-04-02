@@ -4,7 +4,7 @@ Submit a training or evaluation job to a remote server.
 Parse from: $ARGUMENTS
 - `--server` (required): `dgx` | `apollo` | `narval`
 - `--config` (required): config file path relative to repo root (e.g. `projects/configs/sparsedrive_r50_stage2_4gpu.py`)
-- `--gpus` (default: infer from server — DGX: 4, Apollo: 8, CC: 4)
+- `--gpus` (default: infer from server — DGX: 4, Apollo: 8, Narval: 4)
 - `--test`: if present, run evaluation instead of training; requires `--ckpt`
 - `--ckpt`: checkpoint path (required when `--test`)
 
@@ -30,10 +30,10 @@ Then wrap with the server's run script and submit.
 
 ### DGX (SLURM)
 ```bash
-ssh trail_dgx "source ~/.bashrc && cd /raid/home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/dgx_run.sh <inner_cmd>"
+ssh trail_dgx "source ~/.bashrc && cd /raid/home/spapais/ForeSight && sbatch --export=ALL scripts/dgx_run.sh <inner_cmd>"
 ```
 - Parse job ID from `Submitted batch job <ID>`
-- Print: "Submitted DGX job <ID> — monitor with `/check-runs --server dgx` or `/parse-metrics --server dgx --job <ID>`"
+- Print: "Submitted DGX job <ID> — parse results with `/parse-metrics --server dgx --job <ID>`"
 
 ### Apollo (Docker, no SLURM)
 ```bash
@@ -44,7 +44,7 @@ ssh apollo "cd /home/spapais/ForeSight && ./scripts/apollo_run.sh <inner_cmd>"
 
 ### Narval (SLURM)
 ```bash
-ssh narval "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/narval_run.sh <inner_cmd>"
+ssh narval "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/narval_run.sh <inner_cmd>"
 ```
 - Parse job ID from `Submitted batch job <ID>`
 - Note: Narval runs WANDB in offline mode (set in narval_run.sh).

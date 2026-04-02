@@ -1,6 +1,6 @@
 # ForeSight — Claude Context
 
-ForeSight is an autonomous driving research project built on [SparseDrive](https://github.com/swc-17/SparseDrive). It extends SparseDrive with occlusion-aware evaluation, GT oracle heads, and rotation augmentation. Training and evaluation run on nuScenes.
+ForeSight is an autonomous driving research project built on [SparseDrive](https://github.com/swc-17/SparseDrive). Training and evaluation run on nuScenes.
 
 ## Model Architecture
 
@@ -52,22 +52,7 @@ ForeSight is an autonomous driving research project built on [SparseDrive](https
 | **vpn** | nmcli `utias-robotics` (persistent) | openconnect UW (persistent) | none |
 
 ### VPN
-Both VPNs are kept always-on — never disconnect them. Use `/connect-server` to bring one up if it's down.
-- **DGX:** `nmcli con show --active | grep -q utias-robotics || sudo nmcli con up id utias-robotics`
-- **Apollo:** SSH-test first; if down, tell user to run `sudo openconnect -v vpn.uwaterloo.ca -u s2papais` (interactive — don't automate)
-- **Narval:** no VPN, direct SSH
-
-### Submit commands
-```bash
-# DGX
-ssh trail_dgx "source ~/.bashrc && cd /raid/home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/dgx_run.sh <cmd>"
-
-# Apollo (no SLURM, no job ID)
-ssh apollo "cd /home/spapais/ForeSight && ./scripts/apollo_run.sh <cmd>"
-
-# Narval
-ssh narval "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL,WANDB_API_KEY=1cb0a37040ca089569cecda1c31722a24d56d3a4 scripts/narval_run.sh <cmd>"
-```
+Both VPNs are kept always-on — never disconnect them. Use `/connect-server` to bring one up if it's down. Apollo VPN requires interactive login — tell the user to run it manually, never automate it.
 
 ### Code sync (git)
 Push from local, pull on server — no rsync needed for code:
@@ -75,14 +60,4 @@ Push from local, pull on server — no rsync needed for code:
 git push && ssh <host> "cd <remote_repo> && git pull"
 ```
 
-## Skills
-
-| Skill | Purpose |
-|-------|---------|
-| `/connect-server --server dgx\|apollo\|cc` | Check/bring up VPN, verify SSH |
-| `/sync-results [--server dgx\|apollo\|cc\|all]` | Pull work_dirs from server to local |
-| `/submit-job --server <s> --config <path>` | Submit train/eval job |
-| `/parse-metrics --server <s> --job <id> --config <stem>` | Parse metrics from log |
-| `/check-runs [--server dgx\|cc\|all]` | List active SLURM jobs |
-| `/autoresearch --goal "..." --max-experiments N` | Autonomous experiment loop |
 

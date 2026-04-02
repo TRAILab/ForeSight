@@ -55,4 +55,4 @@ Narval: ✓ connected
 ## Notes
 - VPNs are persistent — never add a disconnect step after SSH or rsync operations.
 - If DGX nmcli fails (e.g. permission error), suggest: `sudo nmcli con up id utias-robotics`
-- This skill is called automatically by `/sync-code` and `/submit-job` before any remote operation.
+- This skill is called automatically by `/sync-results` and `/submit-job` before any remote operation.

@@ -11,7 +11,7 @@ Parse from: $ARGUMENTS
 2. Run rsync (pull direction — remote → local):
 ```bash
 # DGX
-rsync -av --exclude='*.pkl' --exclude='*.pth' spapais@192.168.42.200:/raid/home/spapais/ForeSight/work_dirs/ ./work_dirs/
+rsync -av --exclude='*.pkl' --exclude='*.pth' trail_dgx:/raid/home/spapais/ForeSight/work_dirs/ ./work_dirs/
 
 # Apollo
 rsync -av --exclude='*.pkl' --exclude='*.pth' apollo:/home/spapais/ForeSight/work_dirs/ ./work_dirs/

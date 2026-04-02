@@ -16,6 +16,9 @@ TMP_DATA_DIR=$SLURM_TMPDIR/data
 DATA_DIR=/home/spapais/projects/rrg-swasland/datasets/nuscenes/
 CMD=${@:-bash}
 
+# Load env if needed (e.g. when submitted via non-interactive SSH)
+[[ -f ~/.bashrc ]] && source ~/.bashrc
+
 # Command
 CONTAINER_CMD="apptainer exec --nv -c -e --pwd /workspace/ForeSight/ \
 --env "WANDB_API_KEY=$WANDB_API_KEY"
