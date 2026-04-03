@@ -531,6 +531,7 @@ model = dict(
             planning_cumulative_refinement=True,
             motion_cumulative_refinement=True,
             planning_deformable=True,
+            motion_deformable=True,
             num_det=50,
             num_map=10,
         ),
