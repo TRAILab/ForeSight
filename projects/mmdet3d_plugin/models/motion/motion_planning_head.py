@@ -66,6 +66,7 @@ class MotionPlanningHead(BaseModule):
         motion_cumulative_refinement=False,
         planning_deformable=False,
         motion_deformable=False,
+        deformable_waypoint=-1,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -79,6 +80,7 @@ class MotionPlanningHead(BaseModule):
         self.motion_cumulative_refinement = motion_cumulative_refinement
         self.planning_deformable = planning_deformable
         self.motion_deformable = motion_deformable
+        self.deformable_waypoint = deformable_waypoint
 
         # =========== build modules ===========
         def build(cfg, registry):
@@ -166,9 +168,13 @@ class MotionPlanningHead(BaseModule):
         )
         best_traj = motion_anchor_upd.gather(2, idx).squeeze(2)  # (bs, num_det, fut_ts, 2)
 
-        endpoint = best_traj[..., -1, :]  # (bs, num_det, 2) — displacement from agent
+        w = self.deformable_waypoint
+        endpoint = best_traj[..., w, :]  # (bs, num_det, 2) — displacement from agent
         if best_traj.shape[-2] > 1:
-            heading_vec = best_traj[..., -1, :] - best_traj[..., -2, :]
+            if w == 0:
+                heading_vec = best_traj[..., 1, :] - best_traj[..., 0, :]
+            else:
+                heading_vec = best_traj[..., w, :] - best_traj[..., w - 1, :]
         else:
             heading_vec = endpoint
 
@@ -187,9 +193,13 @@ class MotionPlanningHead(BaseModule):
 
     def _build_planning_anchor_boxes(self, plan_anchor, ego_anchor):
         num_mode = plan_anchor.shape[1]
-        plan_endpoint = plan_anchor[..., -1, :]
+        w = self.deformable_waypoint
+        plan_endpoint = plan_anchor[..., w, :]
         if plan_anchor.shape[-2] > 1:
-            heading_vec = plan_anchor[..., -1, :] - plan_anchor[..., -2, :]
+            if w == 0:
+                heading_vec = plan_anchor[..., 1, :] - plan_anchor[..., 0, :]
+            else:
+                heading_vec = plan_anchor[..., w, :] - plan_anchor[..., w - 1, :]
         else:
             heading_vec = plan_endpoint
 
