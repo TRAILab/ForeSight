@@ -179,7 +179,7 @@ class MotionPlanningHead(BaseModule):
             heading_vec = endpoint
 
         anchor = det_anchors.clone()
-        ego_yaw = torch.atan2(anchor[..., SIN_YAW], anchor[..., COS_YAW])
+        ego_yaw = torch.atan2(det_anchors[..., SIN_YAW], det_anchors[..., COS_YAW])
         heading_yaw = torch.atan2(heading_vec[..., 1], heading_vec[..., 0])
         static_mask = torch.linalg.norm(heading_vec, dim=-1) < 1e-3
         heading_yaw = torch.where(static_mask, ego_yaw, heading_yaw)
