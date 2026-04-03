@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKTREES_DIR="$(dirname "$REPO_ROOT")/ForeSight-worktrees"
+WORKTREES_DIR="$REPO_ROOT/.worktrees"
 BASE_BRANCH="sd"
 
 usage() {
