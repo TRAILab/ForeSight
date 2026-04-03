@@ -15,6 +15,7 @@ TMP_DIR=$SLURM_TMPDIR/tmp
 TMP_DATA_DIR=$SLURM_TMPDIR/data
 # TMP_DATA_DIR=/home/spapais/scratch/temp_data # Temporary data directory alternative
 DATA_DIR=/home/spapais/projects/rrg-swasland/datasets/nuscenes/
+WORK_DIR=/scratch/spapais/ForeSight/work_dirs
 CMD=${@:-bash}
 
 # Load env if needed (e.g. when submitted via non-interactive SSH)
@@ -28,13 +29,14 @@ CONTAINER_CMD="apptainer exec --nv -c -e --pwd /workspace/ForeSight/ \
 --bind=$TMP_DIR:/tmp \
 --bind=/home/spapais/ForeSight:/workspace/ForeSight/ \
 --bind=$TMP_DATA_DIR:/workspace/ForeSight/data/nuscenes \
+--bind=$WORK_DIR:/workspace/ForeSight/work_dirs \
 docker/foresight.sif $CMD
 "
 
 # Extract dataset
 SECONDS=0
 echo "Extracting data"
-mkdir -p $TMP_DATA_DIR $TMP_DIR
+mkdir -p $TMP_DATA_DIR $TMP_DIR $WORK_DIR
 for file in $DATA_DIR/*.zip; do
     [[ "$file" == *sweeps* ]] && echo "Skipping $file (not needed for camera-only model)" && continue
     duration=$SECONDS
