@@ -8,6 +8,8 @@ Two experiments are prepared from the bs24 baseline. The first adds three-stage 
 
 Both runs were submitted to Narval (4 A100) and DGX (4 A100). DGX plantrajdeform is still training as of 2026-04-03.
 
+planpredrefine3 has two Narval submissions (58807951, 58808164) — the second was submitted after a code update and both are kept as duplicate runs. planpredtrajdeform additionally enables `motion_deformable=True`, making agents attend at their predicted trajectory endpoint (best mode) rather than their current detection box, matching the behaviour already used for planning.
+
 ## Results
 
 | # | Config | Server | L2 | obj_box_col | car_ade | NDS | Status | Job ID |
@@ -17,6 +19,8 @@ Both runs were submitted to Narval (4 A100) and DGX (4 A100). DGX plantrajdeform
 | 1 | sparsedrive_r50_stage2_4gpu_bs24_planrefine3 | Narval | 0.578 | 0.093% | 0.708 | 0.5173 | done | 58789115 |
 | 2 | sparsedrive_r50_stage2_4gpu_bs24_plantrajdeform | Narval | 0.561 | **0.065%** | 0.690 | 0.5206 | done | 58789117 |
 | 2 | sparsedrive_r50_stage2_4gpu_bs24_plantrajdeform | DGX | — | — | — | — | training | 3573 |
+| 3 | sparsedrive_r50_stage2_4gpu_bs24_planpredrefine3 | Narval | — | — | — | — | submitted | 58807951, 58808164 |
+| 4 | sparsedrive_r50_stage2_4gpu_bs24_planpredtrajdeform | Narval | — | — | — | — | submitted | 58807952 |
 
 Full metrics for completed runs:
 
@@ -27,6 +31,8 @@ Full metrics for completed runs:
 | planrefine3 | Narval | 0.4082 | 0.5173 | 0.3638 | 1178 | 0.5564 | 0.481 | 0.578 | 0.093% |
 | plantrajdeform | Narval | 0.4121 | 0.5206 | 0.3732 | 890 | 0.5473 | 0.480 | 0.561 | 0.065% |
 | plantrajdeform | DGX | — | — | — | — | — | — | — | *(pending)* |
+| planpredrefine3 | Narval | — | — | — | — | — | — | — | *(pending)* |
+| planpredtrajdeform | Narval | — | — | — | — | — | — | — | *(pending)* |
 
 ## Discussion
 
