@@ -66,6 +66,7 @@ class MotionPlanningHead(BaseModule):
         motion_cumulative_refinement=False,
         planning_deformable=False,
         motion_deformable=False,
+        motion_deformable_multimode=False,
         deformable_waypoint=-1,
     ):
         super(MotionPlanningHead, self).__init__()
@@ -80,6 +81,7 @@ class MotionPlanningHead(BaseModule):
         self.motion_cumulative_refinement = motion_cumulative_refinement
         self.planning_deformable = planning_deformable
         self.motion_deformable = motion_deformable
+        self.motion_deformable_multimode = motion_deformable_multimode
         self.deformable_waypoint = deformable_waypoint
 
         # =========== build modules ===========
@@ -187,6 +189,40 @@ class MotionPlanningHead(BaseModule):
         # endpoint is a displacement — add to current agent position for absolute XY
         anchor[..., X] = det_anchors[..., X] + endpoint[..., 0]
         anchor[..., Y] = det_anchors[..., Y] + endpoint[..., 1]
+        anchor[..., SIN_YAW] = torch.sin(heading_yaw)
+        anchor[..., COS_YAW] = torch.cos(heading_yaw)
+        return anchor
+
+    def _build_motion_endpoint_anchors_all_modes(self, motion_anchor_upd, det_anchors):
+        """Build 3D box anchors at the predicted endpoint for every mode of each agent.
+
+        motion_anchor_upd: (bs, num_det, fut_mode, fut_ts, 2) cumulative XY
+            displacements in lidar-frame orientation (relative to agent position).
+        det_anchors: (bs, num_det, 11) current detection boxes.
+
+        Returns (bs, num_det, fut_mode, 11) anchor boxes.
+        """
+        bs, num_det, fut_mode, fut_ts, _ = motion_anchor_upd.shape
+        w = self.deformable_waypoint
+        endpoint = motion_anchor_upd[..., w, :]  # (bs, num_det, fut_mode, 2)
+        if fut_ts > 1:
+            if w == 0:
+                heading_vec = motion_anchor_upd[..., 1, :] - motion_anchor_upd[..., 0, :]
+            else:
+                heading_vec = motion_anchor_upd[..., w, :] - motion_anchor_upd[..., w - 1, :]
+        else:
+            heading_vec = endpoint
+
+        anchor = det_anchors[:, :, None, :].expand(-1, -1, fut_mode, -1).clone()
+        ego_yaw = torch.atan2(
+            det_anchors[..., SIN_YAW], det_anchors[..., COS_YAW]
+        ).unsqueeze(-1)  # (bs, num_det, 1)
+        heading_yaw = torch.atan2(heading_vec[..., 1], heading_vec[..., 0])
+        static_mask = torch.linalg.norm(heading_vec, dim=-1) < 1e-3
+        heading_yaw = torch.where(static_mask, ego_yaw.expand_as(heading_yaw), heading_yaw)
+
+        anchor[..., X] = det_anchors[..., X].unsqueeze(-1) + endpoint[..., 0]
+        anchor[..., Y] = det_anchors[..., Y].unsqueeze(-1) + endpoint[..., 1]
         anchor[..., SIN_YAW] = torch.sin(heading_yaw)
         anchor[..., COS_YAW] = torch.cos(heading_yaw)
         return anchor
@@ -355,18 +391,24 @@ class MotionPlanningHead(BaseModule):
         planning_classification = []
         planning_prediction = []
         planning_status = []
-        # Initialize motion endpoint anchor from k-means prior for first decoder
-        # deformable stage. Uses mode 0 (argmax of zero logits) as the initial
-        # spatial reference — a future position rather than the current det box.
-        if self.motion_deformable:
+        # Initialize motion endpoint anchors from k-means prior for first decoder
+        # deformable stage — a future position rather than the current det box.
+        if self.motion_deformable_multimode:
+            motion_endpoint_anchor_all = self._build_motion_endpoint_anchors_all_modes(
+                motion_anchor, det_anchors
+            )
+            motion_endpoint_anchor = None
+        elif self.motion_deformable:
             init_cls = torch.zeros(
                 bs, num_anchor, motion_anchor.shape[2], device=det_anchors.device
             )
             motion_endpoint_anchor = self._build_motion_endpoint_anchors(
                 motion_anchor, det_anchors, init_cls
             )
+            motion_endpoint_anchor_all = None
         else:
             motion_endpoint_anchor = None
+            motion_endpoint_anchor_all = None
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
                 continue
@@ -404,19 +446,43 @@ class MotionPlanningHead(BaseModule):
             elif op == "deformable":
                 # Apply deformable cross-attention to sensor features for
                 # agent instances only (ego token has no well-defined 3D box).
-                motion_anchor_ref = (
-                    motion_endpoint_anchor
-                    if self.motion_deformable
-                    else det_anchors
-                )
-                motion_anchor_ref_embed = anchor_encoder(motion_anchor_ref)
-                agent_feature = self.layers[i](
-                    instance_feature[:, :num_anchor],
-                    motion_anchor_ref,
-                    motion_anchor_ref_embed,
-                    feature_maps,
-                    metas,
-                )
+                if self.motion_deformable_multimode:
+                    # Attend at every mode's endpoint, aggregate by mode confidence.
+                    # motion_endpoint_anchor_all: (bs, num_det, fut_mode, 11)
+                    all_anchors_flat = motion_endpoint_anchor_all.reshape(
+                        bs, num_anchor * self.fut_mode, 11
+                    )
+                    all_anchors_embed = anchor_encoder(all_anchors_flat)
+                    agent_feat_exp = (
+                        instance_feature[:, :num_anchor]
+                        .unsqueeze(2)
+                        .expand(-1, -1, self.fut_mode, -1)
+                        .reshape(bs, num_anchor * self.fut_mode, self.embed_dims)
+                    )
+                    attended = self.layers[i](
+                        agent_feat_exp, all_anchors_flat, all_anchors_embed,
+                        feature_maps, metas,
+                    )  # (bs, num_det * fut_mode, embed_dims), includes residual
+                    attended = attended.reshape(bs, num_anchor, self.fut_mode, self.embed_dims)
+                    if motion_classification:
+                        mode_weights = motion_classification[-1].detach().softmax(dim=-1)
+                    else:
+                        mode_weights = torch.full(
+                            (bs, num_anchor, self.fut_mode), 1.0 / self.fut_mode,
+                            device=det_anchors.device, dtype=det_anchors.dtype,
+                        )
+                    agent_feature = (attended * mode_weights.unsqueeze(-1)).sum(dim=2)
+                else:
+                    motion_anchor_ref = (
+                        motion_endpoint_anchor if self.motion_deformable else det_anchors
+                    )
+                    agent_feature = self.layers[i](
+                        instance_feature[:, :num_anchor],
+                        motion_anchor_ref,
+                        anchor_encoder(motion_anchor_ref),
+                        feature_maps,
+                        metas,
+                    )
                 if self.planning_deformable:
                     plan_anchor_box = self._build_planning_anchor_boxes(
                         plan_anchor.detach(),
@@ -464,7 +530,11 @@ class MotionPlanningHead(BaseModule):
                 motion_mode_query = self.motion_anchor_encoder(
                     gen_sineembed_for_position(motion_anchor_upd[..., -1, :])
                 )
-                if self.motion_deformable:
+                if self.motion_deformable_multimode:
+                    motion_endpoint_anchor_all = self._build_motion_endpoint_anchors_all_modes(
+                        motion_anchor_upd, det_anchors
+                    )
+                elif self.motion_deformable:
                     motion_endpoint_anchor = self._build_motion_endpoint_anchors(
                         motion_anchor_upd,
                         det_anchors,
