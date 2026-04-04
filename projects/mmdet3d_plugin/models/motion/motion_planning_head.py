@@ -355,7 +355,18 @@ class MotionPlanningHead(BaseModule):
         planning_classification = []
         planning_prediction = []
         planning_status = []
-        motion_endpoint_anchor = None  # updated after each refine for motion_deformable
+        # Initialize motion endpoint anchor from k-means prior for first decoder
+        # deformable stage. Uses mode 0 (argmax of zero logits) as the initial
+        # spatial reference — a future position rather than the current det box.
+        if self.motion_deformable:
+            init_cls = torch.zeros(
+                bs, num_anchor, motion_anchor.shape[2], device=det_anchors.device
+            )
+            motion_endpoint_anchor = self._build_motion_endpoint_anchors(
+                motion_anchor, det_anchors, init_cls
+            )
+        else:
+            motion_endpoint_anchor = None
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
                 continue
@@ -395,7 +406,7 @@ class MotionPlanningHead(BaseModule):
                 # agent instances only (ego token has no well-defined 3D box).
                 motion_anchor_ref = (
                     motion_endpoint_anchor
-                    if self.motion_deformable and motion_endpoint_anchor is not None
+                    if self.motion_deformable
                     else det_anchors
                 )
                 motion_anchor_ref_embed = anchor_encoder(motion_anchor_ref)
