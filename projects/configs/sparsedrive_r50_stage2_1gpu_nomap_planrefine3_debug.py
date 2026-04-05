@@ -9,8 +9,8 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 24
-num_gpus = 4
+total_batch_size = 2
+num_gpus = 1
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
 num_epochs = 10
@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_nomap_plantrajdeform',),
+                name='sparsedrive_r50_stage2_1gpu_nomap_planrefine3_debug',),
             interval=50)
     ],
 )
@@ -101,7 +101,7 @@ model = dict(
         frozen_stages=-1,
         norm_eval=False,
         style="pytorch",
-        with_cp=False,  # with_cp + find_unused_parameters=True conflicts via reentrant backward; A100 has enough memory
+        with_cp=False,  # with_cp + find_unused_parameters=True conflicts (DDP marks grad hooks twice via reentrant backward)
         out_indices=(0, 1, 2, 3),
         norm_cfg=dict(type="BN", requires_grad=True),
         pretrained="ckpt/resnet50-19c8e357.pth",
@@ -425,8 +425,6 @@ model = dict(
                     "norm",
                     "cross_gnn",
                     "norm",
-                    "deformable",
-                    "norm",
                     "ffn",                    
                     "norm",
                     "refine",
@@ -452,30 +450,6 @@ model = dict(
                 num_heads=num_groups,
                 batch_first=True,
                 dropout=drop_out,
-            ),
-            deformable_model=dict(
-                type="DeformableFeatureAggregation",
-                embed_dims=embed_dims,
-                num_groups=num_groups,
-                num_levels=num_levels,
-                num_cams=6,
-                attn_drop=0.15,
-                use_deformable_func=use_deformable_func,
-                use_camera_embed=True,
-                residual_mode="add",
-                kps_generator=dict(
-                    type="SparseBox3DKeyPointsGenerator",
-                    num_learnable_pts=6,
-                    fix_scale=[
-                        [0, 0, 0],
-                        [0.45, 0, 0],
-                        [-0.45, 0, 0],
-                        [0, 0.45, 0],
-                        [0, -0.45, 0],
-                        [0, 0, 0.45],
-                        [0, 0, -0.45],
-                    ],
-                ),
             ),
             norm_layer=dict(type="LN", normalized_shape=embed_dims),
             ffn=dict(
@@ -529,7 +503,6 @@ model = dict(
                 use_rescore=True,
             ),
             planning_cumulative_refinement=True,
-            planning_deformable=True,
             num_det=50,
             num_map=10,
         ),

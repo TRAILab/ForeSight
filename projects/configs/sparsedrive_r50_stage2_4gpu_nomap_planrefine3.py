@@ -101,7 +101,7 @@ model = dict(
         frozen_stages=-1,
         norm_eval=False,
         style="pytorch",
-        with_cp=True,
+        with_cp=False,  # with_cp + find_unused_parameters=True conflicts via reentrant backward; A100 has enough memory
         out_indices=(0, 1, 2, 3),
         norm_cfg=dict(type="BN", requires_grad=True),
         pretrained="ckpt/resnet50-19c8e357.pth",
@@ -723,4 +723,4 @@ evaluation = dict(
 )
 # ================== pretrained model ========================
 load_from = 'ckpt/sparsedrive_stage1.pth'
-static_graph = True
+find_unused_parameters = True
