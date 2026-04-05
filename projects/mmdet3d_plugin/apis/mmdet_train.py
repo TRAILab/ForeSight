@@ -92,13 +92,13 @@ def custom_train_detector(
     # put model on gpus
     if distributed:
         find_unused_parameters = cfg.get("find_unused_parameters", False)
-        # Sets the `find_unused_parameters` parameter in
-        # torch.nn.parallel.DistributedDataParallel
+        static_graph = cfg.get("static_graph", False)
         model = MMDistributedDataParallel(
             model.cuda(),
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False,
             find_unused_parameters=find_unused_parameters,
+            static_graph=static_graph,
         )
 
     else:

@@ -750,4 +750,4 @@ evaluation = dict(
 )
 # ================== pretrained model ========================
 load_from = 'ckpt/sparsedrive_stage1.pth'
-find_unused_parameters = True
+static_graph = True
