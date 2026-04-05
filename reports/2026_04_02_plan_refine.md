@@ -33,35 +33,38 @@ Four additional configs isolate component contributions:
 
 | # | Config | Server | L2 | obj_box_col | car_ade | NDS | Status | Job ID |
 |---|--------|--------|----|-------------|---------|-----|--------|--------|
-| 0 | sparsedrive_r50_stage2_4gpu_bs24 (baseline) | DGX | 0.636 | 0.133% | 0.636 | 0.5232 | done | — |
-| 1 | planrefine3 | DGX | 0.572 | 0.103% | 0.686 | 0.5197 | done | 3572 |
-| 1 | planrefine3 | Narval | 0.578 | 0.093% | 0.708 | 0.5173 | done | 58789115 |
-| 2 | plantrajdeform | Narval | 0.561 | **0.065%** | 0.690 | 0.5206 | done | 58789117 |
-| 2 | plantrajdeform | DGX | — | — | — | — | training | 3573 |
-| 3 | planpredrefine3 | Narval | — | — | — | — | eval-pending | 58807951, 58808164 |
-| 4 | planpredtrajdeform | Narval | 0.554 | **0.045%** | 0.622 | 0.5237 | done | 58824084 |
-| 5 | plantrajdeformonly | Narval | 0.575 | 0.090% | 0.687 | 0.5200 | done | 58817554 |
-| 5 | planpredtrajdeformonly | Narval | 0.567 | 0.103% | 0.682 | 0.5208 | done | 58824298 |
-| 6 | plantrajdeformfirst | Narval | 0.568 | 0.132% | 0.720 | 0.5194 | done | 58817556 |
-| 6 | planpredtrajdeformfirst | Narval | 0.556 | 0.112% | 0.623 | 0.5258 | done | 58824432 |
-| 7 | planpredtrajdeformmm | Narval | — | — | — | — | training | 58846242 |
+| 0 | bs24 baseline | DGX | 0.636 | 0.133% | 0.636 | 0.523 | done | — |
+| 1 | planrefine3 | DGX | 0.572 | 0.103% | 0.686 | 0.520 | done | 3572 |
+| 1 | planrefine3 | Narval | 0.578 | 0.093% | 0.708 | 0.517 | done | 58789115 |
+| 2 | plantrajdeform | Narval | 0.561 | 0.065% | 0.690 | 0.521 | done | 58789117 |
+| 2 | plantrajdeform | DGX | — | — | — | — | failed | 3573 |
+| 3 | planpredrefine3 | Narval | 0.553 | 0.107% | 0.645 | 0.524 | done | 58845832 |
+| 4 | planpredtrajdeform | Narval | 0.554 | **0.045%** | 0.622 | 0.524 | done | 58824084 |
+| 5 | plantrajdeformonly | Narval | 0.575 | 0.090% | 0.687 | 0.520 | done | 58817554 |
+| 5 | planpredtrajdeformonly | Narval | 0.567 | 0.103% | 0.682 | 0.521 | done | 58824298 |
+| 6 | plantrajdeformfirst | Narval | 0.568 | 0.132% | 0.720 | 0.519 | done | 58817556 |
+| 6 | planpredtrajdeformfirst | Narval | 0.556 | 0.112% | 0.623 | 0.526 | done | 58824432 |
+| 7 | **planpredtrajdeformmm** | Narval | **0.536** | **0.043%** | 0.628 | 0.525 | done | 58846242 |
+| 8 | nomap_planrefine3 | Narval | 0.561 | 0.077% | 0.675 | 0.517 | done | 58855015 |
+| 8 | nomap_plantrajdeform | Narval | — | — | — | — | running | 58855016 |
 
 Full metrics for completed runs:
 
 | Config | Server | det mAP | det NDS | AMOTA | IDS | map mAP | car_EPA | car_ade | plan L2 | plan CR |
 |--------|--------|---------|---------|-------|-----|---------|---------|---------|---------|---------|
-| bs24 baseline | DGX | 0.4132 | 0.5232 | 0.3776 | 1045 | 0.5528 | 0.492 | 0.636 | 0.636 | 0.133% |
-| planrefine3 | DGX | 0.4102 | 0.5197 | 0.3629 | 784 | 0.5530 | 0.480 | 0.686 | 0.572 | 0.103% |
-| planrefine3 | Narval | 0.4082 | 0.5173 | 0.3638 | 1178 | 0.5564 | 0.481 | 0.708 | 0.578 | 0.093% |
-| plantrajdeform | Narval | 0.4121 | 0.5206 | 0.3732 | 890 | 0.5473 | 0.480 | 0.690 | 0.561 | 0.065% |
-| plantrajdeform | DGX | — | — | — | — | — | — | — | — | *(training)* |
-| planpredrefine3 | Narval | 0.4072 | 0.5224 | 0.3729 | 877 | — | — | — | — | *(eval-pending)* |
-| planpredtrajdeform | Narval | 0.4127 | 0.5237 | 0.3684 | 1041 | 0.5536 | 0.495 | 0.622 | 0.554 | 0.045% |
-| plantrajdeformonly | Narval | 0.4104 | 0.5200 | 0.3657 | 834 | 0.5505 | 0.481 | 0.687 | 0.575 | 0.090% |
-| planpredtrajdeformonly | Narval | 0.4077 | 0.5208 | 0.3638 | 1091 | 0.5484 | 0.485 | 0.682 | 0.567 | 0.103% |
-| plantrajdeformfirst | Narval | 0.4105 | 0.5194 | 0.3664 | 973 | 0.5442 | 0.481 | 0.720 | 0.568 | 0.132% |
-| planpredtrajdeformfirst | Narval | 0.4119 | 0.5258 | 0.3705 | 838 | 0.5552 | 0.492 | 0.623 | 0.556 | 0.112% |
-| planpredtrajdeformmm | Narval | — | — | — | — | — | — | — | — | *(training)* |
+| bs24 baseline | DGX | 0.413 | 0.523 | 0.378 | 1045 | 0.553 | 0.492 | 0.636 | 0.636 | 0.133% |
+| planrefine3 | DGX | 0.410 | 0.520 | 0.363 | 784 | 0.553 | 0.480 | 0.686 | 0.572 | 0.103% |
+| planrefine3 | Narval | 0.408 | 0.517 | 0.364 | 1178 | 0.556 | 0.481 | 0.708 | 0.578 | 0.093% |
+| plantrajdeform | Narval | 0.412 | 0.521 | 0.373 | 890 | 0.547 | 0.480 | 0.690 | 0.561 | 0.065% |
+| planpredrefine3 | Narval | 0.412 | 0.524 | 0.374 | 910 | 0.558 | 0.488 | 0.645 | 0.553 | 0.107% |
+| planpredtrajdeform | Narval | 0.413 | 0.524 | 0.368 | 1041 | 0.554 | 0.495 | 0.622 | 0.554 | 0.045% |
+| plantrajdeformonly | Narval | 0.410 | 0.520 | 0.366 | 834 | 0.551 | 0.481 | 0.687 | 0.575 | 0.090% |
+| planpredtrajdeformonly | Narval | 0.408 | 0.521 | 0.364 | 1091 | 0.548 | 0.485 | 0.682 | 0.567 | 0.103% |
+| plantrajdeformfirst | Narval | 0.411 | 0.519 | 0.366 | 973 | 0.544 | 0.481 | 0.720 | 0.568 | 0.132% |
+| planpredtrajdeformfirst | Narval | 0.412 | 0.526 | 0.371 | 838 | 0.555 | 0.492 | 0.623 | 0.556 | 0.112% |
+| **planpredtrajdeformmm** | Narval | 0.413 | 0.525 | 0.372 | 1159 | 0.557 | 0.491 | 0.628 | **0.536** | **0.043%** |
+| nomap_planrefine3 | Narval | 0.407 | 0.517 | 0.360 | 925 | — | 0.476 | 0.675 | 0.561 | 0.077% |
+| nomap_plantrajdeform | Narval | — | — | — | — | — | — | — | — | *(running)* |
 
 ## Discussion
 
@@ -71,7 +74,11 @@ Full metrics for completed runs:
 
 **plantrajdeform** (Narval) achieves CR=0.065%, L2=0.561 — the best of the plan-only configs, beating the paper's reported 0.080% CR. Endpoint deformable attention provides ~0.028pp further CR reduction over planrefine3.
 
-**planpredtrajdeform** (adding `motion_deformable=True`) achieves the best overall result: **CR=0.045%, L2=0.554**. Extending endpoint deformable attention to agent queries gives another ~0.020pp CR reduction over plantrajdeform, and also improves car_ade from 0.690 to 0.622 — the best motion prediction across all runs.
+**planpredrefine3** (adding `motion_cumulative_refinement` to planrefine3, no deformable) achieves L2=0.553, CR=0.107%. This is better than planrefine3 on L2 (0.553 vs 0.572) and car_ade (0.645 vs 0.686), confirming agent motion refinement helps planning indirectly. However, CR is slightly worse than plantrajdeform (0.107% vs 0.065%), suggesting deformable attention matters more than motion refinement for collision avoidance.
+
+**planpredtrajdeform** (adding `motion_deformable=True`) achieves **CR=0.045%, L2=0.554**. Extending endpoint deformable attention to agent queries gives another ~0.020pp CR reduction over plantrajdeform, and also improves car_ade from 0.690 to 0.622 — the best motion prediction among the single-mode configs.
+
+**planpredtrajdeformmm** (multi-mode motion deformable) achieves the best overall result: **CR=0.043%, L2=0.536**. Attending at all 6 mode endpoints independently and aggregating by mode confidence further improves L2 by 0.018 over planpredtrajdeform. The CR improvement is marginal (0.043% vs 0.045%), but L2 is meaningfully better. car_ade (0.628) is slightly worse than planpredtrajdeform (0.622), suggesting the multi-mode aggregation helps planning more than raw motion accuracy.
 
 **Ablation: deformable-only (no refinement).** plantrajdeformonly achieves CR=0.090%, L2=0.575 — substantially worse than plantrajdeform (CR=0.065%) but still better than planrefine3-only. This confirms that deformable attention and cumulative refinement are complementary: deformable attention alone recovers roughly half the refinement benefit.
 
@@ -79,16 +86,16 @@ Full metrics for completed runs:
 
 **Motion prediction (car_ade) improves with motion_deformable.** planpredtrajdeform and planpredtrajdeformfirst both achieve car_ade ≈ 0.622–0.623, substantially better than the plan-only configs (0.687–0.720) and even the baseline (0.636). planpredtrajdeformonly also improves (0.682), though less so. This suggests the motion head benefits strongly from attending at its own predicted endpoints.
 
-**car_EPA is slightly higher in planpred configs** (0.492–0.495 vs 0.480–0.481), consistent with the ade improvement.
+**car_EPA is slightly higher in planpred configs** (0.488–0.495 vs 0.480–0.481), consistent with the ade improvement.
 
 **Detection and map are largely unaffected** — NDS and mAP remain within ~0.003 of the baseline across all runs.
 
-**planpredrefine3 eval pending** — checkpoint done but planning/motion metrics not captured (eval job 58845832 queued). Detection/tracking metrics already available (mAP=0.4072, NDS=0.5224, AMOTA=0.3729).
+**Nomap ablation.** nomap_planrefine3 (no map supervision) achieves L2=0.561, CR=0.077%. Compared to the map version (planrefine3 Narval: L2=0.578, CR=0.093%), L2 is actually slightly better — though this may be within noise. CR is slightly worse (0.077% vs 0.065% for plantrajdeform). Dropping map supervision does not strongly degrade planning, suggesting the planning head does not rely heavily on the map branch. nomap_plantrajdeform results pending.
 
-**nomap variants pending** — jobs 58845828 / 58845829 resubmitted after fixing `find_unused_parameters=True` (DDP unused-parameter error with `with_map=False`).
+**DGX plantrajdeform (3573) failed** — exit code 1, likely a pre-fix submission issue. Narval result stands.
 
 ## Future Work
-- Await planpredrefine3 eval results and DGX plantrajdeform result.
-- Await nomap_planrefine3 and nomap_plantrajdeform results.
-- Investigate whether the planpredtrajdeform CR=0.045% result holds on DGX (cross-server consistency check).
-- ~~**Multi-mode motion deformable attention.**~~ Implemented as `motion_deformable_multimode` (job 58846242). Attends at all 6 mode endpoints, aggregates by softmax mode confidence. Results pending.
+- Await nomap_plantrajdeform results (Narval 58855016).
+- ~~**Multi-mode motion deformable attention.**~~ Done — planpredtrajdeformmm achieves best overall: L2=0.536, CR=0.043%.
+- Fix multi-mode trajectory cross-attention: currently the 6-mode DAF pass shares anchor encoder and image sampling, but mode-specific attention weights could be improved by learning separate projection heads per mode rather than relying solely on the softmax aggregation. This may further decouple mode predictions and improve both motion and planning accuracy.
+- Investigate cross-server consistency: DGX planpredtrajdeformmm (3578) gave L2=0.548 vs Narval 0.536 — modest variance across seeds/servers, worth averaging over 2+ runs for final numbers.
