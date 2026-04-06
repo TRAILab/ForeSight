@@ -30,8 +30,9 @@ Then wrap with the server's run script and submit.
 
 ### DGX (SLURM)
 ```bash
-ssh trail_dgx "source ~/.bashrc && cd /raid/home/spapais/ForeSight && sbatch --export=ALL scripts/dgx_run.sh <inner_cmd>"
+ssh trail_dgx "bash -i -c 'cd /raid/home/spapais/ForeSight && sbatch --export=ALL scripts/dgx_run.sh <inner_cmd>'" 2>/dev/null
 ```
+Note: `bash -i` is required — DGX `.bashrc` has a non-interactive guard that skips `WANDB_API_KEY` export when using plain `source ~/.bashrc` over SSH. `2>/dev/null` suppresses interactive shell noise.
 - Parse job ID from `Submitted batch job <ID>`
 - Print: "Submitted DGX job <ID> — parse results with `/parse-metrics --server dgx --job <ID>`"
 
