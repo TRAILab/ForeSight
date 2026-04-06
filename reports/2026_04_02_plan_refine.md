@@ -46,7 +46,7 @@ Four additional configs isolate component contributions:
 | 6 | planpredtrajdeformfirst | Narval | 0.556 | 0.112% | 0.623 | 0.526 | done | 58824432 |
 | 7 | **planpredtrajdeformmm** | Narval | **0.536** | **0.043%** | 0.628 | 0.525 | done | 58846242 |
 | 8 | nomap_planrefine3 | Narval | 0.561 | 0.077% | 0.675 | 0.517 | done | 58855015 |
-| 8 | nomap_plantrajdeform | Narval | — | — | — | — | running | 58855016 |
+| 8 | nomap_plantrajdeform | Narval | 0.556 | 0.061% | 0.686 | 0.520 | done | 58855016 |
 
 Full metrics for completed runs:
 
@@ -64,7 +64,7 @@ Full metrics for completed runs:
 | planpredtrajdeformfirst | Narval | 0.412 | 0.526 | 0.371 | 838 | 0.555 | 0.492 | 0.623 | 0.556 | 0.112% |
 | **planpredtrajdeformmm** | Narval | 0.413 | 0.525 | 0.372 | 1159 | 0.557 | 0.491 | 0.628 | **0.536** | **0.043%** |
 | nomap_planrefine3 | Narval | 0.407 | 0.517 | 0.360 | 925 | — | 0.476 | 0.675 | 0.561 | 0.077% |
-| nomap_plantrajdeform | Narval | — | — | — | — | — | — | — | — | *(running)* |
+| nomap_plantrajdeform | Narval | 0.414 | 0.520 | 0.369 | 1046 | — | 0.481 | 0.686 | 0.556 | 0.061% |
 
 ## Discussion
 
@@ -90,12 +90,12 @@ Full metrics for completed runs:
 
 **Detection and map are largely unaffected** — NDS and mAP remain within ~0.003 of the baseline across all runs.
 
-**Nomap ablation.** nomap_planrefine3 (no map supervision) achieves L2=0.561, CR=0.077%. Compared to the map version (planrefine3 Narval: L2=0.578, CR=0.093%), L2 is actually slightly better — though this may be within noise. CR is slightly worse (0.077% vs 0.065% for plantrajdeform). Dropping map supervision does not strongly degrade planning, suggesting the planning head does not rely heavily on the map branch. nomap_plantrajdeform results pending.
+**Nomap ablation.** nomap_planrefine3 (no map supervision) achieves L2=0.561, CR=0.077%. Adding endpoint deformable attention without map supervision (`nomap_plantrajdeform`) improves this further to **L2=0.556, CR=0.061%**. That is slightly better than `nomap_planrefine3`, and very close to the map-supervised `plantrajdeform` result (L2=0.561, CR=0.065%). Detection remains essentially unchanged (NDS=0.520, mAP=0.414). Dropping map supervision therefore does not appear to hurt planning much in this batch, suggesting the planning head does not rely heavily on the map branch.
 
 **DGX plantrajdeform (3573) failed** — exit code 1, likely a pre-fix submission issue. Narval result stands.
 
 ## Future Work
-- Await nomap_plantrajdeform results (Narval 58855016).
+- No runs from this report are still active on DGX or Narval as of 2026-04-06. Narval job 58855016 (`nomap_plantrajdeform`) completed on 2026-04-05 05:00:37.
 - ~~**Multi-mode motion deformable attention.**~~ Done — planpredtrajdeformmm achieves best overall: L2=0.536, CR=0.043%.
 - Fix multi-mode trajectory cross-attention: currently the 6-mode DAF pass shares anchor encoder and image sampling, but mode-specific attention weights could be improved by learning separate projection heads per mode rather than relying solely on the softmax aggregation. This may further decouple mode predictions and improve both motion and planning accuracy.
 - Investigate cross-server consistency: DGX planpredtrajdeformmm (3578) gave L2=0.548 vs Narval 0.536 — modest variance across seeds/servers, worth averaging over 2+ runs for final numbers.
