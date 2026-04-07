@@ -67,6 +67,7 @@ class MotionPlanningHead(BaseModule):
         planning_deformable=False,
         motion_deformable=False,
         motion_deformable_multimode=False,
+        motion_deformable_modeproj=False,
         deformable_waypoint=-1,
     ):
         super(MotionPlanningHead, self).__init__()
@@ -82,6 +83,7 @@ class MotionPlanningHead(BaseModule):
         self.planning_deformable = planning_deformable
         self.motion_deformable = motion_deformable
         self.motion_deformable_multimode = motion_deformable_multimode
+        self.motion_deformable_modeproj = motion_deformable_modeproj and motion_deformable_multimode
         self.deformable_waypoint = deformable_waypoint
 
         # =========== build modules ===========
@@ -111,6 +113,11 @@ class MotionPlanningHead(BaseModule):
             ]
         )
         self.embed_dims = embed_dims
+
+        if self.motion_deformable_modeproj:
+            self.motion_mode_projs = nn.ModuleList(
+                [nn.Linear(embed_dims, embed_dims) for _ in range(fut_mode)]
+            )
 
         if self.decouple_attn:
             self.fc_before = nn.Linear(
@@ -464,6 +471,12 @@ class MotionPlanningHead(BaseModule):
                         feature_maps, metas,
                     )  # (bs, num_det * fut_mode, embed_dims), includes residual
                     attended = attended.reshape(bs, num_anchor, self.fut_mode, self.embed_dims)
+                    if self.motion_deformable_modeproj:
+                        attended = torch.stack(
+                            [self.motion_mode_projs[m](attended[:, :, m, :])
+                             for m in range(self.fut_mode)],
+                            dim=2,
+                        )
                     if motion_classification:
                         mode_weights = motion_classification[-1].detach().softmax(dim=-1)
                     else:
