@@ -65,6 +65,7 @@ class MotionPlanningHead(BaseModule):
         planning_cumulative_refinement=False,
         motion_cumulative_refinement=False,
         planning_deformable=False,
+        planning_deformable_instfeat=False,
         motion_deformable=False,
         motion_deformable_multimode=False,
         motion_deformable_modeproj=False,
@@ -81,6 +82,7 @@ class MotionPlanningHead(BaseModule):
         self.planning_cumulative_refinement = planning_cumulative_refinement
         self.motion_cumulative_refinement = motion_cumulative_refinement
         self.planning_deformable = planning_deformable
+        self.planning_deformable_instfeat = planning_deformable_instfeat and planning_deformable
         self.motion_deformable = motion_deformable
         self.motion_deformable_multimode = motion_deformable_multimode
         self.motion_deformable_modeproj = motion_deformable_modeproj and motion_deformable_multimode
@@ -502,16 +504,51 @@ class MotionPlanningHead(BaseModule):
                         ego_anchor,
                     )
                     plan_anchor_embed = anchor_encoder(plan_anchor_box)
-                    plan_mode_query = self.layers[i](
-                        plan_mode_query,
-                        plan_anchor_box,
-                        plan_anchor_embed,
-                        feature_maps,
-                        metas,
+                    if self.planning_deformable_instfeat:
+                        # Direction B: use ego instance_feature as DAF query,
+                        # mirroring motion_deformable_multimode. Expand ego
+                        # feature to all planning modes, attend at each mode's
+                        # endpoint box, then aggregate back by mode confidence.
+                        num_plan_modes = plan_anchor_box.shape[1]
+                        ego_feat_exp = instance_feature[:, num_anchor:].expand(
+                            -1, num_plan_modes, -1
+                        )  # (bs, num_plan_modes, embed_dims)
+                        attended_plan = self.layers[i](
+                            ego_feat_exp,
+                            plan_anchor_box,
+                            plan_anchor_embed,
+                            feature_maps,
+                            metas,
+                        )  # (bs, num_plan_modes, embed_dims)
+                        if planning_classification:
+                            plan_weights = (
+                                planning_classification[-1].detach()
+                                .squeeze(1).softmax(dim=-1)
+                            )  # (bs, num_plan_modes)
+                        else:
+                            plan_weights = torch.full(
+                                (bs, num_plan_modes), 1.0 / num_plan_modes,
+                                device=det_anchors.device, dtype=det_anchors.dtype,
+                            )
+                        ego_new = (attended_plan * plan_weights.unsqueeze(-1)).sum(
+                            dim=1, keepdim=True
+                        )  # (bs, 1, embed_dims)
+                        instance_feature = torch.cat([agent_feature, ego_new], dim=1)
+                    else:
+                        plan_mode_query = self.layers[i](
+                            plan_mode_query,
+                            plan_anchor_box,
+                            plan_anchor_embed,
+                            feature_maps,
+                            metas,
+                        )
+                        instance_feature = torch.cat(
+                            [agent_feature, instance_feature[:, num_anchor:]], dim=1
+                        )
+                else:
+                    instance_feature = torch.cat(
+                        [agent_feature, instance_feature[:, num_anchor:]], dim=1
                     )
-                instance_feature = torch.cat(
-                    [agent_feature, instance_feature[:, num_anchor:]], dim=1
-                )
             elif op == "refine":
                 motion_query = motion_mode_query + (instance_feature + anchor_embed)[:, :num_anchor].unsqueeze(2)
                 plan_query = plan_mode_query.unsqueeze(1) + (instance_feature + anchor_embed)[:, num_anchor:].unsqueeze(2)
