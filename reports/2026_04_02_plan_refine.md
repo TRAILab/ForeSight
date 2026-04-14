@@ -164,4 +164,3 @@ Key comparisons from averaged results:
 
 ## Future Work
 - ~~**Diagnose planinstfeat CR regression.**~~ In progress — `nomap_planpredtrajdeformmm_planinstfeat` (DGX 3586, Narval 59355837) and `planpredtrajdeformmm_planinstfeat_laststage` (DGX 3587, Narval 59355838) are running.
-- Fix multi-mode trajectory cross-attention: currently the 6-mode DAF pass shares anchor encoder and image sampling, but mode-specific attention weights could be improved by learning separate projection heads per mode rather than relying solely on the softmax aggregation. This may further decouple mode predictions and improve both motion and planning accuracy.
