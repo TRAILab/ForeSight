@@ -66,6 +66,7 @@ class MotionPlanningHead(BaseModule):
         motion_cumulative_refinement=False,
         planning_deformable=False,
         planning_deformable_instfeat=False,
+        planning_deformable_instfeat_laststage=False,
         motion_deformable=False,
         motion_deformable_multimode=False,
         motion_deformable_modeproj=False,
@@ -83,6 +84,8 @@ class MotionPlanningHead(BaseModule):
         self.motion_cumulative_refinement = motion_cumulative_refinement
         self.planning_deformable = planning_deformable
         self.planning_deformable_instfeat = planning_deformable_instfeat and planning_deformable
+        self.planning_deformable_instfeat_laststage = planning_deformable_instfeat_laststage
+        self._n_deformable_stages = sum(1 for op in operation_order if op == "deformable")
         self.motion_deformable = motion_deformable
         self.motion_deformable_multimode = motion_deformable_multimode
         self.motion_deformable_modeproj = motion_deformable_modeproj and motion_deformable_multimode
@@ -418,6 +421,7 @@ class MotionPlanningHead(BaseModule):
         else:
             motion_endpoint_anchor = None
             motion_endpoint_anchor_all = None
+        _deformable_stage_idx = 0
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
                 continue
@@ -455,6 +459,7 @@ class MotionPlanningHead(BaseModule):
             elif op == "deformable":
                 # Apply deformable cross-attention to sensor features for
                 # agent instances only (ego token has no well-defined 3D box).
+                _deformable_stage_idx += 1
                 if self.motion_deformable_multimode:
                     # Attend at every mode's endpoint, aggregate by mode confidence.
                     # motion_endpoint_anchor_all: (bs, num_det, fut_mode, 11)
@@ -504,7 +509,13 @@ class MotionPlanningHead(BaseModule):
                         ego_anchor,
                     )
                     plan_anchor_embed = anchor_encoder(plan_anchor_box)
-                    if self.planning_deformable_instfeat:
+                    _use_instfeat = (
+                        self.planning_deformable_instfeat and (
+                            not self.planning_deformable_instfeat_laststage
+                            or _deformable_stage_idx == self._n_deformable_stages
+                        )
+                    )
+                    if _use_instfeat:
                         # Direction B: use ego instance_feature as DAF query,
                         # mirroring motion_deformable_multimode. Expand ego
                         # feature to all planning modes, attend at each mode's
