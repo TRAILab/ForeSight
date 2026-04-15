@@ -42,6 +42,10 @@ These configs wrap their corresponding baselines and enable the aux-2D branch wi
 
 ## Results
 
+| Server | Config | Job ID | Status |
+| --- | --- | --- | --- |
+| `dgx` | `sparsedrive_r50_stage1_4gpu_aux2d.py` | `3589` | `RUNNING` |
+
 ## Discussion
 
 ## Future Work
