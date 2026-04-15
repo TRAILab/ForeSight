@@ -295,9 +295,6 @@ class SparseDriveAux2DHead(AnchorFreeHead):
         bboxes = bbox_cxcywh_to_xyxy(bbox_preds_flat) * factor
         bboxes_gt = bbox_cxcywh_to_xyxy(bbox_targets) * factor
 
-        loss_iou = self.loss_iou2d(
-            bboxes, bboxes_gt, bbox_weights, avg_factor=max(num_total_pos, 1)
-        )
         iou_score = bbox_overlaps(bboxes_gt, bboxes, is_aligned=True).reshape(-1)
 
         cls_scores = cls_scores.reshape(-1, self.cls_out_channels)
@@ -314,6 +311,10 @@ class SparseDriveAux2DHead(AnchorFreeHead):
 
         num_total_pos = loss_cls.new_tensor([num_total_pos])
         num_total_pos = torch.clamp(reduce_mean(num_total_pos), min=1).item()
+
+        loss_iou = self.loss_iou2d(
+            bboxes, bboxes_gt, bbox_weights, avg_factor=max(num_total_pos, 1)
+        )
 
         heatmaps = [
             self._get_heatmap_single(cur_centers, cur_boxes, image_wh, centerness.device)
