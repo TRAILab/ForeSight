@@ -1,5 +1,10 @@
 # Auxiliary 2D Supervision for SparseDrive
 
+
+## TODO
+
+- track any remaining work before finalizing the report (e.g. run tracking, metric parsing, discussion, future work)
+
 ## Intro
 
 This report documents an experiment adding auxiliary 2D supervision to `SparseDrive` in order to test whether image-space supervision can improve the quality of learned camera features for 3D detection. The motivation comes from `StreamPETR`, which uses an auxiliary 2D branch during training in addition to its main 3D detection objective.
@@ -44,7 +49,13 @@ These configs wrap their corresponding baselines and enable the aux-2D branch wi
 
 | Server | Config | Job ID | Status |
 | --- | --- | --- | --- |
-| `dgx` | `sparsedrive_r50_stage1_4gpu_aux2d.py` | `3589` | `RUNNING` |
+| `dgx` | `sparsedrive_r50_stage1_4gpu_aux2d.py` | `3590` | `RUNNING` |
+
+| Model | Metric 1 | Metric 2 | Metric 3 | Notes |
+| --- | --- | --- | --- | --- |
+| `[baseline]` | `[x]` | `[y]` | `[z]` | `[short note]` |
+| `[variant]` | `[x]` | `[y]` | `[z]` | `[short note]` |
+
 
 ## Discussion
 
