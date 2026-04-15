@@ -5,6 +5,7 @@ from numpy import random
 import mmcv
 from mmdet.datasets.builder import PIPELINES
 from PIL import Image
+from shapely.affinity import affine_transform as shapely_affine_transform
 
 
 @PIPELINES.register_module()
@@ -109,6 +110,43 @@ class BBoxRotation(object):
             results["gt_bboxes_3d"] = self.box_rotate(
                 results["gt_bboxes_3d"], angle
             )
+
+        # 2D rotation matrix (row-vector convention: v' = v @ rot_mat_T_2d)
+        rot_mat_T_2d = np.array(
+            [[rot_cos, rot_sin], [-rot_sin, rot_cos]]
+        )
+
+        if "map_geoms" in results:
+            results["map_geoms"] = self.geoms_rotate(results["map_geoms"], rot_cos, rot_sin)
+
+        if "gt_agent_fut_trajs" in results:
+            results["gt_agent_fut_trajs"] = self.traj_rotate(
+                results["gt_agent_fut_trajs"], rot_mat_T_2d
+            )
+
+        if "gt_ego_fut_trajs" in results:
+            results["gt_ego_fut_trajs"] = self.traj_rotate(
+                results["gt_ego_fut_trajs"], rot_mat_T_2d
+            )
+            # Recompute ego command from cumulative rotated trajectory.
+            # The command is determined by the X offset of the final waypoint
+            # (>= 2m = right, <= -2m = left, else straight). After rotation a
+            # straight forward path acquires a large X component, so the stored
+            # command is no longer valid.
+            if "gt_ego_fut_cmd" in results:
+                final_x = float(np.cumsum(results["gt_ego_fut_trajs"], axis=0)[-1, 0])
+                if final_x >= 2.0:
+                    results["gt_ego_fut_cmd"] = np.array([1, 0, 0], dtype=np.float32)
+                elif final_x <= -2.0:
+                    results["gt_ego_fut_cmd"] = np.array([0, 1, 0], dtype=np.float32)
+                else:
+                    results["gt_ego_fut_cmd"] = np.array([0, 0, 1], dtype=np.float32)
+
+        if "ego_status" in results:
+            results["ego_status"] = self.ego_status_rotate(
+                results["ego_status"], rot_mat_T_2d
+            )
+
         return results
 
     @staticmethod
@@ -124,6 +162,44 @@ class BBoxRotation(object):
             vel_dims = bbox_3d[:, 7:].shape[-1]
             bbox_3d[:, 7:] = bbox_3d[:, 7:] @ rot_mat_T[:vel_dims, :vel_dims]
         return bbox_3d
+
+    @staticmethod
+    def geoms_rotate(map_geoms, rot_cos, rot_sin):
+        """Rotate Shapely map geometries (LineStrings) about the Z-axis."""
+        # shapely affine_transform 2D: [a, b, d, e, xoff, yoff]
+        # x' = a*x + b*y + xoff,  y' = d*x + e*y + yoff
+        matrix = [rot_cos, -rot_sin, rot_sin, rot_cos, 0, 0]
+        rotated = {}
+        for label, geom_list in map_geoms.items():
+            rotated[label] = [shapely_affine_transform(g, matrix) for g in geom_list]
+        return rotated
+
+    @staticmethod
+    def traj_rotate(trajs, rot_mat_T_2d):
+        """Rotate 2D delta trajectory vectors (dtype-preserving).
+
+        Args:
+            trajs: ndarray (..., 2), row vectors in LiDAR XY frame.
+            rot_mat_T_2d: (2, 2) transposed rotation matrix (float64).
+        Returns:
+            Rotated ndarray with the same dtype as `trajs`.
+        """
+        dtype = trajs.dtype
+        rot = rot_mat_T_2d.astype(dtype)
+        result = trajs.copy()
+        result[..., :2] = trajs[..., :2] @ rot
+        return result
+
+    @staticmethod
+    def ego_status_rotate(ego_status, rot_mat_T_2d):
+        """Rotate XY acceleration (indices 0:2) and XY velocity (indices 6:8)
+        in ego_status, which are expressed in the LiDAR-aligned ego frame."""
+        dtype = ego_status.dtype
+        rot = rot_mat_T_2d.astype(dtype)
+        result = ego_status.copy()
+        result[0:2] = ego_status[0:2] @ rot
+        result[6:8] = ego_status[6:8] @ rot
+        return result
 
 
 @PIPELINES.register_module()
