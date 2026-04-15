@@ -4,21 +4,19 @@ description: One-shot ML experiment batch for ForeSight — survey prior work, p
 allowed-tools: Read, Write, Edit, Bash(git:*), Bash(ssh:*), Bash(cp:*), Bash(date:*), Bash(cat:*), Bash(head:*), Bash(tail:*), Bash(ls:*)
 ---
 
-Arguments: $ARGUMENTS
+Goal: $ARGUMENTS
 
-| Arg | Required | Default |
-|-----|----------|---------|
-| `--goal` | yes | — |
-| `--base-config` | no | `projects/configs/sparsedrive_r50_stage2_4gpu_bs24.py` |
-| `--server` | no | `narval` |
+The goal contains everything needed: the research objective, which base configs to use, config naming, code changes required, and target server. Defaults if not specified: server=`narval`, base config=`projects/configs/sparsedrive_r50_stage2_4gpu_bs24.py`.
 
-**Objective:** All experiments must serve `--goal` and improve the primary metrics. See CLAUDE.md for full metric definitions.
+**Objective:** All experiments must serve the goal and improve the primary metrics. See CLAUDE.md for full metric definitions.
 
 ---
 
 ## Phase 1 — Survey
 
-### 1. Read the base config
+### 1. Read the base config(s)
+
+Extract the base config path(s) from the goal. If none specified, default to `projects/configs/sparsedrive_r50_stage2_4gpu_bs24.py`.
 
 ```bash
 cat <base-config>
@@ -28,7 +26,7 @@ Record current values of: `total_batch_size`, `num_epochs`, `with_map`, `queue_l
 
 ### 2. Read the model architecture
 
-If `--goal` involves a specific component (detection, map, motion, or planning), read the relevant source file. See CLAUDE.md for the key source files table.
+If the goal involves a specific component (detection, map, motion, or planning), read the relevant source file. See CLAUDE.md for the key source files table.
 
 ### 3. Read prior research findings
 
@@ -39,7 +37,7 @@ cat reports/2026_02_16_baselines.md
 
 Extract the specific metric values for each experiment (use these as your baseline reference).
 
-Then list and read all reports relevant to `--goal`:
+Then list and read all reports relevant to the goal:
 
 ```bash
 ls -1 reports/
@@ -58,7 +56,7 @@ From each report, extract: which changes worked and which did not, and any failu
 
 ### 2. Propose all experiments
 
-Use the $ARGUMENTS to design 1–3 experiments. Prefer fewer — one experiment is enough when the hypothesis is sharp. Add more only when sweeping a parameter range or comparing competing approaches. Each experiment must test one hypothesis with config changes, new components, or new loss formulations:
+Use the goal to design 1–3 experiments. Prefer fewer — one experiment is enough when the hypothesis is sharp. Add more only when sweeping a parameter range or comparing competing approaches. Each experiment must test one hypothesis with config changes, new components, or new loss formulations. If the goal specifies explicit config names or suffixes, use those exactly.
 
 | # | Config suffix | Change | Mechanism | Expected effect |
 |---|--------------|--------|-----------|-----------------|
@@ -77,13 +75,9 @@ Rules:
 
 ## Phase 3 — Create
 
-### 1. Create the session branch
+### 1. Checkout the session branch
 
-Derive `<feature>` from `--goal` as a short snake_case label (e.g. `planning_loss`, `temporal_queue`).
-
-```bash
-git checkout -b sd_<feature>
-```
+Derive `<feature>` from the goal as a short snake_case label (e.g. `planning_loss`, `temporal_queue`). If the goal implies a specific branch name, use that. Check if you are already on the branch and if so, print "Already on branch sd_<feature>". If not, create the branch and checkout to it.
 
 ### 2. Create the session report
 
@@ -91,15 +85,32 @@ git checkout -b sd_<feature>
 date +%Y_%m_%d
 ```
 
-Create `<report>` based on `2026_MM_DD_template.md`:
+Create `reports/<YYYY_MM_DD>_<feature>.md` (referred to as `<report>` throughout):
 
-```bash
-cp reports/2026_MM_DD_template.md reports/<YYYY_MM_DD>_<feature>.md
+```markdown
+# <feature> — <YYYY-MM-DD>
+
+## Intro
+Describe the problem and the experiments.
+
+## Method
+Describe the method used to test the hypotheses.
+
+## Results
+
+| # | Config | L2 | obj_box_col | car_ade | NDS | Status | Notes | Job ID |
+|---|--------|----|-------------|---------|-----|--------|-------|--------|
+
+## Discussion
+_(filled at the end)_
+
+## Future Work
+_(filled at the end)_
 ```
 
 ### 3. Create all configs and any code changes needed
 
-`<config_stem>` = `<base_config_stem>_<suffix>` where `<base_config_stem>` is the filename stem of `<base-config>` and `<suffix>` matches the suffix column from the proposal table.
+`<config_stem>` = `<base_config_stem>_<suffix>` where `<base_config_stem>` is the filename stem of the base config and `<suffix>` matches the suffix column from the proposal table. If the goal specifies exact config filenames, use those verbatim instead.
 
 For **each** experiment:
 1. Copy the base config: `cp <base-config> projects/configs/<config_stem>.py`
@@ -128,6 +139,8 @@ ssh <server> "source ~/.bashrc && cd /home/spapais/ForeSight && git fetch origin
 ---
 
 ## Phase 4 — Submit
+
+Extract the target server from the goal. If not specified, default to `narval`.
 
 Submit all jobs using the `/submit-job` skill:
 
