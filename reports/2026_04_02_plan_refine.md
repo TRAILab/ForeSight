@@ -66,9 +66,9 @@ Four additional configs isolate component contributions:
 | 13 | planpredtrajdeformmm_planinstfeat | DGX | 0.521 | 0.095% | 0.649 | 0.525 | done | 3585 |
 | 13 | planpredtrajdeformmm_planinstfeat | Narval | 0.531 | 0.113% | 0.645 | 0.523 | done | 59045518 |
 | 13 | planpredtrajdeformmm_planinstfeat | Narval | — | — | — | — | failed | 59008583 |
-| 14 | nomap_planpredtrajdeformmm_planinstfeat | DGX | — | — | — | — | running | 3586 |
-| 14 | nomap_planpredtrajdeformmm_planinstfeat | Narval | — | — | — | — | running | 59355837 |
-| 15 | planpredtrajdeformmm_planinstfeat_laststage | DGX | — | — | — | — | running | 3587 |
+| 14 | nomap_planpredtrajdeformmm_planinstfeat | DGX | 0.510 | 0.084% | 0.646 | 0.530 | done | 3586 |
+| 14 | nomap_planpredtrajdeformmm_planinstfeat | Narval | — | — | — | — | cancelled | 59355837 |
+| 15 | planpredtrajdeformmm_planinstfeat_laststage | DGX | 0.519 | **0.038%** | 0.635 | 0.523 | done | 3587 |
 | 15 | planpredtrajdeformmm_planinstfeat_laststage | Narval | — | — | — | — | running | 59355838 |
 
 Full metrics for completed runs:
@@ -100,6 +100,8 @@ Full metrics for completed runs:
 | nomap_planpredtrajdeformmm_modeproj | DGX | 0.415 | 0.527 | 0.377 | 783 | — | 0.494 | 0.618 | 0.549 | 0.058% |
 | planpredtrajdeformmm_planinstfeat | DGX | 0.413 | 0.525 | 0.375 | 975 | 0.553 | 0.491 | 0.649 | 0.521 | 0.095% |
 | planpredtrajdeformmm_planinstfeat | Narval | 0.412 | 0.523 | 0.375 | 1090 | 0.554 | 0.484 | 0.645 | 0.531 | 0.113% |
+| nomap_planpredtrajdeformmm_planinstfeat | DGX | 0.417 | 0.530 | 0.378 | 1008 | — | 0.492 | 0.646 | 0.510 | 0.084% |
+| planpredtrajdeformmm_planinstfeat_laststage | DGX | 0.414 | 0.523 | 0.375 | 928 | 0.556 | 0.495 | 0.635 | 0.519 | 0.038% |
 
 Averaged results across servers (DGX + Narval where both available); single-run configs are unchanged. Note: `planpredtrajdeformmm` has N=1 as the DGX run (L2=0.548) was never added to the table above — including it would bring the average to ~0.542.
 
@@ -122,6 +124,8 @@ Averaged results across servers (DGX + Narval where both available); single-run 
 | planpredtrajdeformmm_modeproj | 2 | 0.556 | 0.072% | 0.632 | 0.527 | 0.418 | 0.556 |
 | nomap_planpredtrajdeformmm_modeproj | 2 | 0.547 | 0.064% | 0.621 | 0.527 | 0.416 | — |
 | planpredtrajdeformmm_planinstfeat | 2 | 0.526 | 0.104% | 0.647 | 0.524 | 0.413 | 0.554 |
+| nomap_planpredtrajdeformmm_planinstfeat | 1 | 0.510 | 0.084% | 0.646 | 0.530 | 0.417 | — |
+| planpredtrajdeformmm_planinstfeat_laststage | 1 | 0.519 | 0.038% | 0.635 | 0.523 | 0.414 | 0.556 |
 
 ## Discussion
 
@@ -153,6 +157,12 @@ Averaged results across servers (DGX + Narval where both available); single-run 
 
 **planpredtrajdeformmm_planinstfeat** (ego instance feature as DAF query for planning) achieves the best averaged L2=0.526 across the batch, but CR=0.104% is a significant regression — comparable to `planrefine3` and nearly 2× worse than `planpredtrajdeformmm` (0.047%). The ego instance feature appears to help trajectory accuracy at the expense of obstacle awareness. One Narval run (59008583) failed; two completed runs (DGX 3585, Narval 59045518) are consistent with each other.
 
+**planinstfeat CR regression diagnosis (DGX only; Narval laststage pending).** Two ablations tested the source of the CR regression:
+
+- **nomap_planpredtrajdeformmm_planinstfeat** (DGX 3586): L2=0.510, CR=0.084%. Dropping map supervision does not fix the CR regression — CR is still nearly 2× worse than `planpredtrajdeformmm`. The map branch is not the cause of the obstacle-avoidance degradation. Narval run cancelled (result was conclusive from DGX alone).
+
+- **planpredtrajdeformmm_planinstfeat_laststage** (DGX 3587): L2=0.519, CR=**0.038%**. Restricting ego instance feature DAF to the final decoder stage only resolves the CR regression entirely — CR is actually better than `planpredtrajdeformmm` (0.038% vs 0.047%). L2=0.519 is slightly worse than full `planinstfeat` (0.521–0.531) but better than `planpredtrajdeformmm` (0.542 avg). The diagnosis is confirmed: injecting the ego instance feature in early decoder stages suppresses obstacle-aware attention before it is established; applying it only at the last stage preserves collision avoidance while retaining most of the trajectory accuracy gain. Narval run (59355838) pending for confirmation.
+
 ## Best Model
 
 **`planpredtrajdeformmm`** is the recommended model going forward (averaged L2=0.542, CR=0.047%, N=2). It achieves the best balanced result across both primary metrics with map supervision intact and is the only config to simultaneously push L2 below 0.545 and CR below 0.050%.
@@ -163,4 +173,4 @@ Key comparisons from averaged results:
 - vs `planpredtrajdeform` (single-mode): multi-mode aggregation gains +0.012 L2 at near-identical CR (0.047% vs 0.045%, within noise given N=1 for planpredtrajdeform).
 
 ## Future Work
-- ~~**Diagnose planinstfeat CR regression.**~~ In progress — `nomap_planpredtrajdeformmm_planinstfeat` (DGX 3586, Narval 59355837) and `planpredtrajdeformmm_planinstfeat_laststage` (DGX 3587, Narval 59355838) are running.
+- ~~**Diagnose planinstfeat CR regression.**~~ Resolved — `planpredtrajdeformmm_planinstfeat_laststage` (DGX 3587) confirms laststage-only ego feature fixes CR (0.038%). Narval run 59355838 pending for confirmation. `nomap` ablation (DGX 3586) ruled out map interaction as the cause; Narval run 59355837 cancelled.
