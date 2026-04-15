@@ -385,7 +385,7 @@ class SparseDriveAux2DHead(AnchorFreeHead):
             gt_labels_list,
             centers2d_list,
             depths_list,
-            image_wh=[image_wh for _ in range(len(cls_scores_list))],
+            image_wh=image_wh,
         )
         (
             labels_list,
