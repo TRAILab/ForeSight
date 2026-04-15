@@ -91,27 +91,10 @@ git checkout -b sd_<feature>
 date +%Y_%m_%d
 ```
 
-Create `reports/<YYYY_MM_DD>_<feature>.md` (referred to as `<report>` throughout):
+Create `<report>` based on `2026_MM_DD_template.md`:
 
-```markdown
-# <feature> — <YYYY-MM-DD>
-
-## Intro
-Describe the problem and the experiments.
-
-## Method
-Describe the method used to test the hypotheses.
-
-## Results
-
-| # | Config | L2 | obj_box_col | car_ade | NDS | Status | Notes | Job ID |
-|---|--------|----|-------------|---------|-----|--------|-------|--------|
-
-## Discussion
-_(filled at the end)_
-
-## Future Work
-_(filled at the end)_
+```bash
+cp reports/2026_MM_DD_template.md reports/<YYYY_MM_DD>_<feature>.md
 ```
 
 ### 3. Create all configs and any code changes needed
