@@ -6,18 +6,14 @@ from mmdet.core import (
     bbox_cxcywh_to_xyxy,
     bbox_xyxy_to_cxcywh,
     bbox_overlaps,
+    build_assigner,
+    build_sampler,
     multi_apply,
     reduce_mean,
 )
-from mmdet.core.bbox.match_costs import build_match_cost
 from mmdet.models import HEADS, build_loss
 from mmdet.models.dense_heads.anchor_free_head import AnchorFreeHead
 from mmdet.models.utils.transformer import inverse_sigmoid
-
-try:
-    from scipy.optimize import linear_sum_assignment
-except ImportError:
-    linear_sum_assignment = None
 
 
 def apply_ltrb(locations, pred_ltrb):
@@ -100,10 +96,11 @@ class SparseDriveAux2DHead(AnchorFreeHead):
         loss_centers2d=dict(type="L1Loss", loss_weight=10.0),
         train_cfg=dict(
             assigner2d=dict(
+                type="HungarianAssigner2D",
                 cls_cost=dict(type="FocalLossCost", weight=2.0),
                 reg_cost=dict(type="BBoxL1Cost", weight=5.0, box_format="xywh"),
                 iou_cost=dict(type="IoUCost", iou_mode="giou", weight=2.0),
-                centers2d_cost=dict(weight=10.0),
+                centers2d_cost=dict(type="BBox3DL1Cost", weight=10.0),
             )
         ),
         init_cfg=None,
@@ -122,11 +119,9 @@ class SparseDriveAux2DHead(AnchorFreeHead):
             num_classes, in_channels, init_cfg=init_cfg
         )
 
-        assigner_cfg = train_cfg["assigner2d"]
-        self.cls_cost = build_match_cost(assigner_cfg["cls_cost"])
-        self.reg_cost = build_match_cost(assigner_cfg["reg_cost"])
-        self.iou_cost = build_match_cost(assigner_cfg["iou_cost"])
-        self.centers2d_cost_weight = assigner_cfg["centers2d_cost"].get("weight", 1.0)
+        self.assigner2d = build_assigner(train_cfg["assigner2d"])
+        sampler_cfg = dict(type="PseudoSampler")
+        self.sampler = build_sampler(sampler_cfg, context=self)
 
         self.loss_cls2d = build_loss(loss_cls2d)
         self.loss_bbox2d = build_loss(loss_bbox2d)
@@ -422,15 +417,13 @@ class SparseDriveAux2DHead(AnchorFreeHead):
     ):
         del depths
         num_bboxes = bbox_pred.size(0)
-        matched_row_inds, matched_col_inds = self.assign(
-            bbox_pred,
-            cls_score,
-            pred_centers2d,
-            gt_bboxes,
-            gt_labels,
-            centers2d,
-            image_wh,
+
+        assign_result = self.assigner2d.assign(
+            bbox_pred, cls_score, pred_centers2d, gt_bboxes, gt_labels, centers2d, image_wh
         )
+        sampling_result = self.sampler.sample(assign_result, bbox_pred, gt_bboxes)
+        pos_inds = sampling_result.pos_inds
+        neg_inds = sampling_result.neg_inds
 
         labels = gt_bboxes.new_full((num_bboxes,), self.num_classes, dtype=torch.long)
         label_weights = gt_bboxes.new_ones(num_bboxes)
@@ -438,21 +431,18 @@ class SparseDriveAux2DHead(AnchorFreeHead):
         bbox_weights = torch.zeros_like(bbox_pred)
         centers2d_targets = bbox_pred.new_zeros((num_bboxes, 2))
 
-        assigned_gt_inds = bbox_pred.new_full((num_bboxes,), -1, dtype=torch.long)
-        assigned_gt_inds[:] = 0
-        if matched_row_inds.numel() > 0:
-            assigned_gt_inds[matched_row_inds] = matched_col_inds + 1
-            labels[matched_row_inds] = gt_labels[matched_col_inds].long()
-            bbox_weights[matched_row_inds] = 1.0
+        if pos_inds.numel() > 0:
+            labels[pos_inds] = gt_labels[sampling_result.pos_assigned_gt_inds].long()
+            bbox_weights[pos_inds] = 1.0
 
             img_w, img_h = image_wh[0], image_wh[1]
             factor = bbox_pred.new_tensor([img_w, img_h, img_w, img_h]).unsqueeze(0)
-            pos_gt_bboxes_normalized = gt_bboxes[matched_col_inds] / factor
-            bbox_targets[matched_row_inds] = bbox_xyxy_to_cxcywh(pos_gt_bboxes_normalized)
-            centers2d_targets[matched_row_inds] = centers2d[matched_col_inds] / factor[:, :2]
+            pos_gt_bboxes_normalized = sampling_result.pos_gt_bboxes / factor
+            bbox_targets[pos_inds] = bbox_xyxy_to_cxcywh(pos_gt_bboxes_normalized)
+            centers2d_targets[pos_inds] = (
+                centers2d[sampling_result.pos_assigned_gt_inds] / factor[:, :2]
+            )
 
-        pos_inds = torch.nonzero(assigned_gt_inds > 0, as_tuple=False).squeeze(-1)
-        neg_inds = torch.nonzero(assigned_gt_inds == 0, as_tuple=False).squeeze(-1)
         return (
             labels,
             label_weights,
@@ -461,40 +451,6 @@ class SparseDriveAux2DHead(AnchorFreeHead):
             centers2d_targets,
             pos_inds,
             neg_inds,
-        )
-
-    def assign(
-        self,
-        bbox_pred,
-        cls_pred,
-        pred_centers2d,
-        gt_bboxes,
-        gt_labels,
-        centers2d,
-        image_wh,
-    ):
-        num_gts, num_bboxes = gt_bboxes.size(0), bbox_pred.size(0)
-        if num_gts == 0 or num_bboxes == 0:
-            empty = bbox_pred.new_zeros((0,), dtype=torch.long)
-            return empty, empty
-        if linear_sum_assignment is None:
-            raise ImportError('Please run "pip install scipy" to install scipy first.')
-
-        img_w, img_h = image_wh[0], image_wh[1]
-        factor = gt_bboxes.new_tensor([img_w, img_h, img_w, img_h]).unsqueeze(0)
-        cls_cost = self.cls_cost(cls_pred, gt_labels)
-        reg_cost = self.reg_cost(bbox_pred, gt_bboxes / factor)
-        bboxes = bbox_cxcywh_to_xyxy(bbox_pred) * factor
-        iou_cost = self.iou_cost(bboxes, gt_bboxes)
-        centers2d_cost = torch.cdist(
-            pred_centers2d, centers2d / factor[:, :2], p=1
-        ) * self.centers2d_cost_weight
-        cost = cls_cost + reg_cost + iou_cost + centers2d_cost
-        cost = torch.nan_to_num(cost, nan=100.0, posinf=100.0, neginf=-100.0)
-        matched_row_inds, matched_col_inds = linear_sum_assignment(cost.detach().cpu())
-        return (
-            torch.from_numpy(matched_row_inds).to(bbox_pred.device),
-            torch.from_numpy(matched_col_inds).to(bbox_pred.device),
         )
 
     def _flatten_view_targets(self, targets, device):

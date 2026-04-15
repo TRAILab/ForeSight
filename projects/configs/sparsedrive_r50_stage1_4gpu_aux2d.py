@@ -144,10 +144,11 @@ model = dict(
         loss_centers2d=dict(type="L1Loss", loss_weight=10.0),
         train_cfg=dict(
             assigner2d=dict(
+                type="HungarianAssigner2D",
                 cls_cost=dict(type="FocalLossCost", weight=2.0),
                 reg_cost=dict(type="BBoxL1Cost", weight=5.0, box_format="xywh"),
                 iou_cost=dict(type="IoUCost", iou_mode="giou", weight=2.0),
-                centers2d_cost=dict(weight=10.0),
+                centers2d_cost=dict(type="BBox3DL1Cost", weight=10.0),
             )
         ),
     ),
