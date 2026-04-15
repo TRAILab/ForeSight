@@ -37,6 +37,7 @@ class SparseDrive(BaseDetector):
         use_grid_mask=True,
         use_deformable_func=False,
         depth_branch=None,
+        aux_2d_head=None,
     ):
         super(SparseDrive, self).__init__(init_cfg=init_cfg)
         if pretrained is not None:
@@ -53,13 +54,17 @@ class SparseDrive(BaseDetector):
             self.depth_branch = build_from_cfg(depth_branch, PLUGIN_LAYERS)
         else:
             self.depth_branch = None
+        if aux_2d_head is not None:
+            self.aux_2d_head = build_head(aux_2d_head)
+        else:
+            self.aux_2d_head = None
         if use_grid_mask:
             self.grid_mask = GridMask(
                 True, True, rotate=1, offset=False, ratio=0.5, mode=1, prob=0.7
             ) 
 
     @auto_fp16(apply_to=("img",), out_fp32=True)
-    def extract_feat(self, img, return_depth=False, metas=None):
+    def extract_feat(self, img, return_depth=False, metas=None, return_raw=False):
         bs = img.shape[0]
         if img.dim() == 5:  # multi-view
             num_cams = img.shape[1]
@@ -78,12 +83,17 @@ class SparseDrive(BaseDetector):
             feature_maps[i] = torch.reshape(
                 feat, (bs, num_cams) + feat.shape[1:]
             )
+        raw_feature_maps = feature_maps
         if return_depth and self.depth_branch is not None:
             depths = self.depth_branch(feature_maps, metas.get("focal"))
         else:
             depths = None
         if self.use_deformable_func:
             feature_maps = feature_maps_format(feature_maps)
+        if return_raw:
+            if return_depth:
+                return feature_maps, depths, raw_feature_maps
+            return feature_maps, raw_feature_maps
         if return_depth:
             return feature_maps, depths
         return feature_maps
@@ -96,13 +106,25 @@ class SparseDrive(BaseDetector):
             return self.forward_test(img, **data)
 
     def forward_train(self, img, **data):
-        feature_maps, depths = self.extract_feat(img, True, data)
+        feature_maps, depths, raw_feature_maps = self.extract_feat(
+            img, True, data, return_raw=True
+        )
         model_outs = self.head(feature_maps, data)
         output = self.head.loss(model_outs, data)
         if depths is not None and "gt_depth" in data:
             output["loss_dense_depth"] = self.depth_branch.loss(
                 depths, data["gt_depth"]
             )
+        if self.aux_2d_head is not None:
+            aux_outs = self.aux_2d_head(raw_feature_maps, data["image_wh"])
+            aux_losses = self.aux_2d_head.loss(
+                data["gt_bboxes"],
+                data["gt_labels"],
+                data["centers2d"],
+                data["depths"],
+                aux_outs,
+            )
+            output.update({f"aux2d_{k}": v for k, v in aux_losses.items()})
         return output
 
     def forward_test(self, img, **data):
