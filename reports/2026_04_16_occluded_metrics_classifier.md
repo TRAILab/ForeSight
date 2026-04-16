@@ -56,6 +56,17 @@ Implementation changes:
 - FocalLoss `alpha=0.9, gamma=2.0` — with ~10% occluded match rate this roughly balances contributions: `0.9 × 0.1 ≈ 0.1 × 0.9`
 - Train jointly (not isolated) so features adapt to the visibility signal
 
+### Classifier-based prediction filtering
+
+To make `vis/` and `occluded/` metrics symmetric and comparable, both evaluators apply the same classifier gate at eval time via `occ_vis_threshold` in `eval_mode`:
+
+- `occluded/` — keeps predictions where `visibility_score < threshold` (classified as occluded)
+- `vis/` — keeps predictions where `visibility_score >= threshold` (classified as visible)
+
+**Why symmetry matters:** without the filter, `occluded/mAP` is evaluated on the full 900-anchor prediction set (FDR ~98–99%), while `vis/mAP` benefits from the ignore mechanism acting on sparse occluded GT. The two metrics would be measuring structurally different things and cannot be fairly compared. Applying the classifier gate to both ensures each evaluator only sees predictions the model intends for that visibility class.
+
+**Implementation:** `visibility_score` is embedded in `results_nusc.json` at format time (`_format_bbox`) by attaching scores to `NuScenesBox` objects before the class-range filter to preserve index alignment. At eval time, filtered copies (`results_nusc_occ_filtered.json`, `results_nusc_vis_filtered.json`) are written and passed to the respective evaluator. No filter is applied when `occ_vis_threshold` is absent or when scores are not present in the JSON (e.g., baseline models without the classifier head).
+
 ## Results
 
 | Server | Config | Job ID | Status |
@@ -87,9 +98,10 @@ The two prior classifier experiments failed at opposite extremes of the same cla
 What improved:
 - `Metric clarity — TPR/FDR now separate recall capability from FP contamination across all eval prefixes`
 - `Loss formulation — gt_occluded with alpha=0.9 should avoid both collapse modes`
+- `Metric symmetry — vis/ and occluded/ both apply the same classifier gate, making them directly comparable`
 
 What regressed or stayed flat:
-- `occluded/mAP remains structurally low until a working classifier filters predictions`
+- `occluded/mAP remains structurally low until a working classifier converges`
 
 Likely explanation:
 - `The model already has latent occluded-object representations (vishead acc_occ=0.80 confirms this); the bottleneck is a reliable classifier to surface them`
@@ -103,6 +115,6 @@ Why:
 ## Future Work
 
 - Confirm occluded match rate in training to verify alpha=0.9 and tune if needed
-- Once classifier converges, re-run occluded mAP using only classifier-positive predictions
+- Once classifier converges, set `occ_vis_threshold` to evaluate filtered `vis/` and `occluded/` mAP as primary comparison metrics
 - Consider reporting occluded TPR at fixed threshold as primary occluded metric (bypasses FP problem entirely)
 - Stage 1 counterpart: evaluate whether adding occluded head to Stage 1 improves Stage 2 initialisation

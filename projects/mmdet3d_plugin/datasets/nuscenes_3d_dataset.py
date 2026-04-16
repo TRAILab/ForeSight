@@ -471,6 +471,12 @@ class NuScenes3DDataset(Dataset):
                 det, threshold=self.tracking_threshold if tracking else None
             )
             sample_token = self.data_infos[sample_id]["token"]
+            # Attach visibility scores before the class-range filter so
+            # index correspondence is preserved after lidar_nusc_box_to_global.
+            if not tracking and 'visibility_scores' in det:
+                vis_scores = det['visibility_scores'].numpy()
+                for j, box in enumerate(boxes):
+                    box.vis_score = float(vis_scores[j])
             boxes = lidar_nusc_box_to_global(
                 self.data_infos[sample_id],
                 boxes,
@@ -522,6 +528,8 @@ class NuScenes3DDataset(Dataset):
                             attribute_name=attr,
                         )
                     )
+                    if hasattr(box, 'vis_score'):
+                        nusc_anno['visibility_score'] = box.vis_score
                 else:
                     nusc_anno.update(
                         dict(
@@ -858,10 +866,36 @@ class NuScenes3DDataset(Dataset):
         print_log('\n'+str(table), logger=logger)
         return metrics
 
-    def _evaluate_single_det_occluded(self, result_path, logger=None, result_name='img_bbox'):
-        """Evaluate detection on occluded objects only (num_lidar_pts == 0)."""
+    def _evaluate_single_det_occluded(self, result_path, logger=None, result_name='img_bbox',
+                                       vis_threshold=None):
+        """Evaluate detection on occluded objects only (num_lidar_pts == 0).
+
+        If vis_threshold is set and result_path contains visibility_score fields,
+        only predictions with visibility_score < vis_threshold (i.e. classified as
+        occluded by the model) are passed to the evaluator.  The filtered JSON is
+        written alongside the original as results_nusc_occ_filtered.json.
+        """
+        import json
         from nuscenes import NuScenes
         from .evaluation.det.occluded_det_eval import OccludedDetectionEval
+
+        # Apply classifier filter if threshold provided and scores are present.
+        if vis_threshold is not None:
+            with open(result_path) as f:
+                raw = json.load(f)
+            sample_anns = next(iter(raw['results'].values()), [])
+            if sample_anns and 'visibility_score' in sample_anns[0]:
+                filtered = {'meta': raw['meta'], 'results': {}}
+                for token, anns in raw['results'].items():
+                    filtered['results'][token] = [
+                        a for a in anns if a['visibility_score'] < vis_threshold
+                    ]
+                filtered_path = osp.join(
+                    osp.dirname(result_path), 'results_nusc_occ_filtered.json'
+                )
+                with open(filtered_path, 'w') as f:
+                    json.dump(filtered, f)
+                result_path = filtered_path
 
         output_dir = osp.join(osp.dirname(result_path), 'occluded_det')
         nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
@@ -945,15 +979,40 @@ class NuScenes3DDataset(Dataset):
 
         return {f'occluded/{k}': v for k, v in metrics.items()}
 
-    def _evaluate_single_det_visible(self, result_path, logger=None, result_name='img_bbox'):
+    def _evaluate_single_det_visible(self, result_path, logger=None, result_name='img_bbox',
+                                      vis_threshold=None):
         """Evaluate detection on visible objects, ignoring predictions that match occluded GT.
 
         This gives a fair vis/mAP comparison between a visible-only baseline and
         a model trained to also predict occluded objects: detections of occluded
         objects are not penalised as false positives.
+
+        If vis_threshold is set and result_path contains visibility_score fields,
+        only predictions with visibility_score >= vis_threshold (i.e. classified as
+        visible by the model) are passed to the evaluator.  The filtered JSON is
+        written alongside the original as results_nusc_vis_filtered.json.
         """
+        import json
         from nuscenes import NuScenes
         from .evaluation.det.occluded_det_eval import VisibleDetectionEval
+
+        # Apply classifier filter if threshold provided and scores are present.
+        if vis_threshold is not None:
+            with open(result_path) as f:
+                raw = json.load(f)
+            sample_anns = next(iter(raw['results'].values()), [])
+            if sample_anns and 'visibility_score' in sample_anns[0]:
+                filtered = {'meta': raw['meta'], 'results': {}}
+                for token, anns in raw['results'].items():
+                    filtered['results'][token] = [
+                        a for a in anns if a['visibility_score'] >= vis_threshold
+                    ]
+                filtered_path = osp.join(
+                    osp.dirname(result_path), 'results_nusc_vis_filtered.json'
+                )
+                with open(filtered_path, 'w') as f:
+                    json.dump(filtered, f)
+                result_path = filtered_path
 
         output_dir = osp.join(osp.dirname(result_path), 'visible_det')
         nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
@@ -1260,20 +1319,24 @@ class NuScenes3DDataset(Dataset):
                 if isinstance(detection_result_files, dict):
                     for name in result_names:
                         vis_det_dict = self._evaluate_single_det_visible(
-                            detection_result_files[name], logger=logger, result_name=name)
+                            detection_result_files[name], logger=logger, result_name=name,
+                            vis_threshold=eval_mode.get('occ_vis_threshold'))
                         results_dict.update(vis_det_dict)
                         occ_det_dict = self._evaluate_single_det_occluded(
-                            detection_result_files[name], logger=logger, result_name=name)
+                            detection_result_files[name], logger=logger, result_name=name,
+                            vis_threshold=eval_mode.get('occ_vis_threshold'))
                         results_dict.update(occ_det_dict)
                         all_det_dict = self._evaluate_single_det_all(
                             detection_result_files[name], logger=logger, result_name=name)
                         results_dict.update(all_det_dict)
                 elif isinstance(detection_result_files, str):
                     vis_det_dict = self._evaluate_single_det_visible(
-                        detection_result_files, logger=logger)
+                        detection_result_files, logger=logger,
+                        vis_threshold=eval_mode.get('occ_vis_threshold'))
                     results_dict.update(vis_det_dict)
                     occ_det_dict = self._evaluate_single_det_occluded(
-                        detection_result_files, logger=logger)
+                        detection_result_files, logger=logger,
+                        vis_threshold=eval_mode.get('occ_vis_threshold'))
                     results_dict.update(occ_det_dict)
                     all_det_dict = self._evaluate_single_det_all(
                         detection_result_files, logger=logger)
