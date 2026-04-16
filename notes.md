@@ -31,7 +31,7 @@ rsync -av projects docker ckpt data spapais@narval.alliancecan.ca:/home/spapais/
 sbatch scripts/dgx_run.sh bash ./tools/dist_test.sh projects/configs/sparsedrive_r50_stage1_4gpu.py ckpt/sparsedrive_stage1.pth 4 --deterministic --eval bbox
 
 # Test Stage 2
-./scripts/local_run.sh bash ./tools/dist_test.sh projects/configs/sparsedrive_r50_stage2_1gpu.py ckpt/sparsedrive_stage2.pth 1 --deterministic --eval bbox
+./scripts/local_run.sh bash ./tools/dist_test.sh projects/configs/sparsedrive_r50_stage2_1gpu_bs2.py ckpt/sparsedrive_stage2.pth 1 --deterministic --eval bbox
 ./scripts/apollo_run.sh bash ./tools/dist_test.sh projects/configs/sparsedrive_r50_stage2_8gpu_noflash.py ckpt/sparsedrive_stage2.pth 8 --deterministic --eval bbox
 sbatch scripts/dgx_run.sh bash ./tools/dist_test.sh projects/configs/sparsedrive_r50_stage2_4gpu.py ckpt/sparsedrive_stage2.pth 4 --deterministic --eval bbox
 
@@ -41,7 +41,7 @@ sbatch scripts/dgx_run.sh bash ./tools/dist_test.sh projects/configs/sparsedrive
 sbatch scripts/dgx_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage1_4gpu.py 4 --deterministic
 
 # Train Stage 2
-./scripts/local_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage2_1gpu.py 1 --deterministic
+./scripts/local_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage2_1gpu_bs2.py 1 --deterministic
 ./scripts/apollo_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage2_8gpu_noflash.py 8 --deterministic
 sbatch scripts/dgx_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage2_4gpu.py 4 --deterministic
 sbatch scripts/narval_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage2_4gpu_nomap.py 4 --deterministic
