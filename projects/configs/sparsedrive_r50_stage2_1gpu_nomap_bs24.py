@@ -9,8 +9,8 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 48
-num_gpus = 2
+total_batch_size = 24
+num_gpus = 1
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
 num_epochs = 10
@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_2gpu_nomap',),
+                name='sparsedrive_r50_stage2_2gpu_nomap_bs24',),
             interval=50)
     ],
 )
@@ -685,7 +685,7 @@ data = dict(
 # ================== training ========================
 optimizer = dict(
     type="AdamW",
-    lr=3e-4,
+    lr=1.5e-4,
     weight_decay=0.001,
     paramwise_cfg=dict(
         custom_keys={

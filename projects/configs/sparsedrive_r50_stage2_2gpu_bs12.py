@@ -9,8 +9,8 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 2
-num_gpus = 1
+total_batch_size = 12
+num_gpus = 2
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
 num_epochs = 10
@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_1gpu_nomap_planrefine3_debug',),
+                name='sparsedrive_r50_stage2_2gpu_bs12',),
             interval=50)
     ],
 )
@@ -86,7 +86,7 @@ with_quality_estimation = True
 
 task_config = dict(
     with_det=True,
-    with_map=False,
+    with_map=True,
     with_motion_plan=True,
 )
 
@@ -101,7 +101,7 @@ model = dict(
         frozen_stages=-1,
         norm_eval=False,
         style="pytorch",
-        with_cp=False,  # with_cp + find_unused_parameters=True conflicts (DDP marks grad hooks twice via reentrant backward)
+        with_cp=True,
         out_indices=(0, 1, 2, 3),
         norm_cfg=dict(type="BN", requires_grad=True),
         pretrained="ckpt/resnet50-19c8e357.pth",
@@ -427,8 +427,10 @@ model = dict(
                     "norm",
                     "ffn",                    
                     "norm",
+                ] * 3 +
+                [
                     "refine",
-                ] * 3
+                ]
             ),
             temp_graph_model=dict(
                 type="MultiheadAttention",
@@ -502,7 +504,6 @@ model = dict(
                 ego_fut_mode=ego_fut_mode,
                 use_rescore=True,
             ),
-            planning_cumulative_refinement=True,
             num_det=50,
             num_map=10,
         ),
@@ -686,7 +687,7 @@ data = dict(
 # ================== training ========================
 optimizer = dict(
     type="AdamW",
-    lr=1.5e-4,
+    lr=0.75e-4,
     weight_decay=0.001,
     paramwise_cfg=dict(
         custom_keys={
@@ -711,7 +712,7 @@ runner = dict(
 eval_mode = dict(
     with_det=True,
     with_tracking=True,
-    with_map=False,
+    with_map=True,
     with_motion=True,
     with_planning=True,
     tracking_threshold=0.2,
@@ -723,4 +724,3 @@ evaluation = dict(
 )
 # ================== pretrained model ========================
 load_from = 'ckpt/sparsedrive_stage1.pth'
-find_unused_parameters = True

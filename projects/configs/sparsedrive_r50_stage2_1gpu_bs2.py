@@ -9,8 +9,8 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 48
-num_gpus = 2
+total_batch_size = 2
+num_gpus = 1
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
 num_epochs = 10
@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_2gpu_nomap',),
+                name='sparsedrive_r50_stage2_1gpu_bs2',),
             interval=50)
     ],
 )
@@ -86,7 +86,7 @@ with_quality_estimation = True
 
 task_config = dict(
     with_det=True,
-    with_map=False,
+    with_map=True,
     with_motion_plan=True,
 )
 
@@ -423,6 +423,8 @@ model = dict(
                     "temp_gnn",
                     "gnn",
                     "norm",
+                    "cross_gnn",
+                    "norm",
                     "ffn",                    
                     "norm",
                 ] * 3 +
@@ -653,7 +655,7 @@ data_aug_conf = {
 
 data = dict(
     samples_per_gpu=batch_size,
-    workers_per_gpu=6,
+    workers_per_gpu=4,
     train=dict(
         **data_basic_config,
         ann_file=anno_root + "nuscenes_infos_train.pkl",
@@ -710,7 +712,7 @@ runner = dict(
 eval_mode = dict(
     with_det=True,
     with_tracking=True,
-    with_map=False,
+    with_map=True,
     with_motion=True,
     with_planning=True,
     tracking_threshold=0.2,
