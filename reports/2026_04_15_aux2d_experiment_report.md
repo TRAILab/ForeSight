@@ -3,7 +3,7 @@
 
 ## TODO
 
-- Parse metrics for DGX job 3592 once complete and fill in results table and discussion once metrics are available
+- Parse metrics for DGX job 3594 once complete and fill in results table
 - Move 2D target generation offline; compare against online reprojection
 - Run aux-2D on Stage 2 to see whether the feature regularisation benefit carries through to motion/planning metrics.
 - Add depth prediction branch to `SparseDriveAux2DHead` (log-depth `Conv2d` on reg branch, supervised by existing `depths` targets)
@@ -36,16 +36,20 @@ Key differences from `StreamPETR`:
 
 | Server | Config | Job ID | Status |
 | --- | --- | --- | --- |
-| `dgx` | `sparsedrive_r50_stage1_4gpu_aux2d` | `3592` | `running` |
+| `dgx` | `sparsedrive_r50_stage1_4gpu_aux2d` | `3592` | `cancelled` — map collapse |
+| `dgx` | `sparsedrive_r50_stage1_4gpu_aux2d_lwloss` | `3594` | `running` |
 
-| Config | Server | det mAP | det NDS | Notes |
-|--------|--------|---------|---------|-------|
-| stage1 baseline | — | 0.413 | 0.523 | from `sparsedrive_r50_stage2_4gpu_bs24` baseline |
-| stage1_4gpu_aux2d | DGX | — | — | job 3592 running |
+| Config | Server | det mAP | det NDS | map mAP | Notes |
+|--------|--------|---------|---------|---------|-------|
+| stage1 baseline | — | 0.413 | 0.523 | 0.488 | from `sparsedrive_r50_stage2_4gpu_bs24` baseline |
+| stage1_4gpu_aux2d | DGX | — | — | ~0.018 @ 17k iters | job 3592 cancelled — map collapse |
+| stage1_4gpu_aux2d_lwloss | DGX | — | — | — | job 3594 running |
 
 ## Discussion
 
-*(pending results)*
+**Map collapse in job 3592 (aux2d, original weights).** Map mAP dropped from 0.488 → ~0.018 by ~17k iterations (~1/3 of training). Root cause: aux2d loss weights (cls=2, bbox=5, iou=2, centers2d=10, centerness=1; total ~20) dominate FPN level 0 gradients relative to map losses (~11 total). Both the aux2d head and the map head's deformable attention sample from FPN level 0, creating a gradient conflict. The aux2d supervision steers level 0 features toward 2D object-centric representations, collapsing map head performance. The collapse is abrupt rather than gradual because once the aux2d head begins generating consistent high-magnitude gradients (as it learns to predict 2D boxes), the FP level 0 features are pulled into a regime incompatible with map prediction.
+
+**Fix (job 3594, lwloss config).** Reduced aux2d weights to: cls=1, bbox=1, iou=1, centers2d=2, centerness=1 (total ~6), bringing the aux2d gradient contribution below that of the map losses. The Hungarian assigner costs are left unchanged so matching quality is unaffected.
 
 ## Future Work
 
