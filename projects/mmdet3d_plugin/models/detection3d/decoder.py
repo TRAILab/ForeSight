@@ -27,11 +27,13 @@ class SparseBox3DDecoder(object):
         num_output: int = 300,
         score_threshold: Optional[float] = None,
         sorted: bool = True,
+        invert_visibility: bool = False,
     ):
         super(SparseBox3DDecoder, self).__init__()
         self.num_output = num_output
         self.score_threshold = score_threshold
         self.sorted = sorted
+        self.invert_visibility = invert_visibility
 
     def decode(
         self,
@@ -109,6 +111,8 @@ class SparseBox3DDecoder(object):
                 output[-1]["instance_ids"] = ids
             if visibility is not None:
                 vis_i = visibility[output_idx][i, indices[i] // num_cls, 0].sigmoid()
+                if self.invert_visibility:
+                    vis_i = 1.0 - vis_i
                 if self.score_threshold is not None:
                     vis_i = vis_i[mask[i]]
                 output[-1]["visibility_scores"] = vis_i.cpu()

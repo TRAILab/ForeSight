@@ -92,6 +92,10 @@ class NuScenesSparse4DAdaptor(object):
             input_dict["gt_visibility"] = DC(
                 to_tensor(input_dict["gt_visibility"]).float()
             )
+        if "gt_occluded" in input_dict:
+            input_dict["gt_occluded"] = DC(
+                to_tensor(input_dict["gt_occluded"]).float()
+            )
 
         imgs = [img.transpose(2, 0, 1) for img in input_dict["img"]]
         imgs = np.ascontiguousarray(np.stack(imgs, axis=0))
@@ -161,6 +165,8 @@ class InstanceNameFilter(object):
             input_dict["gt_agent_fut_masks"] = input_dict["gt_agent_fut_masks"][gt_bboxes_mask]
         if "gt_visibility" in input_dict:
             input_dict["gt_visibility"] = input_dict["gt_visibility"][gt_bboxes_mask]
+        if "gt_occluded" in input_dict:
+            input_dict["gt_occluded"] = input_dict["gt_occluded"][gt_bboxes_mask]
         return input_dict
 
     def __repr__(self):
@@ -202,6 +208,8 @@ class CircleObjectRangeFilter(object):
             input_dict["gt_agent_fut_masks"] = input_dict["gt_agent_fut_masks"][mask]
         if "gt_visibility" in input_dict:
             input_dict["gt_visibility"] = input_dict["gt_visibility"][mask]
+        if "gt_occluded" in input_dict:
+            input_dict["gt_occluded"] = input_dict["gt_occluded"][mask]
         return input_dict
 
     def __repr__(self):

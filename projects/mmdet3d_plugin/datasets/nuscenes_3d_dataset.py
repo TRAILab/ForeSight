@@ -393,11 +393,14 @@ class NuScenes3DDataset(Dataset):
         if self.with_visibility:
             gt_visibility = (info["num_lidar_pts"][mask] > 0).astype(np.float32)
 
+        gt_occluded = (info["num_lidar_pts"][mask] == 0).astype(np.float32)
+
         anns_results = dict(
             gt_bboxes_3d=gt_bboxes_3d,
             gt_labels_3d=gt_labels_3d,
             gt_names=gt_names_3d,
             gt_visibility=gt_visibility,
+            gt_occluded=gt_occluded,
         )
         if "instance_inds" in info:
             instance_inds = np.array(info["instance_inds"], dtype=np.int)[mask]
