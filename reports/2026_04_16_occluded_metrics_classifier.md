@@ -2,8 +2,8 @@
 
 ## TODO
 
-- Confirm occluded match rate in training set to validate alpha=0.9 choice
-- Run `sparsedrive_r50_stage2_4gpu_bs24_occhead_occptraineval` and log results here
+- Run `sparsedrive_r50_stage2_4gpu_bs24_occhead_occptraineval` training and log results here
+- Rerun evaluation for `sparsedrive_r50_stage1_8gpu_noflash_occptraineval`
 - Tune alpha / confidence threshold based on results
 
 ## Abstract
@@ -53,8 +53,26 @@ Implementation changes:
 - Added `gt_occluded` passthrough in `InstanceNameFilter` and `CircleObjectRangeFilter` in `transform.py`
 - Added `invert_visibility: bool = False` to `SparseBox3DDecoder` — when `True`, outputs `1 − sigmoid(logit)` so `visibility_scores` stays P(visible) and the accuracy evaluation is unchanged
 - Set `gt_visibility_key='gt_occluded'` in det_head (positive class = occluded = minority)
-- FocalLoss `alpha=0.9, gamma=2.0` — with ~10% occluded match rate this roughly balances contributions: `0.9 × 0.1 ≈ 0.1 × 0.9`
+- FocalLoss `alpha=0.85, gamma=2.0` — measured train-set occluded match rate is 15.3%, so `alpha≈0.85` better matches the positive-class prior than the original `0.9`
 - Train jointly (not isolated) so features adapt to the visibility signal
+
+### Training-set occluded match-rate check
+
+Computed the positive-match prior directly from `data/infos/nuscenes_infos_train.pkl` using the actual Stage 2 training filters: `use_gt_mask=False`, class-name filtering, and the 55 m `CircleObjectRangeFilter`.
+
+Because the visibility loss is applied only on matched positive anchors, and Hungarian assignment matches each GT once in practice (900 predictions per frame, far fewer GT boxes), the relevant class prior is the filtered GT occluded fraction rather than the raw anchor distribution.
+
+Results on train:
+- `811,056` filtered GT boxes total
+- `124,320` occluded (`num_lidar_pts == 0`)
+- `686,736` visible
+- occluded match rate = `15.33%`
+- visible:occluded ratio = `5.52:1`
+
+Sanity check on val:
+- `157,222` filtered GT boxes total
+- `23,321` occluded
+- occluded match rate = `14.83%`
 
 ### Classifier-based prediction filtering
 
@@ -89,15 +107,19 @@ To make `vis/` and `occluded/` metrics symmetric and comparable, both evaluators
 
 _occhead accuracy metrics to be filled after run._
 
+### Training-set prior summary
+
+The measured train-set occluded match rate is `15.33%`, not the assumed ~10%. This implies the balancing point for `gt_occluded` is closer to `alpha ≈ 0.85` than `0.9`, so the config was updated accordingly.
+
 ## Discussion
 
 The PR curve analysis resolves the central diagnostic question: **low `occluded/mAP` is an FP problem, not a recall problem.** The model achieves TPR 0.53–0.87 at 2 m, meaning it does locate occluded objects. However, FDR is ~98–99% — for every TP, there are ~50–100 FPs from visible-object predictions that narrowly miss the ignore threshold. Optimising for mAP would not improve the underlying capability.
 
-The two prior classifier experiments failed at opposite extremes of the same class-imbalance problem. The `vishead` experiment is the more useful reference: it proves the features encode visibility information (acc_occluded=0.80), but the alpha=0.2 loss weighting was too aggressive. The new `occhead` configuration uses 1=occluded as the positive class (enabling standard pos_weight via alpha) and sets alpha=0.9 to approximately balance the ~10:1 visible:occluded ratio.
+The two prior classifier experiments failed at opposite extremes of the same class-imbalance problem. The `vishead` experiment is the more useful reference: it proves the features encode visibility information (acc_occluded=0.80), but the alpha=0.2 loss weighting was too aggressive. The new `occhead` configuration uses 1=occluded as the positive class (enabling standard pos_weight via alpha). A direct train-set count gives a `15.33%` occluded matched-positive prior (`5.52:1` visible:occluded), so `alpha=0.85` is a better-balanced choice than the original `0.9`.
 
 What improved:
 - `Metric clarity — TPR/FDR now separate recall capability from FP contamination across all eval prefixes`
-- `Loss formulation — gt_occluded with alpha=0.9 should avoid both collapse modes`
+- `Loss formulation — gt_occluded with measured-prior alpha=0.85 should avoid both collapse modes`
 - `Metric symmetry — vis/ and occluded/ both apply the same classifier gate, making them directly comparable`
 
 What regressed or stayed flat:
@@ -110,11 +132,10 @@ Recommended model:
 - `sparsedrive_r50_stage2_4gpu_bs24_occhead_occptraineval` (pending results)
 
 Why:
-- `Corrects both failure modes of prior experiments; if alpha=0.9 converges, the classifier enables a meaningful occluded precision signal`
+- `Corrects both failure modes of prior experiments; if alpha=0.85 converges, the classifier enables a meaningful occluded precision signal`
 
 ## Future Work
 
-- Confirm occluded match rate in training to verify alpha=0.9 and tune if needed
 - Once classifier converges, set `occ_vis_threshold` to evaluate filtered `vis/` and `occluded/` mAP as primary comparison metrics
 - Consider reporting occluded TPR at fixed threshold as primary occluded metric (bypasses FP problem entirely)
 - Stage 1 counterpart: evaluate whether adding occluded head to Stage 1 improves Stage 2 initialisation
