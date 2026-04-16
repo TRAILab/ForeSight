@@ -589,6 +589,20 @@ class NuScenes3DDataset(Dataset):
 
             detail["{}/NDS".format(metric_prefix)] = metrics["nd_score"]
             detail["{}/mAP".format(metric_prefix)] = metrics["mean_ap"]
+
+            from .evaluation.det.occluded_det_eval import compute_tpr_fdr
+            tpr_fdr = compute_tpr_fdr(
+                osp.join(output_dir, 'metrics_details.json'),
+                self.CLASSES,
+                self.det3d_eval_configs.dist_ths,
+            )
+            detail[f'{metric_prefix}/mTPR'] = round(tpr_fdr['mean_tpr'], 4)
+            detail[f'{metric_prefix}/mFDR'] = round(tpr_fdr['mean_fdr'], 4)
+            dist_th_tp_str = str(self.det3d_eval_configs.dist_th_tp)
+            for cls, by_th in tpr_fdr['per_class'].items():
+                if dist_th_tp_str in by_th:
+                    detail[f'{metric_prefix}/{cls}_tpr'] = round(by_th[dist_th_tp_str]['tpr'], 4)
+                    detail[f'{metric_prefix}/{cls}_fdr'] = round(by_th[dist_th_tp_str]['fdr'], 4)
         else:
             from nuscenes.eval.tracking.evaluate import TrackingEval
 
@@ -873,6 +887,20 @@ class NuScenes3DDataset(Dataset):
             detail[f'occluded/{self.ErrNameMapping[k]}'] = float('{:.4f}'.format(v))
         detail['occluded/NDS'] = metrics['nd_score']
         detail['occluded/mAP'] = metrics['mean_ap']
+
+        from .evaluation.det.occluded_det_eval import compute_tpr_fdr
+        tpr_fdr = compute_tpr_fdr(
+            osp.join(output_dir, 'metrics_details.json'),
+            self.CLASSES,
+            self.det3d_eval_configs.dist_ths,
+        )
+        detail['occluded/mTPR'] = round(tpr_fdr['mean_tpr'], 4)
+        detail['occluded/mFDR'] = round(tpr_fdr['mean_fdr'], 4)
+        dist_th_tp_str = str(self.det3d_eval_configs.dist_th_tp)
+        for cls, by_th in tpr_fdr['per_class'].items():
+            if dist_th_tp_str in by_th:
+                detail[f'occluded/{cls}_tpr'] = round(by_th[dist_th_tp_str]['tpr'], 4)
+                detail[f'occluded/{cls}_fdr'] = round(by_th[dist_th_tp_str]['fdr'], 4)
         return detail
 
     def _evaluate_single_motion_occluded(self,
@@ -951,6 +979,20 @@ class NuScenes3DDataset(Dataset):
             detail[f'vis/{self.ErrNameMapping[k]}'] = float('{:.4f}'.format(v))
         detail['vis/NDS'] = metrics['nd_score']
         detail['vis/mAP'] = metrics['mean_ap']
+
+        from .evaluation.det.occluded_det_eval import compute_tpr_fdr
+        tpr_fdr = compute_tpr_fdr(
+            osp.join(output_dir, 'metrics_details.json'),
+            self.CLASSES,
+            self.det3d_eval_configs.dist_ths,
+        )
+        detail['vis/mTPR'] = round(tpr_fdr['mean_tpr'], 4)
+        detail['vis/mFDR'] = round(tpr_fdr['mean_fdr'], 4)
+        dist_th_tp_str = str(self.det3d_eval_configs.dist_th_tp)
+        for cls, by_th in tpr_fdr['per_class'].items():
+            if dist_th_tp_str in by_th:
+                detail[f'vis/{cls}_tpr'] = round(by_th[dist_th_tp_str]['tpr'], 4)
+                detail[f'vis/{cls}_fdr'] = round(by_th[dist_th_tp_str]['fdr'], 4)
         return detail
 
     def _evaluate_single_det_all(self, result_path, logger=None, result_name='img_bbox'):
@@ -985,6 +1027,20 @@ class NuScenes3DDataset(Dataset):
             detail[f'all/{self.ErrNameMapping[k]}'] = float('{:.4f}'.format(v))
         detail['all/NDS'] = metrics['nd_score']
         detail['all/mAP'] = metrics['mean_ap']
+
+        from .evaluation.det.occluded_det_eval import compute_tpr_fdr
+        tpr_fdr = compute_tpr_fdr(
+            osp.join(output_dir, 'metrics_details.json'),
+            self.CLASSES,
+            self.det3d_eval_configs.dist_ths,
+        )
+        detail['all/mTPR'] = round(tpr_fdr['mean_tpr'], 4)
+        detail['all/mFDR'] = round(tpr_fdr['mean_fdr'], 4)
+        dist_th_tp_str = str(self.det3d_eval_configs.dist_th_tp)
+        for cls, by_th in tpr_fdr['per_class'].items():
+            if dist_th_tp_str in by_th:
+                detail[f'all/{cls}_tpr'] = round(by_th[dist_th_tp_str]['tpr'], 4)
+                detail[f'all/{cls}_fdr'] = round(by_th[dist_th_tp_str]['fdr'], 4)
         return detail
 
     def _evaluate_single_motion_all(self, results, result_path, logger=None):
@@ -1244,7 +1300,10 @@ class NuScenes3DDataset(Dataset):
             metric_str += f'mAOE: {results_dict.get("img_bbox_NuScenes/mAOE"):.4f}\n' 
             metric_str += f'mAVE: {results_dict.get("img_bbox_NuScenes/mAVE"):.4f}\n' 
             metric_str += f'mAAE: {results_dict.get("img_bbox_NuScenes/mAAE"):.4f}\n' 
-            metric_str += f'NDS: {results_dict.get("img_bbox_NuScenes/NDS"):.4f}\n\n'
+            metric_str += f'NDS: {results_dict.get("img_bbox_NuScenes/NDS"):.4f}\n'
+            if 'img_bbox_NuScenes/mTPR' in results_dict:
+                metric_str += f'mTPR: {results_dict["img_bbox_NuScenes/mTPR"]:.4f}  mFDR: {results_dict["img_bbox_NuScenes/mFDR"]:.4f}\n'
+            metric_str += '\n'
         
         if "img_bbox_NuScenes/amota" in results_dict:
             metric_str += f'AMOTA: {results_dict["img_bbox_NuScenes/amota"]:.4f}\n' 
@@ -1276,7 +1335,10 @@ class NuScenes3DDataset(Dataset):
             metric_str += f'mAOE: {results_dict["occluded/mAOE"]:.4f}\n'
             metric_str += f'mAVE: {results_dict["occluded/mAVE"]:.4f}\n'
             metric_str += f'mAAE: {results_dict["occluded/mAAE"]:.4f}\n'
-            metric_str += f'NDS: {results_dict["occluded/NDS"]:.4f}\n\n'
+            metric_str += f'NDS: {results_dict["occluded/NDS"]:.4f}\n'
+            if 'occluded/mTPR' in results_dict:
+                metric_str += f'mTPR: {results_dict["occluded/mTPR"]:.4f}  mFDR: {results_dict["occluded/mFDR"]:.4f}\n'
+            metric_str += '\n'
 
         if "occluded/car_EPA" in results_dict:
             metric_str += f'[Occluded Motion] Car / Ped\n'
@@ -1293,7 +1355,10 @@ class NuScenes3DDataset(Dataset):
             metric_str += f'mAOE: {results_dict["all/mAOE"]:.4f}\n'
             metric_str += f'mAVE: {results_dict["all/mAVE"]:.4f}\n'
             metric_str += f'mAAE: {results_dict["all/mAAE"]:.4f}\n'
-            metric_str += f'NDS: {results_dict["all/NDS"]:.4f}\n\n'
+            metric_str += f'NDS: {results_dict["all/NDS"]:.4f}\n'
+            if 'all/mTPR' in results_dict:
+                metric_str += f'mTPR: {results_dict["all/mTPR"]:.4f}  mFDR: {results_dict["all/mFDR"]:.4f}\n'
+            metric_str += '\n'
 
         if "all/car_EPA" in results_dict:
             metric_str += f'[All Motion] Car / Ped\n'

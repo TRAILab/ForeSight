@@ -12,6 +12,62 @@ from nuscenes.eval.detection.evaluate import NuScenesEval
 
 
 # ---------------------------------------------------------------------------
+# TPR / FDR helper
+# ---------------------------------------------------------------------------
+
+def compute_tpr_fdr(metrics_details_path, class_names, dist_ths):
+    """Return TPR and FDR at the max-recall operating point.
+
+    TPR = max achievable recall = TP_total / npos
+    FDR = FP / (TP + FP) at that point = 1 - precision at max recall
+
+    Reads from metrics_details.json written by nusc_eval.main().
+
+    Returns
+    -------
+    dict:
+      'mean_tpr'  : float  (mean over classes x dist_ths, like mAP)
+      'mean_fdr'  : float
+      'per_class' : {cls: {dist_th_str: {'tpr': float, 'fdr': float}}}
+    """
+    import json
+    with open(metrics_details_path) as f:
+        details = json.load(f)
+
+    per_class = {}
+    all_tprs, all_fdrs = [], []
+
+    for cls in class_names:
+        per_class[cls] = {}
+        for dist_th in dist_ths:
+            key = f'{cls}:{dist_th}'
+            if key not in details:
+                continue
+            rec  = details[key]['recall']
+            prec = details[key]['precision']
+            conf = details[key]['confidence']
+
+            nz = [i for i, c in enumerate(conf) if c > 0]
+            if not nz:
+                tpr, fdr = 0.0, 1.0
+            else:
+                idx = max(nz, key=lambda i: rec[i])
+                tpr = rec[idx]
+                fdr = 1.0 - prec[idx]
+
+            per_class[cls][str(dist_th)] = {'tpr': tpr, 'fdr': fdr}
+            all_tprs.append(tpr)
+            all_fdrs.append(fdr)
+
+    n = len(all_tprs)
+    return {
+        'mean_tpr':  sum(all_tprs) / n if n else 0.0,
+        'mean_fdr':  sum(all_fdrs) / n if n else 0.0,
+        'per_class': per_class,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Adaptive matching threshold coefficients (UniTraj class mapping)
 # Formula: d = dist_th + alpha*t + beta*v*t + gamma*a*t^2
 # ---------------------------------------------------------------------------
