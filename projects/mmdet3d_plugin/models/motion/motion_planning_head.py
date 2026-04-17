@@ -71,6 +71,7 @@ class MotionPlanningHead(BaseModule):
         motion_deformable_multimode=False,
         motion_deformable_modeproj=False,
         deformable_waypoint=-1,
+        planning_deformable_waypoints=None,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -90,6 +91,7 @@ class MotionPlanningHead(BaseModule):
         self.motion_deformable_multimode = motion_deformable_multimode
         self.motion_deformable_modeproj = motion_deformable_modeproj and motion_deformable_multimode
         self.deformable_waypoint = deformable_waypoint
+        self.planning_deformable_waypoints = planning_deformable_waypoints
 
         # =========== build modules ===========
         def build(cfg, registry):
@@ -262,6 +264,44 @@ class MotionPlanningHead(BaseModule):
         anchor[..., SIN_YAW] = torch.sin(heading_yaw)
         anchor[..., COS_YAW] = torch.cos(heading_yaw)
         return anchor
+
+    def _build_planning_anchor_boxes_multi(self, plan_anchor, ego_anchor, waypoints):
+        """Build 3D anchor boxes at multiple waypoints for each planning mode.
+
+        plan_anchor: (bs, num_mode, ego_fut_ts, 2) cumulative XY in lidar frame.
+        ego_anchor: (bs, 1, 11) ego box.
+        waypoints: list[int] of timestep indices.
+
+        Returns (bs, num_mode, K, 11) where K = len(waypoints).
+        """
+        num_mode = plan_anchor.shape[1]
+        ego_fut_ts = plan_anchor.shape[-2]
+        anchor_base = ego_anchor.expand(-1, num_mode, -1).clone()  # (bs, num_mode, 11)
+
+        boxes = []
+        for w in waypoints:
+            endpoint = plan_anchor[..., w, :]  # (bs, num_mode, 2)
+            if ego_fut_ts > 1:
+                if w == 0:
+                    heading_vec = plan_anchor[..., 1, :] - plan_anchor[..., 0, :]
+                else:
+                    heading_vec = plan_anchor[..., w, :] - plan_anchor[..., w - 1, :]
+            else:
+                heading_vec = endpoint
+
+            anchor = anchor_base.clone()
+            ego_yaw = torch.atan2(anchor[..., SIN_YAW], anchor[..., COS_YAW])
+            heading_yaw = torch.atan2(heading_vec[..., 1], heading_vec[..., 0])
+            static_mask = torch.linalg.norm(heading_vec, dim=-1) < 1e-3
+            heading_yaw = torch.where(static_mask, ego_yaw, heading_yaw)
+
+            anchor[..., X] = endpoint[..., 0]
+            anchor[..., Y] = endpoint[..., 1]
+            anchor[..., SIN_YAW] = torch.sin(heading_yaw)
+            anchor[..., COS_YAW] = torch.cos(heading_yaw)
+            boxes.append(anchor)
+
+        return torch.stack(boxes, dim=2)  # (bs, num_mode, K, 11)
 
     def init_weights(self):
         for i, op in enumerate(self.operation_order):
@@ -546,13 +586,35 @@ class MotionPlanningHead(BaseModule):
                         )  # (bs, 1, embed_dims)
                         instance_feature = torch.cat([agent_feature, ego_new], dim=1)
                     else:
-                        plan_mode_query = self.layers[i](
-                            plan_mode_query,
-                            plan_anchor_box,
-                            plan_anchor_embed,
-                            feature_maps,
-                            metas,
-                        )
+                        if self.planning_deformable_waypoints is not None:
+                            K = len(self.planning_deformable_waypoints)
+                            num_mode = plan_mode_query.shape[1]
+                            boxes_multi = self._build_planning_anchor_boxes_multi(
+                                plan_anchor.detach(), ego_anchor,
+                                self.planning_deformable_waypoints,
+                            )  # (bs, num_mode, K, 11)
+                            boxes_flat = boxes_multi.reshape(bs, num_mode * K, 11)
+                            embed_flat = anchor_encoder(boxes_flat)
+                            query_exp = (
+                                plan_mode_query.unsqueeze(2)
+                                .expand(-1, -1, K, -1)
+                                .reshape(bs, num_mode * K, self.embed_dims)
+                            )
+                            attended = self.layers[i](
+                                query_exp, boxes_flat, embed_flat,
+                                feature_maps, metas,
+                            )  # (bs, num_mode*K, embed_dims)
+                            plan_mode_query = attended.reshape(
+                                bs, num_mode, K, self.embed_dims
+                            ).mean(dim=2)
+                        else:
+                            plan_mode_query = self.layers[i](
+                                plan_mode_query,
+                                plan_anchor_box,
+                                plan_anchor_embed,
+                                feature_maps,
+                                metas,
+                            )
                         instance_feature = torch.cat(
                             [agent_feature, instance_feature[:, num_anchor:]], dim=1
                         )
