@@ -108,9 +108,3 @@ The DGX trained baseline's higher collision rate (0.133% vs. 0.096% for inferenc
 
 **obj_col = 0.670% across all runs**: This measures GT ego trajectory collisions with GT objects — a lower bound reflecting unavoidable dataset collisions, not model error. It is stable across all variants as expected.
 
-## Future Work
-
-- Identify what differs between the paper's training recipe and our DGX bs24 run to explain the 0.133% vs. 0.096% collision gap. Candidates: more stage2 epochs, different loss weights, checkpoint selection.
-- Use the inference-only reproduced numbers (0.096% collision, NDS=0.5255) as the reference ceiling for R50 performance, rather than our trained baselines, when benchmarking improvements.
-- Investigate the car FDE = 1.000 artifact in the trained baseline; this exact value does not appear when using the paper's released checkpoint.
-- Run the Apollo and DGX baselines with `num_dn_groups=5` (DN enabled) to match the best-practice training recipe documented in `2026_02_27_stage1_detection_ablations.md`.
