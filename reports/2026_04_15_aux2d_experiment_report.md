@@ -3,7 +3,7 @@
 
 ## TODO
 
-- Parse metrics for DGX job 3594 once complete and fill in results table
+- Parse metrics for Apollo job `8gpu_noflash_aux2d` once complete and fill in results table
 - Move 2D target generation offline; compare against online reprojection
 - Run aux-2D on Stage 2 to see whether the feature regularisation benefit carries through to motion/planning metrics.
 - Add depth prediction branch to `SparseDriveAux2DHead` (log-depth `Conv2d` on reg branch, supervised by existing `depths` targets)
@@ -36,20 +36,23 @@ Key differences from `StreamPETR`:
 
 | Server | Config | Job ID | Status |
 | --- | --- | --- | --- |
-| `dgx` | `sparsedrive_r50_stage1_4gpu_aux2d` | `3592` | `cancelled` — map collapse |
-| `dgx` | `sparsedrive_r50_stage1_4gpu_aux2d_lwloss` | `3594` | `running` |
+| `dgx` | `sparsedrive_r50_stage1_4gpu_aux2d` | `3592` | `cancelled` — map failure (wrong base config) |
+| `dgx` | `sparsedrive_r50_stage1_4gpu_aux2d_lwloss` | `3594` | `cancelled` — map failure (wrong base config) |
+| `dgx` | `sparsedrive_r50_stage1_4gpu_bs24_aux2d` | `3595` | `cancelled` — superseded by Apollo run |
+| `apollo` | `sparsedrive_r50_stage1_8gpu_noflash_aux2d` | — | `running` |
 
 | Config | Server | det mAP | det NDS | map mAP | Notes |
 |--------|--------|---------|---------|---------|-------|
-| stage1 baseline | — | 0.413 | 0.523 | 0.488 | from `sparsedrive_r50_stage2_4gpu_bs24` baseline |
-| stage1_4gpu_aux2d | DGX | — | — | ~0.018 @ 17k iters | job 3592 cancelled — map collapse |
-| stage1_4gpu_aux2d_lwloss | DGX | — | — | — | job 3594 running |
+| stage1 baseline (`8gpu_noflash`) | — | 0.413 | 0.523 | 0.488 | from `sparsedrive_r50_stage2_4gpu_bs24` baseline |
+| stage1_4gpu_aux2d | DGX | — | — | ~0.018 | cancelled — same map failure as BS=16/GPU baseline |
+| stage1_4gpu_aux2d_lwloss | DGX | — | — | ~0.017 | cancelled — same map failure as BS=16/GPU baseline |
+| stage1_8gpu_noflash_aux2d | Apollo | — | — | — | running — original loss weights |
 
 ## Discussion
 
-**Map collapse in job 3592 (aux2d, original weights).** Map mAP dropped from 0.488 → ~0.018 by ~17k iterations (~1/3 of training). Root cause: aux2d loss weights (cls=2, bbox=5, iou=2, centers2d=10, centerness=1; total ~20) dominate FPN level 0 gradients relative to map losses (~11 total). Both the aux2d head and the map head's deformable attention sample from FPN level 0, creating a gradient conflict. The aux2d supervision steers level 0 features toward 2D object-centric representations, collapsing map head performance. The collapse is abrupt rather than gradual because once the aux2d head begins generating consistent high-magnitude gradients (as it learns to predict 2D boxes), the FP level 0 features are pulled into a regime incompatible with map prediction.
+**Jobs 3592 and 3594 — wrong base config.** Both runs used `stage1_4gpu` (total_bs=64, **16/GPU**) as the base, which has a known map head failure at BS>6/GPU (see `2026_04_01_map_head_batchsize_failure.md`). The baseline `stage1_4gpu` itself only achieves `mAP_normal=0.019` at end of training for the same reason — making the ~0.018 val results in jobs 3592/3594 indistinguishable from the baseline and not indicative of aux2d-specific map collapse. The diagnosis of a gradient conflict was premature.
 
-**Fix (job 3594, lwloss config).** Reduced aux2d weights to: cls=1, bbox=1, iou=1, centers2d=2, centerness=1 (total ~6), bringing the aux2d gradient contribution below that of the map losses. The Hungarian assigner costs are left unchanged so matching quality is unaffected.
+**Current run (`8gpu_noflash_aux2d`, Apollo).** Based on `stage1_8gpu_noflash` (total_bs=64, **8/GPU**), which is the correct baseline that achieves `mAP_normal≈0.41` at iter 8780. Uses original aux2d loss weights (cls=2, bbox=5, iou=2, centers2d=10, centerness=1). If map collapse is observed, reduce weights or investigate gradient conflict.
 
 ## Future Work
 
