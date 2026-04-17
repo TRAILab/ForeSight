@@ -45,6 +45,12 @@ This is applied at each decoder stage, attending at the endpoint produced by the
 
 `planning_deformable_instfeat` substitutes the ego vehicle's instance feature (retrieved from the detection head's temporal instance bank) as the query for the planning DAF lookup, replacing the plan mode query. The ego instance feature carries motion state from the temporal tracking stream and encodes recent observed dynamics, which may provide complementary context to the trajectory-derived anchor. The attended output is added residually to the plan mode query as before.
 
+### Multi-waypoint planning deformable attention
+
+`planning_deformable_waypoints` extends the planning endpoint DAF to attend at multiple trajectory waypoints per mode rather than a single far-horizon endpoint. Given `ego_fut_ts=6` (0.5s per step, 3s horizon), the config `planpredtrajdeformmm_planinstfeat_laststage_planwp` uses waypoints `[1, 3, 5]` (1s, 2s, 3s).
+
+For each decoder stage the K anchor boxes are built by `_build_planning_anchor_boxes_multi`, which applies `_build_planning_anchor_boxes` logic independently at each waypoint index. The mode queries are expanded to `(bs, num_mode × K, 256)`, a single DAF pass is run over all `num_mode × K` queries simultaneously, and the outputs are reshaped to `(bs, num_mode, K, 256)` and mean-aggregated over the waypoint dimension before the residual is applied. The instfeat final stage is unaffected — it still uses the single far-horizon anchor box.
+
 ### Last-stage ego instance feature injection
 
 `planning_deformable_instfeat_laststage` restricts the ego instance feature DAF to the final decoder stage only; earlier stages use the standard plan mode query path. A `_deformable_stage_idx` counter in `MotionPlanningHead.forward()` selects the query source per stage. This variant was motivated by the observation that injecting the ego feature across all stages suppresses obstacle-aware attention before the model has established a stable trajectory estimate; applying it only at the last stage preserves collision avoidance while retaining most of the trajectory accuracy benefit.
@@ -91,6 +97,8 @@ All completed runs. Failed and cancelled runs are excluded.
 | 14 | nomap_planpredtrajdeformmm_planinstfeat | DGX | 0.417 | 0.530 | 0.378 | 1008 | — | 0.492 | 0.646 | 0.510 | 0.084% |
 | 15 | planpredtrajdeformmm_planinstfeat_laststage | DGX | 0.414 | 0.523 | 0.375 | 928 | 0.556 | 0.495 | 0.635 | 0.519 | 0.038% |
 | 15 | planpredtrajdeformmm_planinstfeat_laststage | Narval | 0.415 | 0.525 | 0.376 | 1390 | 0.557 | 0.491 | 0.630 | 0.524 | 0.055% |
+| 16 | planpredtrajdeformmm_planinstfeat_laststage_planwp | DGX | — | — | — | — | — | — | — | — | — |
+| 16 | planpredtrajdeformmm_planinstfeat_laststage_planwp | Narval | — | — | — | — | — | — | — | — | — |
 
 Averaged results across servers (DGX + Narval where both available); single-run configs are reported as-is.
 
@@ -115,6 +123,7 @@ Averaged results across servers (DGX + Narval where both available); single-run 
 | planpredtrajdeformmm_planinstfeat | 2 | 0.526 | 0.104% | 0.647 | 0.524 | 0.413 | 0.554 |
 | nomap_planpredtrajdeformmm_planinstfeat | 1 | 0.510 | 0.084% | 0.646 | 0.530 | 0.417 | — |
 | **planpredtrajdeformmm_planinstfeat_laststage** | **2** | **0.522** | **0.047%** | **0.633** | **0.524** | **0.415** | **0.557** |
+| planpredtrajdeformmm_planinstfeat_laststage_planwp | — | — | — | — | — | — | — |
 
 ## Discussion
 
@@ -165,7 +174,7 @@ The DGX laststage result (CR=0.038%) was notably stronger than Narval (CR=0.055%
 
 - **Last-stage ego feature for motion.** Apply the same laststage-only injection pattern to `motion_deformable`, substituting the agent's instance feature at the final stage. Given the large car_ade improvements already seen from motion endpoint attention, adding temporal tracking context at the last stage could further improve both motion prediction and downstream planning.
 
-- **Planning attention at multiple future waypoints.** The current endpoint DAF attends at a single far-horizon waypoint. Attending at a sparse set of waypoints along the trajectory (e.g., 1s, 2s, 3s endpoints) could provide richer path-level context while remaining computationally tractable.
+- ~~**Planning attention at multiple future waypoints.**~~ Implemented as `planpredtrajdeformmm_planinstfeat_laststage_planwp` (waypoints `[1, 3, 5]`). Running on DGX (job 3598) and Narval (job 59519647).
 
 - **Extended stage-2 fine-tuning on planning loss.** The best model trains with the full stage-2 objective. A short additional fine-tuning phase with upweighted planning loss (L2 + CR) may further sharpen trajectory accuracy without requiring new components or architectural changes.
 
