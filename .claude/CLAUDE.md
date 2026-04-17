@@ -52,7 +52,35 @@ ForeSight is an autonomous driving research project built on [SparseDrive](https
 | **vpn** | nmcli `utias-robotics` (persistent) | openconnect UW (persistent) | none |
 
 ### VPN
-Both VPNs are kept always-on — never disconnect them. Use `/connect-server` to bring one up if it's down. Apollo VPN requires interactive login — tell the user to run it manually, never automate it.
+Both VPNs are kept always-on. Never disconnect them.
+
+## Remote Access Policy
+
+Before any remote command, verify SSH reachability to the target host.
+
+- DGX:
+  - Host: `trail_dgx`
+  - Repo: `/raid/home/spapais/ForeSight`
+  - VPN: `utias-robotics` via `nmcli`
+  - Check VPN with `nmcli con show --active | grep -q utias-robotics`
+  - If the VPN is down, bring it up with `sudo nmcli con up id utias-robotics`
+- Apollo:
+  - Host: `apollo`
+  - Repo: `/home/spapais/ForeSight`
+  - VPN: UW `openconnect`
+  - Never automate Apollo VPN login. If SSH is unreachable, tell the user to run `sudo openconnect -v vpn.uwaterloo.ca -u s2papais` manually, then retry.
+- Narval:
+  - Host: `narval`
+  - Repo: `/home/spapais/ForeSight`
+  - No VPN required
+
+SSH checks:
+
+```bash
+ssh trail_dgx "echo ok"
+ssh -o ConnectTimeout=5 apollo "echo ok"
+ssh -o ConnectTimeout=10 narval "echo ok"
+```
 
 ### Code management (git)
 
@@ -61,5 +89,4 @@ Work locally on the code with git to manage code changes. Always ask for confirm
 ```bash
 git push && ssh <host> "cd <remote_repo> && git pull"
 ```
-
 
