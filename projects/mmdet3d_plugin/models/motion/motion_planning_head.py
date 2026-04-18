@@ -625,18 +625,24 @@ class MotionPlanningHead(BaseModule):
             if self.layers[i] is None:
                 continue
             elif op == "temp_gnn":
-                instance_feature = self.graph_model(
+                # DN tokens have no temporal history — run only normal tokens
+                # through temp_gnn to avoid key/batch-size mismatch in MHA.
+                num_normal = num_anchor + 1
+                normal_feat = self.graph_model(
                     i,
-                    instance_feature.flatten(0, 1).unsqueeze(1),
+                    instance_feature[:, :num_normal].flatten(0, 1).unsqueeze(1),
                     temp_instance_feature,
                     temp_instance_feature,
-                    query_pos=anchor_embed.flatten(0, 1).unsqueeze(1),
+                    query_pos=anchor_embed[:, :num_normal].flatten(0, 1).unsqueeze(1),
                     key_pos=temp_anchor_embed,
                     key_padding_mask=temp_mask,
-                )
-                instance_feature = instance_feature.reshape(
-                    bs, num_anchor + 1 + num_dn_agents + num_dn_ego, dim
-                )
+                ).reshape(bs, num_normal, dim)
+                if num_dn_agents + num_dn_ego > 0:
+                    instance_feature = torch.cat(
+                        [normal_feat, instance_feature[:, num_normal:]], dim=1
+                    )
+                else:
+                    instance_feature = normal_feat
             elif op == "gnn":
                 instance_feature = self.graph_model(
                     i,
