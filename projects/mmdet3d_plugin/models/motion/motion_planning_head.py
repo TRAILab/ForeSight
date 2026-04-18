@@ -72,6 +72,12 @@ class MotionPlanningHead(BaseModule):
         motion_deformable_modeproj=False,
         deformable_waypoint=-1,
         planning_deformable_waypoints=None,
+        num_dn_pred_groups=0,
+        dn_pred_noise_scale=0.5,
+        dn_pred_loss_weight=1.0,
+        num_dn_plan_groups=0,
+        dn_plan_noise_scale=0.5,
+        dn_plan_loss_weight=1.0,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -167,6 +173,17 @@ class MotionPlanningHead(BaseModule):
 
         self.num_det = num_det
         self.num_map = num_map
+
+        self.num_dn_pred_groups = num_dn_pred_groups
+        self.dn_pred_noise_scale = dn_pred_noise_scale
+        self.dn_pred_loss_weight = dn_pred_loss_weight
+        self.num_dn_plan_groups = num_dn_plan_groups
+        self.dn_plan_noise_scale = dn_plan_noise_scale
+        self.dn_plan_loss_weight = dn_plan_loss_weight
+
+        # Index of the refine layer (last refine op) — used for DN forward.
+        refine_indices = [i for i, op in enumerate(operation_order) if op == 'refine']
+        self._dn_refine_idx = refine_indices[-1] if refine_indices else None
 
     def _build_motion_endpoint_anchors(self, motion_anchor_upd, det_anchors, motion_cls):
         """Build 3D box anchors at the best-mode predicted endpoint for each agent.
@@ -303,6 +320,117 @@ class MotionPlanningHead(BaseModule):
 
         return torch.stack(boxes, dim=2)  # (bs, num_mode, K, 11)
 
+    def _build_dn_pred_queries(self, metas):
+        """Build DN agent tokens for full-decoder prediction denoising.
+
+        Returns (dn_agent_feat, dn_agent_anchor_embed, dn_motion_mode_query,
+                 dn_reg_target, dn_valid) or None.
+        - dn_agent_feat: (bs, num_dn_agents, embed_dims)  zero-init
+        - dn_agent_anchor_embed: (bs, num_dn_agents, embed_dims)  zero (no positional bias)
+        - dn_motion_mode_query: (bs, num_dn_agents, 1, embed_dims)  from noisy GT endpoint
+        - dn_reg_target: (bs, num_dn_agents, fut_ts, 2)
+        - dn_valid: (bs, num_dn_agents) bool
+        """
+        gt_trajs = metas.get('gt_agent_fut_trajs')
+        if gt_trajs is None:
+            return None
+
+        bs = len(gt_trajs)
+        max_gt = max((len(x) for x in gt_trajs), default=0)
+        if max_gt == 0:
+            return None
+
+        device, dtype = None, None
+        for t in gt_trajs:
+            if len(t) > 0:
+                device, dtype = t.device, t.dtype
+                break
+        if device is None:
+            return None
+
+        # Pad GT trajectories: (bs, max_gt, fut_ts, 2)
+        gt_traj_padded = torch.stack([
+            torch.cat([x, x.new_zeros(max_gt - len(x), self.fut_ts, 2)], dim=0)
+            if len(x) < max_gt else x[:max_gt]
+            for x in gt_trajs
+        ])
+        valid = torch.stack([
+            torch.cat([x.new_ones(min(len(x), max_gt)),
+                       x.new_zeros(max(0, max_gt - len(x)))])
+            for x in gt_trajs
+        ]).bool()  # (bs, max_gt)
+
+        # Add noise: (num_dn, bs, max_gt, fut_ts, 2)
+        noise = (
+            torch.rand(self.num_dn_pred_groups, bs, max_gt, self.fut_ts, 2,
+                       device=device, dtype=dtype) * 2 - 1
+        ) * self.dn_pred_noise_scale
+        dn_traj = (gt_traj_padded.unsqueeze(0) + noise
+                   ).permute(1, 0, 2, 3, 4).flatten(1, 2)  # (bs, num_dn*max_gt, fut_ts, 2)
+
+        # Mode query from noisy cumulative endpoint: (bs, num_dn*max_gt, 1, embed_dims)
+        dn_endpoint = dn_traj.cumsum(dim=-2)[..., -1, :]
+        dn_motion_mode_query = self.motion_anchor_encoder(
+            gen_sineembed_for_position(dn_endpoint)
+        ).unsqueeze(2)
+
+        num_dn_agents = self.num_dn_pred_groups * max_gt
+        dn_agent_feat = torch.zeros(bs, num_dn_agents, self.embed_dims, device=device, dtype=dtype)
+        dn_agent_anchor_embed = torch.zeros(bs, num_dn_agents, self.embed_dims, device=device, dtype=dtype)
+
+        dn_valid = valid.unsqueeze(1).expand(-1, self.num_dn_pred_groups, -1).flatten(1)
+        dn_reg_target = (gt_traj_padded.unsqueeze(1)
+                         .expand(-1, self.num_dn_pred_groups, -1, -1, -1)
+                         .flatten(1, 2))
+
+        return dn_agent_feat, dn_agent_anchor_embed, dn_motion_mode_query, dn_reg_target, dn_valid
+
+    def _build_dn_plan_queries(self, metas, ego_anchor_embed):
+        """Build DN ego tokens for full-decoder planning denoising.
+
+        Returns (dn_ego_feat, dn_ego_anchor_embed, dn_plan_mode_query,
+                 dn_reg_target, dn_valid) or None.
+        - dn_ego_feat: (bs, num_dn_ego, embed_dims)  zero-init
+        - dn_ego_anchor_embed: (bs, num_dn_ego, embed_dims)  tiled from ego_anchor_embed
+        - dn_plan_mode_query: (bs, num_dn_ego, 1, embed_dims)  from noisy GT ego endpoint
+        - dn_reg_target: (bs, num_dn_ego, ego_fut_ts, 2)
+        - dn_valid: (bs, num_dn_ego) bool
+        """
+        gt_ego_traj = metas.get('gt_ego_fut_trajs')  # (bs, ego_fut_ts, 2)
+        if gt_ego_traj is None:
+            return None
+
+        bs = gt_ego_traj.shape[0]
+        device, dtype = gt_ego_traj.device, gt_ego_traj.dtype
+
+        noise = (
+            torch.rand(bs, self.num_dn_plan_groups, self.ego_fut_ts, 2,
+                       device=device, dtype=dtype) * 2 - 1
+        ) * self.dn_plan_noise_scale
+        dn_traj = gt_ego_traj.unsqueeze(1).expand(-1, self.num_dn_plan_groups, -1, -1) + noise
+
+        # Mode query from noisy cumulative endpoint: (bs, num_dn_ego, 1, embed_dims)
+        dn_endpoint = dn_traj.cumsum(dim=-2)[..., -1, :]
+        dn_plan_mode_query = self.plan_anchor_encoder(
+            gen_sineembed_for_position(dn_endpoint)
+        ).unsqueeze(2)
+
+        dn_ego_feat = torch.zeros(bs, self.num_dn_plan_groups, self.embed_dims, device=device, dtype=dtype)
+        # Tile ego anchor embed so DN ego tokens share the ego positional embedding
+        dn_ego_anchor_embed = ego_anchor_embed.expand(-1, self.num_dn_plan_groups, -1).reshape(
+            bs, self.num_dn_plan_groups, self.embed_dims
+        )
+
+        gt_ego_mask = metas.get('gt_ego_fut_masks')
+        if gt_ego_mask is not None:
+            dn_valid = gt_ego_mask.any(dim=-1, keepdim=True).expand(-1, self.num_dn_plan_groups)
+        else:
+            dn_valid = torch.ones(bs, self.num_dn_plan_groups, dtype=torch.bool, device=device)
+
+        dn_reg_target = gt_ego_traj.unsqueeze(1).expand(-1, self.num_dn_plan_groups, -1, -1)
+
+        return dn_ego_feat, dn_ego_anchor_embed, dn_plan_mode_query, dn_reg_target, dn_valid
+
     def init_weights(self):
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
@@ -437,6 +565,37 @@ class MotionPlanningHead(BaseModule):
         instance_feature = torch.cat([instance_feature, ego_feature], dim=1)
         anchor_embed = torch.cat([anchor_embed, ego_anchor_embed], dim=1)
 
+        # =========== DN token init (training only) ===========
+        # Layout: [0:num_anchor] agents | [num_anchor:num_anchor+1] ego
+        #         | [num_anchor+1:num_anchor+1+num_dn_agents] DN agents
+        #         | [num_anchor+1+num_dn_agents:] DN egos
+        num_dn_agents = 0
+        num_dn_ego = 0
+        dn_motion_mode_query = None
+        dn_plan_mode_query_var = None
+        dn_reg_target_pred = None
+        dn_valid_pred = None
+        dn_reg_target_plan = None
+        dn_valid_plan = None
+
+        if self.training:
+            if self.num_dn_pred_groups > 0:
+                dn_pred_data = self._build_dn_pred_queries(metas)
+                if dn_pred_data is not None:
+                    (dn_agent_feat, dn_agent_anchor_embed,
+                     dn_motion_mode_query, dn_reg_target_pred, dn_valid_pred) = dn_pred_data
+                    num_dn_agents = dn_agent_feat.shape[1]
+                    instance_feature = torch.cat([instance_feature, dn_agent_feat], dim=1)
+                    anchor_embed = torch.cat([anchor_embed, dn_agent_anchor_embed], dim=1)
+            if self.num_dn_plan_groups > 0:
+                dn_plan_data = self._build_dn_plan_queries(metas, ego_anchor_embed)
+                if dn_plan_data is not None:
+                    (dn_ego_feat, dn_ego_anchor_embed,
+                     dn_plan_mode_query_var, dn_reg_target_plan, dn_valid_plan) = dn_plan_data
+                    num_dn_ego = dn_ego_feat.shape[1]
+                    instance_feature = torch.cat([instance_feature, dn_ego_feat], dim=1)
+                    anchor_embed = torch.cat([anchor_embed, dn_ego_anchor_embed], dim=1)
+
         # =================== forward the layers ====================
         motion_classification = []
         motion_prediction = []
@@ -475,7 +634,9 @@ class MotionPlanningHead(BaseModule):
                     key_pos=temp_anchor_embed,
                     key_padding_mask=temp_mask,
                 )
-                instance_feature = instance_feature.reshape(bs, num_anchor + 1, dim)
+                instance_feature = instance_feature.reshape(
+                    bs, num_anchor + 1 + num_dn_agents + num_dn_ego, dim
+                )
             elif op == "gnn":
                 instance_feature = self.graph_model(
                     i,
@@ -561,7 +722,8 @@ class MotionPlanningHead(BaseModule):
                         # feature to all planning modes, attend at each mode's
                         # endpoint box, then aggregate back by mode confidence.
                         num_plan_modes = plan_anchor_box.shape[1]
-                        ego_feat_exp = instance_feature[:, num_anchor:].expand(
+                        # Use only the ego token (not DN tokens) as the DAF query.
+                        ego_feat_exp = instance_feature[:, num_anchor:num_anchor+1].expand(
                             -1, num_plan_modes, -1
                         )  # (bs, num_plan_modes, embed_dims)
                         attended_plan = self.layers[i](
@@ -584,7 +746,10 @@ class MotionPlanningHead(BaseModule):
                         ego_new = (attended_plan * plan_weights.unsqueeze(-1)).sum(
                             dim=1, keepdim=True
                         )  # (bs, 1, embed_dims)
-                        instance_feature = torch.cat([agent_feature, ego_new], dim=1)
+                        # Preserve DN tokens after the updated ego.
+                        instance_feature = torch.cat(
+                            [agent_feature, ego_new, instance_feature[:, num_anchor+1:]], dim=1
+                        )
                     else:
                         if self.planning_deformable_waypoints is not None:
                             K = len(self.planning_deformable_waypoints)
@@ -624,7 +789,8 @@ class MotionPlanningHead(BaseModule):
                     )
             elif op == "refine":
                 motion_query = motion_mode_query + (instance_feature + anchor_embed)[:, :num_anchor].unsqueeze(2)
-                plan_query = plan_mode_query.unsqueeze(1) + (instance_feature + anchor_embed)[:, num_anchor:].unsqueeze(2)
+                # Use only the ego token (index num_anchor), not DN tokens that follow it.
+                plan_query = plan_mode_query.unsqueeze(1) + (instance_feature + anchor_embed)[:, num_anchor:num_anchor+1].unsqueeze(2)
                 (
                     motion_cls,
                     motion_reg,
@@ -634,8 +800,8 @@ class MotionPlanningHead(BaseModule):
                 ) = self.layers[i](
                     motion_query,
                     plan_query,
-                    instance_feature[:, num_anchor:],
-                    anchor_embed[:, num_anchor:],
+                    instance_feature[:, num_anchor:num_anchor+1],
+                    anchor_embed[:, num_anchor:num_anchor+1],
                 )
                 if self.motion_cumulative_refinement and motion_prediction:
                     motion_reg = motion_reg + motion_prediction[-1].detach()
@@ -669,7 +835,8 @@ class MotionPlanningHead(BaseModule):
                 )
         
         self.instance_queue.cache_motion(instance_feature[:, :num_anchor], det_output, metas)
-        self.instance_queue.cache_planning(instance_feature[:, num_anchor:], plan_status)
+        # Cache only the real ego token, not DN ego tokens.
+        self.instance_queue.cache_planning(instance_feature[:, num_anchor:num_anchor+1], plan_status)
 
         motion_output = {
             "classification": motion_classification,
@@ -684,6 +851,37 @@ class MotionPlanningHead(BaseModule):
             "period": self.instance_queue.ego_period,
             "anchor_queue": self.instance_queue.ego_anchor_queue,
         }
+
+        if self.training:
+            refine_module = self.layers[self._dn_refine_idx]
+            if num_dn_agents > 0 and dn_reg_target_pred is not None:
+                dn_a_start = num_anchor + 1
+                dn_a_end = num_anchor + 1 + num_dn_agents
+                dn_inst = instance_feature[:, dn_a_start:dn_a_end]
+                dn_inst_embed = anchor_embed[:, dn_a_start:dn_a_end]
+                # dn_motion_mode_query: (bs, num_dn_agents, 1, embed_dims)
+                dn_mq = dn_motion_mode_query + (dn_inst + dn_inst_embed).unsqueeze(2)
+                dn_motion_reg = refine_module.motion_reg_branch(dn_mq).reshape(
+                    bs, num_dn_agents, self.fut_ts, 2
+                )
+                motion_output['dn_motion_reg'] = dn_motion_reg
+                motion_output['dn_motion_reg_target'] = dn_reg_target_pred
+                motion_output['dn_motion_valid'] = dn_valid_pred
+
+            if num_dn_ego > 0 and dn_reg_target_plan is not None:
+                dn_e_start = num_anchor + 1 + num_dn_agents
+                dn_e_end = num_anchor + 1 + num_dn_agents + num_dn_ego
+                dn_ego_inst = instance_feature[:, dn_e_start:dn_e_end]
+                dn_ego_embed = anchor_embed[:, dn_e_start:dn_e_end]
+                # dn_plan_mode_query_var: (bs, num_dn_ego, 1, embed_dims)
+                dn_pq = dn_plan_mode_query_var + (dn_ego_inst + dn_ego_embed).unsqueeze(2)
+                dn_plan_reg = refine_module.plan_reg_branch(dn_pq).reshape(
+                    bs, num_dn_ego, self.ego_fut_ts, 2
+                )
+                planning_output['dn_plan_reg'] = dn_plan_reg
+                planning_output['dn_plan_reg_target'] = dn_reg_target_plan
+                planning_output['dn_plan_valid'] = dn_valid_plan
+
         return motion_output, planning_output
     
     def loss(self,
@@ -744,6 +942,19 @@ class MotionPlanningHead(BaseModule):
                 }
             )
 
+        if 'dn_motion_reg' in model_outs:
+            dn_reg = model_outs['dn_motion_reg']          # (bs, N, fut_ts, 2)
+            dn_target = model_outs['dn_motion_reg_target'] # (bs, N, fut_ts, 2)
+            dn_valid = model_outs['dn_motion_valid']        # (bs, N) bool
+            dn_valid_flat = dn_valid.flatten()
+            dn_reg_flat = dn_reg.flatten(0, 1)[dn_valid_flat].cumsum(dim=-2)
+            dn_tgt_flat = dn_target.flatten(0, 1)[dn_valid_flat].cumsum(dim=-2)
+            dn_num_pos = max(reduce_mean(dn_valid.sum().to(dn_reg.dtype)), 1.0)
+            output['motion_loss_dn_reg'] = (
+                self.motion_loss_reg(dn_reg_flat, dn_tgt_flat, avg_factor=dn_num_pos)
+                * self.dn_pred_loss_weight
+            )
+
         return output
 
     @force_fp32(apply_to=("model_outs"))
@@ -790,6 +1001,19 @@ class MotionPlanningHead(BaseModule):
                     f"planning_loss_reg_{decoder_idx}": reg_loss,
                     f"planning_loss_status_{decoder_idx}": status_loss,
                 }
+            )
+
+        if 'dn_plan_reg' in model_outs:
+            dn_reg = model_outs['dn_plan_reg']          # (bs, num_dn, ego_fut_ts, 2)
+            dn_target = model_outs['dn_plan_reg_target'] # (bs, num_dn, ego_fut_ts, 2)
+            dn_valid = model_outs['dn_plan_valid']        # (bs, num_dn) bool
+            dn_valid_flat = dn_valid.flatten()
+            dn_reg_flat = dn_reg.flatten(0, 1)[dn_valid_flat].cumsum(dim=-2)
+            dn_tgt_flat = dn_target.flatten(0, 1)[dn_valid_flat].cumsum(dim=-2)
+            dn_num_pos = max(reduce_mean(dn_valid.sum().to(dn_reg.dtype)), 1.0)
+            output['planning_loss_dn_reg'] = (
+                self.plan_loss_reg(dn_reg_flat, dn_tgt_flat, avg_factor=dn_num_pos)
+                * self.dn_plan_loss_weight
             )
 
         return output
