@@ -1,65 +1,71 @@
-# ForeSight — Claude Context
+# ForeSight
 
-ForeSight is an autonomous driving research project built on [SparseDrive](https://github.com/swc-17/SparseDrive). Training and evaluation run on nuScenes.
+Autonomous driving research codebase built on SparseDrive. Training and evaluation run on nuScenes.
 
-## Model Architecture
+## Verify Work
+- Prefer the smallest check that verifies the change.
+- For config edits, re-read the final config and confirm only the intended lines changed.
+- For training or evaluation changes, prefer a targeted command or log-based verification over broad reruns.
+- Report what was verified and what was not.
 
-- **Pipeline:** ResNet-50 → FPN → SparseDriveHead
-- **SparseDriveHead** has three sub-heads: detection (`Sparse4DHead`), map, and motion/planning (`MotionPlanningHead`)
-- **Two training stages:** Stage 1 (detection + map), Stage 2 (full model including motion/planning)
-- **Configs** are Python files exec()'d by mmdet3d — appending lines at the end overrides earlier values
+## Commands
+- Local train: `./scripts/local_run.sh bash ./tools/dist_train.sh <config> <num_gpus> --deterministic`
+- Local eval: `./scripts/local_run.sh bash ./tools/dist_test.sh <config> <ckpt> <num_gpus> --deterministic --eval bbox`
+- DGX: `sbatch scripts/dgx_run.sh <cmd>`
+- Apollo: `./scripts/apollo_run.sh <cmd>`
+- Narval: `sbatch scripts/narval_run.sh <cmd>`
+- Build custom ops after a fresh clone: `cd projects/mmdet3d_plugin/ops && python setup.py develop`
 
-### Internal data formats
-- `det_output`: `{instance_feature(bs,N,256), anchor_embed(bs,N,256), classification[list], prediction[list,11-dim], quality[list], instance_id(bs,N)}`
-- 11-dim anchor: `[X, Y, Z, log_W, log_L, log_H, SIN_YAW, COS_YAW, VX, VY, VZ]`
-- GT boxes from nuScenes: 9-dim decoded `[x, y, z, w, l, h, yaw, vx, vy]`
+## Config Rules
+- Configs live in `projects/configs/`.
+- Edit existing configs in place. Do not append override blocks at the end when modifying an existing config.
+- When creating a new config, copy the baseline config first and then modify it in place.
+- Active research configs usually follow `sparsedrive_r50_stage2_4gpu_bs24_<variant>.py`.
+- Standard stage 2 initialization uses `ckpt/sparsedrive_stage1.pth`.
 
-## Key Source Files
+## Metrics
+- Primary planning metrics: `L2` and `obj_box_col` lower is better.
+- Secondary metrics commonly discussed: `car_ade`, `ped_ade`, `car_epa`, `ped_epa`, `NDS`, `mAP`, `mAP_normal`.
 
-| File | Purpose |
-|------|---------|
-| `projects/mmdet3d_plugin/models/sparsedrive_head.py` | Main head dispatcher |
-| `projects/mmdet3d_plugin/models/detection3d/detection3d_head.py` | Sparse4DHead |
-| `projects/mmdet3d_plugin/models/motion/motion_planning_head.py` | MotionPlanningHead |
-| `projects/mmdet3d_plugin/models/motion/instance_queue.py` | Temporal tracking queue |
-| `projects/mmdet3d_plugin/models/instance_bank.py` | Instance feature bank |
-| `projects/mmdet3d_plugin/datasets/nuscenes_3d_dataset.py` | Dataset + evaluation |
+## Key Files
+- `projects/mmdet3d_plugin/models/sparsedrive_head.py`: main head dispatcher
+- `projects/mmdet3d_plugin/models/detection3d/detection3d_head.py`: detection head
+- `projects/mmdet3d_plugin/models/motion/motion_planning_head.py`: motion and planning head
+- `projects/mmdet3d_plugin/models/motion/instance_queue.py`: temporal queue
+- `projects/mmdet3d_plugin/models/instance_bank.py`: instance feature bank
+- `projects/mmdet3d_plugin/datasets/nuscenes_3d_dataset.py`: dataset and evaluation
+- `projects/mmdet3d_plugin/core/box3d.py`: anchor index constants
 
-## Key Metrics (nuScenes val)
+## Remote Access
+- Never disconnect persistent VPNs.
+- Do not add separate SSH precheck steps. Run the requested remote operation directly and handle failures if they occur.
 
-| Metric | Direction | Description |
-|--------|-----------|-------------|
-| **L2** | ↓ lower | Ego planning L2 error (meters) — **primary** |
-| **obj_box_col** | ↓ lower | Planning collision rate (%) — **primary** |
-| car_ade / ped_ade | ↓ lower | Agent motion average displacement error |
-| car_epa / ped_epa | ↑ higher | Motion end-point accuracy |
-| NDS | ↑ higher | nuScenes detection score |
-| mAP | ↑ higher | Detection mean AP |
-| mAP_normal | ↑ higher | Map prediction mAP |
+### DGX
+- Host: `trail_dgx`
+- Repo: `/raid/home/spapais/ForeSight`
+- VPN: `utias-robotics` via `nmcli`
+- Check VPN: `nmcli con show --active | grep -q utias-robotics`
+- If needed: `sudo nmcli con up id utias-robotics`
+- Remote submission over SSH still needs interactive bash so `WANDB_API_KEY` is exported:
+  `ssh trail_dgx "bash -i -c 'cd /raid/home/spapais/ForeSight && sbatch --export=ALL scripts/dgx_run.sh <cmd>'" 2>/dev/null`
 
-## Servers
+### Apollo
+- Host: `apollo`
+- Repo: `/home/spapais/ForeSight`
+- VPN: UW `openconnect`
+- Never automate Apollo VPN login. If SSH is unreachable, tell the user to run:
+  `sudo openconnect -v vpn.uwaterloo.ca -u s2papais`
+- `scripts/apollo_run.sh` requires an interactive TTY. Use an interactive SSH session or `tmux`.
 
-| Key | DGX | Apollo | Narval |
-|-----|-----|--------|-------------|
-| **ssh_host** | `trail_dgx` | `apollo` | `narval` |
-| **remote_repo** | `/raid/home/spapais/ForeSight` | `/home/spapais/ForeSight` | `/home/spapais/ForeSight` |
-| **job_system** | SLURM | Docker (direct) | SLURM |
-| **run_script** | `scripts/dgx_run.sh` | `scripts/apollo_run.sh` | `scripts/narval_run.sh` |
-| **gpus** | 4 A100 | 8 V100 | 4 A100 |
-| **slurm_log** | `logs/foresight-<JOB_ID>.log` | N/A | `logs/foresight-<JOB_ID>.log` |
-| **work_dir_log** | `work_dirs/<stem>/*.log` | `work_dirs/<stem>/*.log` | `work_dirs/<stem>/*.log` |
-| **wandb_mode** | online | online | offline |
-| **vpn** | nmcli `utias-robotics` (persistent) | openconnect UW (persistent) | none |
+### Narval
+- Host: `narval`
+- Repo: `/home/spapais/ForeSight`
+- No VPN required
+- Remote submission over SSH:
+  `ssh narval "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/narval_run.sh <cmd>"`
+- WandB runs in offline mode on Narval.
 
-### VPN
-Both VPNs are kept always-on — never disconnect them. Use `/connect-server` to bring one up if it's down. Apollo VPN requires interactive login — tell the user to run it manually, never automate it.
-
-### Code management (git)
-
-Work locally on the code with git to manage code changes. Always ask for confirmation before committing and pushing changes. Use `git add <files>` to stage changes, `git commit -m "<message>"` to commit changes, and `git push` to push changes from local. Use `git pull` to pull changes to the servers.
-
-```bash
-git push && ssh <host> "cd <remote_repo> && git pull"
-```
-
-
+## Git Workflow
+- Work locally, then push and pull on the target server.
+- Always ask for confirmation before committing or pushing.
+- Do not switch remote branches automatically without user direction.

@@ -6,7 +6,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cp "$REPO/.claude/CLAUDE.md" "$REPO/AGENTS.md"
 
-for dest in "$HOME/.agents/skills"; do
+for dest in "$HOME/.agents/skills" "$REPO/.agents/skills"; do
   mkdir -p "$dest"
   for skill_dir in "$REPO/.claude/skills"/*/; do
     skill=$(basename "$skill_dir")
