@@ -10,7 +10,7 @@
 - Planning is not mainly bottlenecked by detection quality.
 - The strongest proven levers so far are a stronger backbone, denoising in stage 1, removing the map head in stage 2, and increasing `num_det`.
 - The map head is unusually brittle, especially at larger per-GPU batch sizes.
-- Last updated: 2026-04-01
+- Last updated: 2026-04-18
 
 ---
 
@@ -22,7 +22,7 @@
 - The planning head needs direct improvement rather than relying on perception gains alone.
 - Denoising in stage 1 is clearly beneficial.
 - R101 is the single strongest proven lever so far.
-- Rotation augmentation helps in stage 1, but not as a stage-2-only change.
+- Full rotation augmentation (rot3dv2 — rotating map_geoms, agent/ego trajectories, ego_status vel/accel, and recomputing gt_ego_fut_cmd) helps in both stage 1 and stage 2. The prior stage-2 null result was caused by a label inconsistency: only gt_bboxes_3d was rotated, leaving map/motion/planning GT in the original frame. Fixing all fields gives L2 0.636→0.593 and NDS 0.5232→0.5315 in stage 2.
 - Trailer performance is catastrophically weak.
 - Tracking remains fragile enough to affect downstream temporal reasoning.
 - Planning is under-trained, and simple planning-focused tuning already helps.
@@ -78,9 +78,10 @@ Highest priority:
 - **Run the strongest full recipe**
   - stronger backbone
   - denoising in stage 1
-  - rotation augmentation in stage 1
+  - full rotation augmentation (rot3dv2) in both stages
   - nomap in stage 2
   - larger `num_det`
+  - stage 2 loading from rot3dv2 stage-1 checkpoint (not public ckpt)
   - longer stage 2 on the correct nomap base
 - **Extend stage-2 training on the nomap recipe**
   - Stage 2 still looks under-optimized.
@@ -117,7 +118,7 @@ Avoid / treat carefully:
 - Avoid queue / epoch changes on with-map recipes that already showed negative interactions.
 - Do not assume perception gains will automatically improve planning.
 - Treat map-head results from large per-GPU batch settings carefully.
-- Treat stage-2-only rotation augmentation conclusions carefully.
+- The old stage-2-only rotation augmentation (rot3dv1) null result was a bug, not a real finding — do not use it to argue against rotation augmentation in stage 2.
 - Treat any claim based on a single seed carefully.
 - Treat motion-loss upweighting carefully until its interaction with the best nomap recipe is clearer.
 
