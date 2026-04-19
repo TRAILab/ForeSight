@@ -10,7 +10,7 @@
 - Planning is not mainly bottlenecked by detection quality.
 - The strongest proven levers so far are a stronger backbone, denoising in stage 1, removing the map head in stage 2, and increasing `num_det`.
 - The map head is unusually brittle, especially at larger per-GPU batch sizes.
-- Last updated: 2026-04-18
+- Last updated: 2026-04-19
 
 ---
 
@@ -23,6 +23,7 @@
 - Denoising in stage 1 is clearly beneficial.
 - R101 is the single strongest proven lever so far.
 - Full rotation augmentation (rot3dv2 — rotating map_geoms, agent/ego trajectories, ego_status vel/accel, and recomputing gt_ego_fut_cmd) helps in both stage 1 and stage 2. The prior stage-2 null result was caused by a label inconsistency: only gt_bboxes_3d was rotated, leaving map/motion/planning GT in the original frame. Fixing all fields gives L2 0.636→0.593 and NDS 0.5232→0.5315 in stage 2.
+- Loading stage-2 from our own rot3dv2 stage-1 checkpoint (vs. public pretrain) substantially improves detection, map, and motion: NDS 0.5315→0.544, mAP 0.4240→0.435, mAP_normal 0.5449→0.582, AMOTA 0.3822→0.419, obj_box_col 0.142%→~0.08%. However, planning L2 regresses slightly (0.593→0.623–0.631), consistent with the known pattern that stronger perception benefits motion more than planning. The nomap recipe is likely needed to recover the L2 gain on top of the better initialization.
 - Trailer performance is catastrophically weak.
 - Tracking remains fragile enough to affect downstream temporal reasoning.
 - Planning is under-trained, and simple planning-focused tuning already helps.
@@ -81,7 +82,7 @@ Highest priority:
   - full rotation augmentation (rot3dv2) in both stages
   - nomap in stage 2
   - larger `num_det`
-  - stage 2 loading from rot3dv2 stage-1 checkpoint (not public ckpt)
+  - stage 2 loading from rot3dv2 stage-1 checkpoint (not public ckpt) ← validated; next step is combining with nomap
   - longer stage 2 on the correct nomap base
 - **Extend stage-2 training on the nomap recipe**
   - Stage 2 still looks under-optimized.
