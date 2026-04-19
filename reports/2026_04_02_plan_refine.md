@@ -97,8 +97,8 @@ All completed runs. Failed and cancelled runs are excluded.
 | 14 | nomap_planpredtrajdeformmm_planinstfeat | DGX | 0.417 | 0.530 | 0.378 | 1008 | — | 0.492 | 0.646 | 0.510 | 0.084% |
 | 15 | planpredtrajdeformmm_planinstfeat_laststage | DGX | 0.414 | 0.523 | 0.375 | 928 | 0.556 | 0.495 | 0.635 | 0.519 | 0.038% |
 | 15 | planpredtrajdeformmm_planinstfeat_laststage | Narval | 0.415 | 0.525 | 0.376 | 1390 | 0.557 | 0.491 | 0.630 | 0.524 | 0.055% |
-| 16 | planpredtrajdeformmm_planinstfeat_laststage_planwp | DGX | — | — | — | — | — | — | — | — | — |
-| 16 | planpredtrajdeformmm_planinstfeat_laststage_planwp | Narval | — | — | — | — | — | — | — | — | — |
+| 16 | planpredtrajdeformmm_planinstfeat_laststage_planwp | DGX | 0.413 | 0.524 | 0.377 | 904 | 0.556 | 0.486 | 0.633 | 0.514 | 0.058% |
+| 16 | planpredtrajdeformmm_planinstfeat_laststage_planwp | Narval | 0.414 | 0.528 | 0.379 | 906 | 0.550 | 0.494 | 0.627 | 0.506 | 0.053% |
 
 Averaged results across servers (DGX + Narval where both available); single-run configs are reported as-is.
 
@@ -123,7 +123,7 @@ Averaged results across servers (DGX + Narval where both available); single-run 
 | planpredtrajdeformmm_planinstfeat | 2 | 0.526 | 0.104% | 0.647 | 0.524 | 0.413 | 0.554 |
 | nomap_planpredtrajdeformmm_planinstfeat | 1 | 0.510 | 0.084% | 0.646 | 0.530 | 0.417 | — |
 | **planpredtrajdeformmm_planinstfeat_laststage** | **2** | **0.522** | **0.047%** | **0.633** | **0.524** | **0.415** | **0.557** |
-| planpredtrajdeformmm_planinstfeat_laststage_planwp | — | — | — | — | — | — | — |
+| planpredtrajdeformmm_planinstfeat_laststage_planwp | 2 | 0.510 | 0.056% | 0.630 | 0.526 | 0.414 | 0.553 |
 
 ## Discussion
 
@@ -145,6 +145,8 @@ Averaged results across servers (DGX + Narval where both available); single-run 
 
 **Ego instance feature improves L2 but causes a CR regression when applied at all stages.** `planpredtrajdeformmm_planinstfeat` achieves the best averaged L2 (0.526) but CR (0.104%) is a large regression — nearly back to the `planrefine3` level and 2× worse than `planpredtrajdeformmm`. The temporal instance feature from the tracking stream encodes useful motion context for trajectory accuracy, but injecting it at all decoder stages appears to suppress the obstacle-aware attention established by the endpoint DAF before it is stable. Two ablations confirmed this: (1) `nomap_planpredtrajdeformmm_planinstfeat` (DGX, L2=0.510, CR=0.084%) showed the CR regression is not caused by an interaction with the map branch. (2) `planpredtrajdeformmm_planinstfeat_laststage` (L2=0.522, CR=0.047%) showed that restricting ego feature injection to the final stage only resolves the CR regression entirely while preserving most of the L2 gain.
 
+**Multi-waypoint planning attention improves L2 at a small CR cost.** `planpredtrajdeformmm_planinstfeat_laststage_planwp` (waypoints [1, 3, 5]) achieves averaged L2=0.510 and CR=0.056% — a 0.012 L2 improvement over `laststage` at the cost of +0.009pp CR. Attending at intermediate waypoints (1s, 2s, 3s) provides richer spatial context along the full predicted trajectory, which sharpens waypoint accuracy. The CR regression suggests that attending at near-horizon waypoints reintroduces some of the same obstacle-awareness dilution seen with the all-stage instfeat variant, though at a much smaller scale. Whether the L2 gain is worth the CR tradeoff depends on the downstream priority.
+
 **Detection and motion metrics are largely stable.** NDS, det mAP, AMOTA, and IDS remain within ~0.003 of the baseline across all planning-head modifications. The improvements are isolated to the planning and motion prediction metrics, confirming that the planning head changes do not interfere with the upstream detection or map branches.
 
 ## Best Model
@@ -156,6 +158,7 @@ Key comparisons from averaged results:
 | Config | L2 | CR | Δ L2 vs best | Δ CR vs best |
 |--------|----|----|--------------|--------------|
 | **planpredtrajdeformmm_planinstfeat_laststage** | **0.522** | **0.047%** | — | — |
+| planpredtrajdeformmm_planinstfeat_laststage_planwp | 0.510 | 0.056% | −0.012 | +0.009pp |
 | planpredtrajdeformmm | 0.542 | 0.047% | +0.020 | 0.000pp |
 | planpredtrajdeformmm_planinstfeat | 0.526 | 0.104% | +0.004 | +0.057pp |
 | nomap_planpredtrajdeformmm | 0.541 | 0.051% | +0.019 | +0.004pp |
@@ -173,8 +176,6 @@ The DGX laststage result (CR=0.038%) was notably stronger than Narval (CR=0.055%
 - **Combining laststage with nomap.** The best model uses map supervision, but nomap ablations show the map branch contributes little to planning. Testing `nomap_planpredtrajdeformmm_planinstfeat_laststage` is a single config that confirms whether the L2 improvement from the ego feature is preserved without the map branch — closing the last open question from this batch.
 
 - **Last-stage ego feature for motion.** Apply the same laststage-only injection pattern to `motion_deformable`, substituting the agent's instance feature at the final stage. Given the large car_ade improvements already seen from motion endpoint attention, adding temporal tracking context at the last stage could further improve both motion prediction and downstream planning.
-
-- ~~**Planning attention at multiple future waypoints.**~~ Implemented as `planpredtrajdeformmm_planinstfeat_laststage_planwp` (waypoints `[1, 3, 5]`). Running on DGX (job 3598) and Narval (job 59519647).
 
 - **Extended stage-2 fine-tuning on planning loss.** The best model trains with the full stage-2 objective. A short additional fine-tuning phase with upweighted planning loss (L2 + CR) may further sharpen trajectory accuracy without requiring new components or architectural changes.
 
