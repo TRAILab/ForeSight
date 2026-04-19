@@ -2,8 +2,8 @@
 
 ## TODO
 
-- Run `sparsedrive_r50_stage2_4gpu_bs24_occhead_occptraineval` training and log results here
-- Rerun evaluation for `sparsedrive_r50_stage1_8gpu_noflash_occptraineval`
+- Parse metrics for Narval job `59608052` (`occhead_occptraineval`) once complete
+- Parse eval rerun for `sparsedrive_r50_stage1_8gpu_noflash_occptraineval` on Apollo once complete
 - Tune alpha / confidence threshold based on results
 
 ## Abstract
@@ -89,7 +89,8 @@ To make `vis/` and `occluded/` metrics symmetric and comparable, both evaluators
 
 | Server | Config | Job ID | Status |
 | --- | --- | --- | --- |
-| `apollo` | `occhead_occptraineval` | — | NOT STARTED |
+| `apollo` | `stage1_8gpu_noflash_occptraineval` (eval rerun) | — | `running` — tmux `eval_occ`, log `eval_rerun.log` |
+| `narval` | `stage2_4gpu_bs24_occhead_occptraineval` | `59608052` | `running` |
 
 ### Baseline occluded PR curve analysis (`occptraineval`)
 
