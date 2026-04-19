@@ -3,9 +3,8 @@
 
 ## TODO
 
-- Parse metrics for Apollo job `8gpu_noflash_aux2d` once complete and fill in results table
 - Move 2D target generation offline; compare against online reprojection
-- Run aux-2D on Stage 2 to see whether the feature regularisation benefit carries through to motion/planning metrics.
+- Parse metrics for DGX job `3605` (`stage2_ptaux2d`) once complete and fill in results table.
 - Add depth prediction branch to `SparseDriveAux2DHead` (log-depth `Conv2d` on reg branch, supervised by existing `depths` targets)
 - Use top-k aux head predictions to unproject `(center2d, depth)` → 3D lidar anchors as data-driven query initialisation alongside k-means prior
 
@@ -36,23 +35,28 @@ Key differences from `StreamPETR`:
 
 | Server | Config | Job ID | Status |
 | --- | --- | --- | --- |
-| `dgx` | `sparsedrive_r50_stage1_4gpu_aux2d` | `3592` | `cancelled` — map failure (wrong base config) |
-| `dgx` | `sparsedrive_r50_stage1_4gpu_aux2d_lwloss` | `3594` | `cancelled` — map failure (wrong base config) |
-| `dgx` | `sparsedrive_r50_stage1_4gpu_bs24_aux2d` | `3595` | `cancelled` — superseded by Apollo run |
-| `apollo` | `sparsedrive_r50_stage1_8gpu_noflash_aux2d` | — | `running` |
+| `apollo` | `sparsedrive_r50_stage1_8gpu_noflash_aux2d` | — | `complete` |
+| `dgx` | `sparsedrive_r50_stage2_4gpu_bs24_ptaux2d_planpredtrajdeformmm` | `3605` | `running` |
+
+### Stage 1
 
 | Config | Server | det mAP | det NDS | map mAP | Notes |
 |--------|--------|---------|---------|---------|-------|
 | stage1 baseline (`8gpu_noflash`) | — | 0.413 | 0.523 | 0.488 | from `sparsedrive_r50_stage2_4gpu_bs24` baseline |
-| stage1_4gpu_aux2d | DGX | — | — | ~0.018 | cancelled — same map failure as BS=16/GPU baseline |
-| stage1_4gpu_aux2d_lwloss | DGX | — | — | ~0.017 | cancelled — same map failure as BS=16/GPU baseline |
-| stage1_8gpu_noflash_aux2d | Apollo | — | — | — | running — original loss weights |
+| stage1_8gpu_noflash_aux2d | Apollo | **0.437** | **0.546** | **0.570** | complete — original loss weights; +0.024/+0.023/+0.082 vs baseline |
+
+### Stage 2
+
+| Config | Server | L2 | obj_box_col | det mAP | det NDS | map mAP | Notes |
+|--------|--------|-----|-------------|---------|---------|---------|-------|
+| stage2 baseline (`planpredtrajdeformmm`) | — | — | — | — | — | — | pending |
+| stage2_ptaux2d_planpredtrajdeformmm | DGX | — | — | — | — | — | running — job 3605 |
 
 ## Discussion
 
-**Jobs 3592 and 3594 — wrong base config.** Both runs used `stage1_4gpu` (total_bs=64, **16/GPU**) as the base, which has a known map head failure at BS>6/GPU (see `2026_04_01_map_head_batchsize_failure.md`). The baseline `stage1_4gpu` itself only achieves `mAP_normal=0.019` at end of training for the same reason — making the ~0.018 val results in jobs 3592/3594 indistinguishable from the baseline and not indicative of aux2d-specific map collapse. The diagnosis of a gradient conflict was premature.
+**`8gpu_noflash_aux2d` (Apollo) — complete.** Based on `stage1_8gpu_noflash` (total_bs=64, **8/GPU**). Final val metrics: det mAP=0.437, NDS=0.546, map mAP=0.570. Versus the baseline (0.413/0.523/0.488), aux-2D improves all three metrics: +0.024 det mAP (+5.8%), +0.023 NDS (+4.4%), and a large +0.082 map mAP (+16.8%). No map collapse was observed with the original loss weights (cls=2, bbox=5, iou=2, centers2d=10, centerness=1).
 
-**Current run (`8gpu_noflash_aux2d`, Apollo).** Based on `stage1_8gpu_noflash` (total_bs=64, **8/GPU**), which is the correct baseline that achieves `mAP_normal≈0.41` at iter 8780. Uses original aux2d loss weights (cls=2, bbox=5, iou=2, centers2d=10, centerness=1). If map collapse is observed, reduce weights or investigate gradient conflict.
+**Stage 2 (`ptaux2d`, DGX job 3605) — running.** Uses `stage2_4gpu_bs24_planpredtrajdeformmm` as base, initialised from the aux2d Stage 1 checkpoint (`ckpt/sparsedrive_stage1_aux2d.pth`). The aux2d head is not active in Stage 2; the hypothesis is that the improved Stage 1 features carry through to motion/planning metrics (L2, collision rate).
 
 ## Future Work
 
