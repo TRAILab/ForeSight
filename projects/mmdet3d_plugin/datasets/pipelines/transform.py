@@ -3,6 +3,8 @@ import mmcv
 from mmcv.parallel import DataContainer as DC
 from mmdet.datasets.builder import PIPELINES
 from mmdet.datasets.pipelines import to_tensor
+from shapely.geometry import MultiPoint, box
+from ..utils import box3d_to_corners
 
 
 @PIPELINES.register_module()
@@ -56,6 +58,141 @@ class MultiScaleDepthMapGenerator(object):
 
 
 @PIPELINES.register_module()
+class GenerateProjected2DTargets(object):
+    def __init__(self, min_depth=1e-3, min_size=2.0):
+        self.min_depth = min_depth
+        self.min_size = min_size
+
+    def _post_process_coords(self, corner_coords, img_w, img_h):
+        polygon_from_2d_box = MultiPoint(corner_coords).convex_hull
+        img_canvas = box(0, 0, img_w, img_h)
+        if not polygon_from_2d_box.intersects(img_canvas):
+            return None
+
+        img_intersection = polygon_from_2d_box.intersection(img_canvas)
+        if img_intersection.is_empty:
+            return None
+
+        if hasattr(img_intersection, "geoms"):
+            intersection_coords = np.concatenate(
+                [np.array(geom.exterior.coords) for geom in img_intersection.geoms],
+                axis=0,
+            )
+        else:
+            intersection_coords = np.array(img_intersection.exterior.coords)
+
+        min_x = np.min(intersection_coords[:, 0])
+        min_y = np.min(intersection_coords[:, 1])
+        max_x = np.max(intersection_coords[:, 0])
+        max_y = np.max(intersection_coords[:, 1])
+        return min_x, min_y, max_x, max_y
+
+    def __call__(self, input_dict):
+        num_cams = len(input_dict["lidar2img"])
+        empty_boxes = np.zeros((0, 4), dtype=np.float32)
+        empty_labels = np.zeros((0,), dtype=np.int64)
+        empty_centers = np.zeros((0, 2), dtype=np.float32)
+        empty_depths = np.zeros((0,), dtype=np.float32)
+
+        gt_bboxes_3d = input_dict.get("gt_bboxes_3d")
+        gt_labels_3d = input_dict.get("gt_labels_3d")
+        if gt_bboxes_3d is None or gt_labels_3d is None or len(gt_bboxes_3d) == 0:
+            input_dict["gt_bboxes"] = [empty_boxes.copy() for _ in range(num_cams)]
+            input_dict["gt_labels"] = [empty_labels.copy() for _ in range(num_cams)]
+            input_dict["centers2d"] = [empty_centers.copy() for _ in range(num_cams)]
+            input_dict["depths"] = [empty_depths.copy() for _ in range(num_cams)]
+            return input_dict
+
+        centers_3d = gt_bboxes_3d[:, :3]
+        corners_3d = box3d_to_corners(gt_bboxes_3d)
+        centers_4d = np.concatenate(
+            [centers_3d, np.ones((centers_3d.shape[0], 1), dtype=np.float32)],
+            axis=-1,
+        )
+        corners_4d = np.concatenate(
+            [corners_3d, np.ones((*corners_3d.shape[:2], 1), dtype=np.float32)],
+            axis=-1,
+        )
+
+        gt_bboxes = []
+        gt_labels = []
+        centers2d = []
+        depths = []
+        for cam_idx, lidar2img in enumerate(input_dict["lidar2img"]):
+            img_shape = input_dict["img_shape"][cam_idx]
+            img_h, img_w = img_shape[:2]
+
+            proj_centers = centers_4d @ lidar2img.T
+            center_depth = proj_centers[:, 2]
+            center_xy = proj_centers[:, :2] / np.clip(
+                center_depth[:, None], a_min=self.min_depth, a_max=None
+            )
+
+            proj_corners = corners_4d @ lidar2img.T
+            corner_depth = proj_corners[..., 2]
+            valid_corners = corner_depth > self.min_depth
+            proj_xy = proj_corners[..., :2] / np.clip(
+                corner_depth[..., None], a_min=self.min_depth, a_max=None
+            )
+
+            center_visible = np.logical_and.reduce(
+                [
+                    center_depth > self.min_depth,
+                    center_xy[:, 0] >= 0,
+                    center_xy[:, 0] < img_w,
+                    center_xy[:, 1] >= 0,
+                    center_xy[:, 1] < img_h,
+                ]
+            )
+            cam_boxes = []
+            cam_labels = []
+            cam_centers2d = []
+            cam_depths = []
+            for obj_idx in range(len(gt_labels_3d)):
+                if not center_visible[obj_idx]:
+                    continue
+                if not np.any(valid_corners[obj_idx]):
+                    continue
+
+                corner_coords = proj_xy[obj_idx][valid_corners[obj_idx]].tolist()
+                final_coords = self._post_process_coords(corner_coords, img_w, img_h)
+                if final_coords is None:
+                    continue
+
+                x1, y1, x2, y2 = final_coords
+                bbox_w = x2 - x1
+                bbox_h = y2 - y1
+                if bbox_w < self.min_size or bbox_h < self.min_size:
+                    continue
+
+                cam_boxes.append([x1, y1, x2, y2])
+                cam_labels.append(gt_labels_3d[obj_idx])
+                cam_centers2d.append(center_xy[obj_idx])
+                cam_depths.append(center_depth[obj_idx])
+
+            gt_bboxes.append(
+                np.array(cam_boxes, dtype=np.float32) if cam_boxes else empty_boxes.copy()
+            )
+            gt_labels.append(
+                np.array(cam_labels, dtype=np.int64) if cam_labels else empty_labels.copy()
+            )
+            centers2d.append(
+                np.array(cam_centers2d, dtype=np.float32)
+                if cam_centers2d
+                else empty_centers.copy()
+            )
+            depths.append(
+                np.array(cam_depths, dtype=np.float32) if cam_depths else empty_depths.copy()
+            )
+
+        input_dict["gt_bboxes"] = gt_bboxes
+        input_dict["gt_labels"] = gt_labels
+        input_dict["centers2d"] = centers2d
+        input_dict["depths"] = depths
+        return input_dict
+
+
+@PIPELINES.register_module()
 class NuScenesSparse4DAdaptor(object):
     def __init(self):
         pass
@@ -95,6 +232,14 @@ class NuScenesSparse4DAdaptor(object):
         if "gt_occluded" in input_dict:
             input_dict["gt_occluded"] = DC(
                 to_tensor(input_dict["gt_occluded"]).float()
+            )
+        for key in ["gt_bboxes", "gt_labels", "centers2d", "depths"]:
+            if key not in input_dict:
+                continue
+            input_dict[key] = DC(
+                [to_tensor(x) for x in input_dict[key]],
+                stack=False,
+                cpu_only=False,
             )
 
         imgs = [img.transpose(2, 0, 1) for img in input_dict["img"]]

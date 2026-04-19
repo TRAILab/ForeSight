@@ -7,6 +7,7 @@ from .blocks import (
     AsymmetricFFN,
 )
 from .instance_bank import InstanceBank
+from .aux_2d_head import SparseDriveAux2DHead
 from .detection3d import (
     SparseBox3DDecoder,
     SparseBox3DTarget,
@@ -26,6 +27,7 @@ __all__ = [
     "DenseDepthNet",
     "AsymmetricFFN",
     "InstanceBank",
+    "SparseDriveAux2DHead",
     "SparseBox3DDecoder",
     "SparseBox3DTarget",
     "SparseBox3DRefinementModule",

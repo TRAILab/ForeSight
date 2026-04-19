@@ -4,6 +4,7 @@ from .transform import (
     NormalizeMultiviewImage,
     NuScenesSparse4DAdaptor,
     MultiScaleDepthMapGenerator,
+    GenerateProjected2DTargets,
 )
 from .augment import (
     ResizeCropFlipImage,
@@ -19,6 +20,7 @@ __all__ = [
     "BBoxRotation",
     "CircleObjectRangeFilter",
     "MultiScaleDepthMapGenerator",
+    "GenerateProjected2DTargets",
     "NormalizeMultiviewImage",
     "PhotoMetricDistortionMultiViewImage",
     "NuScenesSparse4DAdaptor",
