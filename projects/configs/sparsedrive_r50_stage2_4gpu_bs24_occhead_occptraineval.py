@@ -720,7 +720,7 @@ eval_mode = dict(
     with_occlusion=True,
     tracking_threshold=0.2,
     motion_threshhold=0.2,
-    occ_vis_threshold=0.5,
+    occ_vis_threshold=0.1,
 )
 evaluation = dict(
     interval=num_iters_per_epoch*checkpoint_epoch_interval,
