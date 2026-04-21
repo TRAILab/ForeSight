@@ -9,7 +9,7 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 64
+total_batch_size = 32
 num_gpus = 4
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage1_4gpu_aux2d',),
+                name='sparsedrive_r50_stage1_4gpu_bs32',),
             interval=50)
     ],
 )
@@ -120,37 +120,6 @@ model = dict(
         embed_dims=embed_dims,
         num_depth_layers=num_depth_layers,
         loss_weight=0.2,
-    ),
-    aux_2d_head=dict(
-        type="SparseDriveAux2DHead",
-        num_classes=num_classes,
-        in_channels=embed_dims,
-        embed_dims=embed_dims,
-        feat_level=0,
-        stride=strides[0],
-        loss_cls2d=dict(
-            type="QualityFocalLoss",
-            use_sigmoid=True,
-            beta=2.0,
-            loss_weight=2.0,
-        ),
-        loss_centerness=dict(
-            type="GaussianFocalLoss",
-            reduction="mean",
-            loss_weight=1.0,
-        ),
-        loss_bbox2d=dict(type="L1Loss", loss_weight=5.0),
-        loss_iou2d=dict(type="GIoULoss", loss_weight=2.0),
-        loss_centers2d=dict(type="L1Loss", loss_weight=10.0),
-        train_cfg=dict(
-            assigner2d=dict(
-                type="HungarianAssigner2D",
-                cls_cost=dict(type="FocalLossCost", weight=2.0),
-                reg_cost=dict(type="BBoxL1Cost", weight=5.0, box_format="xywh"),
-                iou_cost=dict(type="IoUCost", iou_mode="giou", weight=2.0),
-                centers2d_cost=dict(type="BBox3DL1Cost", weight=10.0),
-            )
-        ),
     ),
     head=dict(
         type="SparseDriveHead",
@@ -580,7 +549,6 @@ train_pipeline = [
         sample_num=num_sample,
         permute=True,
     ),
-    dict(type="GenerateProjected2DTargets"),
     dict(type="NuScenesSparse4DAdaptor"),
     dict(
         type="Collect",
@@ -593,10 +561,6 @@ train_pipeline = [
             "focal",
             "gt_bboxes_3d",
             "gt_labels_3d",
-            "gt_bboxes",
-            "gt_labels",
-            "centers2d",
-            "depths",
             'gt_map_labels', 
             'gt_map_pts',
             'gt_agent_fut_trajs',
@@ -723,7 +687,7 @@ data = dict(
 # ================== training ========================
 optimizer = dict(
     type="AdamW",
-    lr=4e-4,
+    lr=2e-4,
     weight_decay=0.001,
     paramwise_cfg=dict(
         custom_keys={
