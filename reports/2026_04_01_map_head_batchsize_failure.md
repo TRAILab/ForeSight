@@ -1,91 +1,94 @@
-# Map Head Failure at Per-GPU Batch Size > 6 — Investigation (Apr 2026)
+# Map Head Batch-Size Failure — Stage-Specific Investigation (Apr 2026)
+
+## Abstract
+
+This report documents a reproducible HD map head convergence failure that is **confirmed for stage 2**, not uniformly for all training stages. In stage 2, per-GPU batch size **6/GPU works** while **12/GPU fails**: `sparsedrive_r50_stage2_4gpu_bs24` (24 total batch, 4 GPUs, 6/GPU) reaches map mAP=0.553, while `sparsedrive_r50_stage2_4gpu` (48 total batch, 4 GPUs, 12/GPU) reaches only map mAP=0.078. The 8-GPU control `sparsedrive_r50_stage2_8gpu_noflash` (48 total batch, 8 GPUs, 6/GPU, map mAP=0.547) rules out total batch size and nominal LR as the primary cause.
+
+The earlier wording of this report overstated the result as a universal threshold of "per-GPU batch size > 6 fails." That is too broad. Current stage-1 evidence shows **6/GPU works**, **8/GPU works**, and a quick check at **16/GPU failed**, but stage 1 was not systematically ablated here. The strongest supported conclusion is therefore:
+
+- Stage 2: safe at `6/GPU`, broken at `12/GPU`
+- Stage 1: safe at `6/GPU` and `8/GPU`, observed broken at `16/GPU`
+- Unknown: exact stage-1 failure boundary between `8/GPU` and `16/GPU`
 
 ## Intro
 
-This document covers a systematic investigation into a reproducible failure mode where the HD map head catastrophically fails to converge when per-GPU batch size exceeds 6. The `sparsedrive_r50_stage2_4gpu.py` config (total_batch_size=48, 4 GPUs, **12 samples/GPU**) produces map_mAP=0.078 despite detection performing normally, while the `stage2_4gpu_bs24.py` config (total_batch_size=24, **6 samples/GPU**) achieves map_mAP=0.553. This failure blocks using the computationally attractive 4-GPU-bs48 configuration. Four ablation experiments were submitted 2026-04-01 to isolate the root cause.
+This document covers a systematic investigation into a stage-2 failure mode where the HD map head catastrophically fails to converge at high per-GPU batch size. The motivating observation was that `sparsedrive_r50_stage2_4gpu.py` (12/GPU) fails badly while `sparsedrive_r50_stage2_4gpu_bs24.py` (6/GPU) converges normally. Because both runs train the same map head, the goal was to determine whether the root cause was per-GPU batch size, total batch size, learning rate, BN behavior, or some map-specific implementation issue.
+
+The original April 1 ablation was a stage-2 study. Stage-1 evidence is included only to clarify the final conclusion and avoid overgeneralizing the stage-2 threshold.
 
 ## Method
 
-**Observed failure**: systematic comparison across four configs spanning different GPU counts, total batch sizes, and per-GPU batch sizes:
+The core stage-2 comparison used these configs:
 
-| Config | per-GPU BS | LR | map mAP | map_loss_line_5 (end) |
-|--------|-----------|-----|---------|----------------------|
-| `4gpu` (bs48) | **12** | 3e-4 | **0.078** | ~0.70 (not converged) |
-| `4gpu_maplrdiv4` (bs48, loss/4) | **12** | 3e-4 | **0.074** | — |
-| `4gpu_bs24` | **6** | 1.5e-4 | **0.553** | ~0.10 (converged) |
-| `8gpu_noflash` | **6** | 3e-4 | **0.547** | — |
+| Config | per-GPU BS | LR | map mAP | Status |
+|--------|-----------|----|---------|--------|
+| `4gpu` (bs48) | 12 | 3e-4 | 0.078 | failed |
+| `4gpu_maplrdiv4` | 12 | 3e-4 | 0.074 | failed |
+| `4gpu_bs24` | 6 | 1.5e-4 | 0.553 | converged |
+| `8gpu_noflash` | 6 | 3e-4 | 0.547 | converged |
 
-**Isolation logic**: The 8GPU config (total_batch_size=48, **6/GPU**, lr=3e-4) achieves 0.547 — same total BS and same LR as the failing 4GPU config. This rules out total batch size and LR as root causes.
+This setup isolates the main variables:
 
-**Ablation experiments submitted (2026-04-01)**:
+- `4gpu` vs `8gpu_noflash` keeps total batch size fixed at 48 while changing per-GPU batch size from 12 to 6.
+- `4gpu` vs `4gpu_bs24` changes both total batch and per-GPU batch, but agrees with the 8-GPU control.
+- `4gpu_maplrdiv4` tests whether reducing map-head optimization scale fixes the issue.
 
-| Config | Change | Tests | Confidence |
-|--------|--------|-------|------------|
-| `4gpu_gradacc` | `cumulative_iters=2` | Replicates per-GPU BS=6 for BN and gradients simultaneously | **Highest** |
-| `4gpu_normeval` | `norm_eval=True` in backbone | Freezes BN running stats; isolates BN as root cause | High |
-| `4gpu_mapfeatnograd` | `feat_grad=False` in map instance bank | Tests whether map anchor init parameter destabilizes training | Medium |
+Three follow-up ablations were submitted on 2026-04-01:
 
-**What was ruled out through code inspection**:
-1. LR too high — 8GPU uses same LR and works
-2. Total batch size — 8GPU has same total BS and works
-3. Map loss weight — `maplrdiv4` tried, no improvement
-4. Temporal gradient flow — `cache()` explicitly detaches all features (`instance_feature.detach()`); no gradients cross the temporal boundary regardless of config
-5. `feat_grad` as a temporal mechanism — with `num_temp_instances=0` in stage1, `cache()` returns early; yet stage1 also fails at bs=16/GPU
+| Config | Change | Purpose |
+|--------|--------|---------|
+| `4gpu_gradacc` | `cumulative_iters=2` | reduce optimizer-step variance without changing 12/GPU forward passes |
+| `4gpu_normeval` | `norm_eval=True` | test whether BN running stats are the cause |
+| `4gpu_mapfeatnograd` | `feat_grad=False` | test whether map anchor-init gradients destabilize training |
 
-## Results (2026-04-02, updated with gradacc)
+The map-head code path was also audited, including DAF, dropout, loss normalization, Hungarian assignment, FFN layers, and `GroupInBatchSampler`, to check for explicit batch-size-dependent behavior.
 
-**Summary**: `normeval` and `mapfeatnograd` both failed to fix map convergence. `gradacc` ran successfully (after config fix) but also failed — map loss plateaued at ~0.75 and never approached the BS=6 target of ~0.10.
+## Results
+
+### Stage 2
+
+The stage-2 outcome is unambiguous:
+
+- `6/GPU` works: `4gpu_bs24` reaches map mAP=0.553 and `8gpu_noflash` reaches 0.547.
+- `12/GPU` fails: `4gpu`, `4gpu_maplrdiv4`, `4gpu_normeval`, `4gpu_mapfeatnograd`, and `4gpu_gradacc` all fail to converge.
+
+Key ablation results:
 
 | Config | per-GPU BS | map_mAP | map_loss_line_5 (iter 51) | map_loss_line_5 (iter 1734) | Status |
 |--------|-----------|---------|--------------------------|----------------------------|--------|
-| `4gpu_bs24` (baseline, working) | **6** | **0.553** | **0.21** | ~0.10 | converged |
-| `4gpu_normeval` | **12** | 0.079 | ~0.88 | — | not converged |
-| `4gpu_mapfeatnograd` | **12** | 0.074 | ~0.93 | — | not converged |
-| `4gpu_gradacc` (cumulative_iters=2) | **12** | TBD | **0.93** | **0.78** | **not converging** |
+| `4gpu_bs24` | 6 | 0.553 | 0.21 | ~0.10 | converged |
+| `4gpu_normeval` | 12 | 0.079 | ~0.88 | — | failed |
+| `4gpu_mapfeatnograd` | 12 | 0.074 | ~0.93 | — | failed |
+| `4gpu_gradacc` | 12 | TBD | 0.93 | 0.78 | failed |
 
-**Gradacc training trajectory (job 3571)**:
+`gradacc` is especially informative: even after reducing optimizer-step variance, the `12/GPU` run still plateaued near map loss 0.75 rather than approaching the `6/GPU` baseline of ~0.10. At iter 51, the `12/GPU` gradacc run already had `map_line_5=0.93` while the `6/GPU` baseline was at 0.21, indicating that the failure appears almost immediately.
 
-| Iter | map_line_0 | map_line_5 | LR (head) |
-|------|-----------|-----------|-----------|
-| 51   | 0.829     | 0.928     | 1.2e-4    |
-| 510  | 0.711     | 0.756     | 2.9e-4 (peak, end of warmup) |
-| 1530 | 0.718     | 0.750     | 2.5e-4    |
-| 1734 | 0.739     | 0.782     | 2.4e-4 (cosine decay) |
+The strongest current hypothesis is initialization-time scene composition. With fixed seed=0, `GroupInBatchSampler` assigns different deterministic scene groups to the first batch. At `6/GPU`, rank 0 sees `perm[0..5]`; at `12/GPU`, it sees `perm[0..11]`. The extra groups appear to be harder scenes for the map head, producing a much worse starting point that the model does not recover from.
 
-The map loss improved from 0.93→0.75 during warmup (iters 51→510), then **stagnated** through cosine decay (0.75→0.78). With ~4000 iterations remaining (total 5860), converging from 0.78 to 0.10 is extremely unlikely. Gradient accumulation is confirmed not to fix per-GPU BS=12 map failure.
+### Stage 1
 
-**Key structural observation — from gradacc logs**: At iter 51 (barely 25 optimizer steps, LR at 40% of peak), the map_line_5 is already 0.93 while the BS=6 baseline was 0.21 at the **same** iteration. This 4.4× gap is present **before any significant training has occurred**, pointing to the stage1 checkpoint having ~4× higher map loss on the scenes assigned to GPU 0 at BS=12 (groups perm[0..11]) versus those at BS=6 (perm[0..5]).
+This report does **not** present a controlled stage-1 ablation. The current evidence relevant to stage 1 is:
 
-**Gradacc crash — root cause (from previous session)**: Config used `optimizer_config = dict(grad_clip=..., cumulative_iters=2)`. Fixed to `dict(type='GradientCumulativeOptimizerHook', cumulative_iters=2, grad_clip=...)`. The DGX also required `mmdet_train.py` to support typed optimizer hooks via `build_from_cfg`; that fix has since been reverted locally (commit `a37e8b5`) but was in place when job 3571 was submitted.
+- `6/GPU` works: `sparsedrive_r50_stage1_4gpu_bs24_aux2d`
+- `8/GPU` works: standard `sparsedrive_r50_stage1_8gpu_noflash` baseline and `stage1_8gpu_noflash_aux2d`
+- `16/GPU` failed in a quick check: `sparsedrive_r50_stage1_4gpu`
 
-**What the results eliminate**:
-
-1. **BN statistics (normeval)**: Freezing BN completely → map_loss still ~0.69. BN is **not** the cause.
-2. **Map anchor init gradients (mapfeatnograd)**: `feat_grad=False` → no improvement. Shared-init destabilization is **not** the cause.
-3. **Gradient variance (gradacc)**: Reducing gradient variance with `cumulative_iters=2` (effective 24/GPU per step) → still plateaus at 0.75. Gradient noise is **not** the primary cause.
-4. **Total batch size, LR** (from prior ablation): 8GPU-bs6 with same total BS=48 and LR=3e-4 achieves 0.547 map_mAP. Total BS and LR are **not** the cause.
-
-**Thorough code audit — no batch-size-dependent operation found**: The full map head forward path was audited: DAF CUDA kernel (output zeroed via `at::zeros`, atomic adds correct), `_get_weights` dropout (inverted, expectation-preserving), `reduce_mean(num_pos)` normalization (correctly normalizes loss per positive match regardless of BS), `SparseLineLoss.normalize_line` (constant roi_size=(30,60)), `HungarianLinesAssigner` (per-sample matching, batch-size independent), `AsymmetricFFN` (linear layers, no batch coupling), `GroupInBatchSampler` (each slot independent). No hardcoded batch-size dependency was found in any map-specific code path.
-
-**Current best hypothesis — scene distribution at initialization**:
-
-`GroupInBatchSampler` assigns each batch slot its own generator seeded by `global_sample_idx`. With fixed seed=0, the permutation `perm = torch.randperm(num_groups)` is deterministic. At BS=6 (global_batch=24), rank 0 first-iteration batch = perm[0..5]. At BS=12 (global_batch=48), rank 0 first batch = perm[0..11]. The additional groups perm[6..11] — by chance with this particular seed — appear to be significantly harder scenes for the map head (higher num GT lines, more complex road structure). The stage1 checkpoint has ~4× higher map loss on these scenes, producing a much worse optimization starting point at BS=12.
-
-Why gradacc can't recover: the poor starting point at BS=12 (loss 0.93 vs 0.21) places the map head in a region of the loss landscape where the decoder refinement is actively counterproductive — each decoder stage increases loss slightly rather than decreasing it (observed across all BS=12 runs). After 500+ iterations with degraded refinement, the model is stuck in a local minimum from which it cannot escape within the training budget.
+So stage 1 is more tolerant than stage 2, but its exact failure boundary is still unknown.
 
 ## Discussion
 
-- **All tested interventions have failed**: BN, anchor init, gradient accumulation, LR scaling (via loss/4 in prior ablation) — none fixed per-GPU BS=12.
-- **Root cause remains open**: No code-level bug found. The most consistent explanation is scene distribution sensitivity combined with the map head's narrow loss landscape (all 100 anchors at ground height, minimal diversity).
-- **Practical conclusion**: Per-GPU BS > 6 is not viable for the map head with the current architecture and training setup. This is a hard constraint.
-- **Detection head is robust at BS=12**: 900 spatially-diverse 3D anchors provide implicit gradient averaging. Map head's 100 coplanar anchors do not.
+The main conclusion is stage-specific. For **stage 2**, the map head is reliable at `6/GPU` and broken at `12/GPU`; that conclusion is directly supported by controlled comparisons and multiple failed ablations. For **stage 1**, the data only support that `6/GPU` and `8/GPU` are safe while `16/GPU` is not. The earlier wording of this report overgeneralized the stage-2 result into a universal rule, which is not supported by the current evidence.
 
-## Next Steps (priority order)
+The failed `normeval`, `mapfeatnograd`, and `gradacc` ablations rule out several simple explanations: BN running statistics, anchor-init gradients, and optimizer-step variance are not the primary cause of the stage-2 collapse. The `8gpu_noflash` control also rules out total batch size and nominal LR. No explicit code-level batch-size bug was found in the audited map-head path. The best remaining explanation is that the map head is highly sensitive to scene composition early in training and that larger per-GPU batches in stage 2 expose it to a worse initial loss landscape.
 
-1. **[Confirmed] Cancel job 3571 (gradacc)** — confirmed not converging at iter 1734. No need to run to completion.
+Operationally, the safe rule is:
 
-2. **[Diagnostic, if root cause matters] Profile which scenes fall in perm[0..5] vs perm[0..11]**: Log scene tokens for both BS=6 and BS=12 first iteration; compute map loss per scene from the stage1 checkpoint. If perm[6..11] consistently have 4-5× higher map loss than perm[0..5], this definitively confirms the scene distribution hypothesis.
+- keep **stage-2 with-map** training at `6/GPU`
+- allow **stage-1 with-map** training at `8/GPU`
+- avoid claiming a universal cross-stage threshold without a dedicated stage-1 sweep
 
-3. **[Diagnostic, alternative] Run BS=6 cumulative_iters=2 experiment**: If 4GPU-bs6 with gradacc (cumulative_iters=2) converges, this confirms that the per-GPU batch SIZE (not per-step sample count) is the constraint. This is the most informative remaining experiment, but the result is somewhat predictable (BS=6 per forward pass should always work since each forward pass has low initial loss).
+## Future Work
 
-4. **[Accept and move on]** Use `4gpu_bs24` (BS=6/GPU) or `8gpu` (BS=6/GPU) for all future experiments. Document per-GPU BS > 6 as a hard constraint for the map head. The 4GPU-bs12 configuration should not be used for any run that trains the map head.
+1. Profile first-iteration scene assignments for stage-2 BS=6 versus BS=12 and measure per-scene map loss from the loaded stage-1 checkpoint.
+2. If the exact stage-1 limit matters, run a small sweep at `10/GPU`, `12/GPU`, and `14/GPU`.
+3. Update any other reports or summary documents that still state "per-GPU batch size > 6 fails" as a universal rule.
