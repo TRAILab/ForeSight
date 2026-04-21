@@ -1224,8 +1224,11 @@ class NuScenes3DDataset(Dataset):
             tprs = np.concatenate([[0.0], np.cumsum(t_sorted == 1) / pos, [1.0]])
             fprs = np.concatenate([[0.0], np.cumsum(t_sorted == 0) / neg, [1.0]])
             auroc = float(np.trapz(tprs, fprs))
+            j = tprs[1:-1] - fprs[1:-1]
+            opt_threshold = float(scores[order][int(np.argmax(j))])
         else:
             auroc = float('nan')
+            opt_threshold = float('nan')
 
         vis_mask = targets == 1.0
         occ_mask = targets == 0.0
@@ -1235,6 +1238,7 @@ class NuScenes3DDataset(Dataset):
         return {
             'visibility/accuracy':          accuracy,
             'visibility/auroc':             auroc,
+            'visibility/opt_threshold':     opt_threshold,
             'visibility/accuracy_visible':  acc_vis,
             'visibility/accuracy_occluded': acc_occ,
             'visibility/n_matched':         int(len(targets)),
