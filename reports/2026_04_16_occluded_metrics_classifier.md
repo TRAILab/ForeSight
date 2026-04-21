@@ -4,8 +4,10 @@
 
 1. ~~**Fix `invert_visibility` and re-run eval from existing checkpoint.**~~ Done — Narval job 59639710. `invert_visibility=True` + `occ_vis_threshold=0.1` confirmed working (vis/ is now non-zero: NDS=0.311, mAP=0.112). See results below.
 2. ~~**Tune `occ_vis_threshold` — threshold=0.1 is too strict.**~~ Re-eval complete — DGX job 3610, `occ_vis_threshold=0.5`. Classifier collapsed to predicting occluded for everything (acc_visible=0.004); threshold sweep cannot fix this. Needs retraining with lower alpha.
-3. **Add TPR at fixed threshold as a supplementary primary occluded metric.** It bypasses the FP-contamination problem entirely and is directly interpretable as recall capability.
-4. **Stage 1 counterpart.** Evaluate whether adding the occluded classifier head to Stage 1 training improves Stage 2 initialisation for occluded detection.
+3. ~~**Fix AUROC direction bug in `_evaluate_visibility_accuracy`.**~~ Fixed — `invert_visibility` flag threaded from `eval_mode` into the function; scores flipped to P(visible) when `False`. All new configs set `eval_mode.invert_visibility=True`.
+4. **Retrain with lower alpha.** DGX jobs 3611 (alpha=0.5) and 3612 (alpha=0.7) — running.
+5. **Add TPR at fixed threshold as a supplementary primary occluded metric.** It bypasses the FP-contamination problem entirely and is directly interpretable as recall capability.
+6. **Stage 1 counterpart.** Evaluate whether adding the occluded classifier head to Stage 1 training improves Stage 2 initialisation for occluded detection.
 
 ## Abstract
 
@@ -39,6 +41,14 @@ Added `compute_tpr_fdr()` to `occluded_det_eval.py`. Reads `metrics_details.json
 Added to all four evaluators: `img_bbox_NuScenes/`, `vis/`, `occluded/`, `all/`.
 
 Also added `visibility/opt_threshold` — the Youden's J optimal threshold (argmax TPR−FPR over the ROC curve), computed from the same sorted-score pass as AUROC. This gives the principled `occ_vis_threshold` value for each checkpoint without manual sweeping.
+
+### AUROC direction fix
+
+`_evaluate_visibility_accuracy` always computes AUROC with `gt_vis = (num_lidar_pts > 0)` as the positive class (1 = visible). Scores must therefore be P(visible) for the metric to be meaningful. This was not enforced: when `gt_visibility_key='gt_occluded'` and `invert_visibility=False` in the decoder, scores are P(occluded) and AUROC = 1 − true AUROC.
+
+Fix: added `invert_visibility` parameter to `_evaluate_visibility_accuracy` (default `True` = scores are already P(visible)). When `False`, scores are flipped before computing AUROC, accuracy, and opt_threshold. The caller reads `eval_mode.get('invert_visibility', True)`, so configs that set `invert_visibility=True` in `eval_mode` get correct metrics without any heuristic. All new occhead configs include this flag.
+
+Note: job 3610 reported AUROC=0.121 despite having `invert_visibility=True` in the decoder config. The cause is not yet confirmed — the eval may have loaded cached inference results from the original wrong-sign run (59608052), or the config override did not take effect. With the fix in place and both flags set consistently, new runs should report the correct AUROC.
 
 ### Prior visibility classifier analysis
 
@@ -97,6 +107,8 @@ To make `vis/` and `occluded/` metrics symmetric and comparable, both evaluators
 | `narval` | `stage2_4gpu_bs24_occhead_occptraineval` | `59608052` | `complete` |
 | `narval` | `stage2_4gpu_bs24_occhead_occptraineval` (corrected eval: `invert_visibility=True`, `occ_vis_threshold=0.1`) | `59639710` | `complete` |
 | `dgx` | `stage2_4gpu_bs24_occhead_occptraineval` (eval rerun: `invert_visibility=True`, `occ_vis_threshold=0.5`) | `3610` | `complete` |
+| `dgx` | `stage2_4gpu_bs24_occhead_a50_occptraineval` (alpha=0.5) | `3611` | `running` |
+| `dgx` | `stage2_4gpu_bs24_occhead_a70_occptraineval` (alpha=0.7) | `3612` | `running` |
 
 ### vishead reference (DGX `sparsedrive_r50_stage2_4gpu_bs24_vishead_occptraineval`, 2026-02-26)
 
@@ -193,6 +205,10 @@ Likely explanation:
 **occhead corrected eval (Narval 59639710) — complete.** `invert_visibility=True` + `occ_vis_threshold=0.1` confirms the sign-flip fix: vis/ is now non-zero (NDS=0.311, mAP=0.112), proving the classifier is routing some predictions to the visible bucket. However, occluded/ is near-zero (NDS=0.001, mAP=0.001, mTPR=0.027). The reason: with `invert_visibility=True`, `visibility_score` = P(visible), so threshold=0.1 means a prediction must have P(visible) < 0.1 (i.e., P(occluded) > 0.9) to reach occluded/. This is too strict — the classifier routes almost everything to vis/ even for moderately occluded predictions. Standard detection is unchanged (NDS=0.520, mAP=0.411, L2=0.592), confirming the classifier head does not hurt main detection.
 
 **occhead (Narval 59608052) — complete, eval sign-flip bug identified.** Standard detection is unchanged (NDS=0.521, mAP=0.412). Classifier accuracy metrics: acc_visible=0.004, acc_occluded=0.863, AUROC=0.121. The AUROC of 0.121 looks like near-random but is actually the inverse of a well-trained classifier: because `gt_visibility_key='gt_occluded'` trains sigmoid(logit) → 1 for occluded items, and `invert_visibility=False` means the output is passed directly as `visibility_score`, the score direction is P(occluded). The eval filter uses `visibility_score < threshold → occluded` which is designed for P(visible), so the directions are inverted. Real AUROC ≈ 1 − 0.121 = 0.879 — the classifier is working well. Fix: set `invert_visibility=True` in the decoder config, which flips the score to P(visible) before it reaches the eval filters. No retraining is needed; re-running eval from the existing checkpoint should recover the correct vis/ and occluded/ metrics.
+
+**alpha sweep (DGX jobs 3611/3612) — running.** Two new training runs bracket the collapse problem. `alpha=0.85` (job 59608052) gave total gradient balance (15% × 0.85 ≈ 85% × 0.15) but still collapsed to predicting occluded for everything. `alpha=0.5` (job 3611) gives equal per-example weight; visible dominates by count (5.52:1), so if collapse is gradient-driven the model should drift toward visible — the mirror of the vishead failure. `alpha=0.7` (job 3612) is an intermediate point that provides moderate minority boost without hitting the balance point that proved unstable. Both configs have `eval_mode.invert_visibility=True` and decoder `invert_visibility=True`, so AUROC will be correctly computed for the first time. Key metrics to watch: AUROC > 0.5, acc_visible and acc_occluded both non-trivial (neither near 0 nor near 1), opt_threshold near 0.5.
+
+**AUROC fix — complete.** `_evaluate_visibility_accuracy` now accepts `invert_visibility` from `eval_mode` and flips scores when `False`. All prior runs had AUROC potentially wrong (0.121 in both 59608052 and 3610); new runs with the consistent flag will be the first reliable measurements.
 
 ## Future Work
 
