@@ -463,3 +463,282 @@ class SparseDriveAux2DHead(AnchorFreeHead):
             for view in views:
                 flat_targets.append(view.to(device=device))
         return flat_targets
+
+
+@HEADS.register_module()
+class SparseDriveAux2p5DHead(SparseDriveAux2DHead):
+    """Aux 2D head with an additional per-object log-depth regression branch."""
+
+    def __init__(
+        self,
+        loss_depth=dict(type="L1Loss", loss_weight=1.0),
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.loss_depth = build_loss(loss_depth)
+        self.depth_head = nn.Conv2d(self.embed_dims, 1, kernel_size=1)
+
+    def forward(self, feature_maps, image_wh):
+        if isinstance(feature_maps, (list, tuple)):
+            src = feature_maps[self.feat_level]
+        else:
+            src = feature_maps
+        bs, num_cams, _, _, _ = src.shape
+        x = src.flatten(0, 1)
+        image_wh = self._get_image_wh(image_wh, x.device)
+        locations = self._locations(x, image_wh)[None]
+
+        cls_feat = self.shared_cls(x)
+        cls_logits = self.cls(cls_feat).permute(0, 2, 3, 1).reshape(
+            bs * num_cams, -1, self.num_classes
+        )
+        centerness = self.centerness(cls_feat).permute(0, 2, 3, 1).reshape(
+            bs * num_cams, -1, 1
+        )
+
+        reg_feat = self.shared_reg(x)
+        ltrb = self.ltrb(reg_feat).permute(0, 2, 3, 1).contiguous().sigmoid()
+        centers2d_offset = self.center2d(reg_feat).permute(0, 2, 3, 1).contiguous()
+        pred_centers2d = apply_center_offset(locations, centers2d_offset).view(
+            bs * num_cams, -1, 2
+        )
+        pred_bboxes = apply_ltrb(locations, ltrb).view(bs * num_cams, -1, 4)
+        pred_depth = self.depth_head(reg_feat).permute(0, 2, 3, 1).reshape(
+            bs * num_cams, -1, 1
+        )
+
+        return dict(
+            cls_scores=cls_logits,
+            bbox_preds=pred_bboxes,
+            pred_centers2d=pred_centers2d,
+            centerness=centerness,
+            pred_depth=pred_depth,
+            image_wh=image_wh,
+        )
+
+    @force_fp32(apply_to=("preds_dicts",))
+    def loss(self, gt_bboxes_list, gt_labels_list, centers2d, depths, preds_dicts):
+        cls_scores = preds_dicts["cls_scores"]
+        bbox_preds = preds_dicts["bbox_preds"]
+        pred_centers2d = preds_dicts["pred_centers2d"]
+        centerness = preds_dicts["centerness"]
+        pred_depth = preds_dicts["pred_depth"]
+        image_wh = preds_dicts["image_wh"]
+
+        gt_bboxes_list = self._flatten_view_targets(gt_bboxes_list, cls_scores.device)
+        gt_labels_list = self._flatten_view_targets(gt_labels_list, cls_scores.device)
+        centers2d = self._flatten_view_targets(centers2d, cls_scores.device)
+        depths = self._flatten_view_targets(depths, cls_scores.device)
+
+        losses = self.loss_single(
+            cls_scores, bbox_preds, pred_centers2d, centerness, pred_depth,
+            gt_bboxes_list, gt_labels_list, centers2d, depths, image_wh,
+        )
+        loss_cls, loss_bbox, loss_iou, loss_centers2d, loss_centerness, loss_depth = losses
+        return dict(
+            loss_cls2d=loss_cls,
+            loss_bbox2d=loss_bbox,
+            loss_iou2d=loss_iou,
+            loss_centers2d=loss_centers2d,
+            loss_centerness2d=loss_centerness,
+            loss_depth2d=loss_depth,
+        )
+
+    def loss_single(
+        self,
+        cls_scores,
+        bbox_preds,
+        pred_centers2d,
+        centerness,
+        pred_depth,
+        gt_bboxes_list,
+        gt_labels_list,
+        centers2d_list,
+        depths_list,
+        image_wh,
+    ):
+        num_imgs = cls_scores.size(0)
+        cls_scores_list = [cls_scores[i] for i in range(num_imgs)]
+        bbox_preds_list = [bbox_preds[i] for i in range(num_imgs)]
+        centers2d_preds_list = [pred_centers2d[i] for i in range(num_imgs)]
+
+        targets = self._get_targets_2p5d(
+            cls_scores_list, bbox_preds_list, centers2d_preds_list,
+            gt_bboxes_list, gt_labels_list, centers2d_list, depths_list, image_wh,
+        )
+        (
+            labels_list,
+            label_weights_list,
+            bbox_targets_list,
+            bbox_weights_list,
+            centers2d_targets_list,
+            depth_targets_list,
+            depth_weights_list,
+            num_total_pos,
+            num_total_neg,
+        ) = targets
+
+        labels = torch.cat(labels_list, 0)
+        label_weights = torch.cat(label_weights_list, 0)
+        bbox_targets = torch.cat(bbox_targets_list, 0)
+        bbox_weights = torch.cat(bbox_weights_list, 0)
+        centers2d_targets = torch.cat(centers2d_targets_list, 0)
+        depth_targets = torch.cat(depth_targets_list, 0)
+        depth_weights = torch.cat(depth_weights_list, 0)
+
+        img_w, img_h = image_wh[0], image_wh[1]
+        factor = bbox_preds.new_tensor([img_w, img_h, img_w, img_h]).unsqueeze(0)
+        bbox_preds_flat = bbox_preds.reshape(-1, 4)
+        bboxes = bbox_cxcywh_to_xyxy(bbox_preds_flat) * factor
+        bboxes_gt = bbox_cxcywh_to_xyxy(bbox_targets) * factor
+
+        iou_score = bbox_overlaps(bboxes_gt, bboxes, is_aligned=True).reshape(-1)
+
+        cls_scores_flat = cls_scores.reshape(-1, self.cls_out_channels)
+        cls_avg_factor = num_total_pos * 1.0 + num_total_neg * self.bg_cls_weight
+        if self.sync_cls_avg_factor:
+            cls_avg_factor = reduce_mean(cls_scores.new_tensor([cls_avg_factor]))
+        cls_avg_factor = max(cls_avg_factor, 1)
+        loss_cls = self.loss_cls2d(
+            cls_scores_flat,
+            (labels, iou_score.detach()),
+            label_weights,
+            avg_factor=cls_avg_factor,
+        )
+
+        num_total_pos = loss_cls.new_tensor([num_total_pos])
+        num_total_pos = torch.clamp(reduce_mean(num_total_pos), min=1).item()
+
+        loss_iou = self.loss_iou2d(
+            bboxes, bboxes_gt, bbox_weights, avg_factor=max(num_total_pos, 1)
+        )
+
+        heatmaps = [
+            self._get_heatmap_single(cur_centers, cur_boxes, image_wh, centerness.device)
+            for cur_centers, cur_boxes in zip(centers2d_list, gt_bboxes_list)
+        ]
+        heatmaps = torch.stack(heatmaps, dim=0).view(num_imgs, -1, 1)
+        loss_centerness = self.loss_centerness(
+            clip_sigmoid(centerness),
+            heatmaps,
+            avg_factor=max(num_total_pos, 1),
+        )
+
+        loss_bbox = self.loss_bbox2d(
+            bbox_preds_flat, bbox_targets, bbox_weights, avg_factor=num_total_pos
+        )
+        loss_centers2d = self.loss_centers2d(
+            pred_centers2d.view(-1, 2),
+            centers2d_targets,
+            bbox_weights[:, :2],
+            avg_factor=num_total_pos,
+        )
+        loss_depth = self.loss_depth(
+            pred_depth.reshape(-1, 1),
+            depth_targets,
+            depth_weights,
+            avg_factor=num_total_pos,
+        )
+        return loss_cls, loss_bbox, loss_iou, loss_centers2d, loss_centerness, loss_depth
+
+    def _get_targets_2p5d(
+        self,
+        cls_scores_list,
+        bbox_preds_list,
+        centers2d_preds_list,
+        gt_bboxes_list,
+        gt_labels_list,
+        centers2d_list,
+        depths_list,
+        image_wh,
+    ):
+        outputs = multi_apply(
+            self._get_target_single_2p5d,
+            cls_scores_list,
+            bbox_preds_list,
+            centers2d_preds_list,
+            gt_bboxes_list,
+            gt_labels_list,
+            centers2d_list,
+            depths_list,
+            image_wh=image_wh,
+        )
+        (
+            labels_list,
+            label_weights_list,
+            bbox_targets_list,
+            bbox_weights_list,
+            centers2d_targets_list,
+            depth_targets_list,
+            depth_weights_list,
+            pos_inds_list,
+            neg_inds_list,
+        ) = outputs
+        num_total_pos = sum(inds.numel() for inds in pos_inds_list)
+        num_total_neg = sum(inds.numel() for inds in neg_inds_list)
+        return (
+            labels_list,
+            label_weights_list,
+            bbox_targets_list,
+            bbox_weights_list,
+            centers2d_targets_list,
+            depth_targets_list,
+            depth_weights_list,
+            num_total_pos,
+            num_total_neg,
+        )
+
+    def _get_target_single_2p5d(
+        self,
+        cls_score,
+        bbox_pred,
+        pred_centers2d,
+        gt_bboxes,
+        gt_labels,
+        centers2d,
+        depths,
+        image_wh,
+    ):
+        num_bboxes = bbox_pred.size(0)
+
+        assign_result = self.assigner2d.assign(
+            bbox_pred, cls_score, pred_centers2d, gt_bboxes, gt_labels, centers2d, image_wh
+        )
+        sampling_result = self.sampler.sample(assign_result, bbox_pred, gt_bboxes)
+        pos_inds = sampling_result.pos_inds
+        neg_inds = sampling_result.neg_inds
+
+        labels = gt_bboxes.new_full((num_bboxes,), self.num_classes, dtype=torch.long)
+        label_weights = gt_bboxes.new_ones(num_bboxes)
+        bbox_targets = torch.zeros_like(bbox_pred)
+        bbox_weights = torch.zeros_like(bbox_pred)
+        centers2d_targets = bbox_pred.new_zeros((num_bboxes, 2))
+        depth_targets = bbox_pred.new_zeros((num_bboxes, 1))
+        depth_weights = bbox_pred.new_zeros((num_bboxes, 1))
+
+        if pos_inds.numel() > 0:
+            labels[pos_inds] = gt_labels[sampling_result.pos_assigned_gt_inds].long()
+            bbox_weights[pos_inds] = 1.0
+            depth_weights[pos_inds] = 1.0
+
+            img_w, img_h = image_wh[0], image_wh[1]
+            factor = bbox_pred.new_tensor([img_w, img_h, img_w, img_h]).unsqueeze(0)
+            pos_gt_bboxes_normalized = sampling_result.pos_gt_bboxes / factor
+            bbox_targets[pos_inds] = bbox_xyxy_to_cxcywh(pos_gt_bboxes_normalized)
+            centers2d_targets[pos_inds] = (
+                centers2d[sampling_result.pos_assigned_gt_inds] / factor[:, :2]
+            )
+            gt_depths = depths[sampling_result.pos_assigned_gt_inds].clamp(min=1e-3)
+            depth_targets[pos_inds] = gt_depths.log().unsqueeze(-1)
+
+        return (
+            labels,
+            label_weights,
+            bbox_targets,
+            bbox_weights,
+            centers2d_targets,
+            depth_targets,
+            depth_weights,
+            pos_inds,
+            neg_inds,
+        )
