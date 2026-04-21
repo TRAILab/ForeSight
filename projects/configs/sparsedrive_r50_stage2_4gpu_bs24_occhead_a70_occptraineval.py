@@ -732,7 +732,9 @@ load_from = 'ckpt/sparsedrive_stage1.pth'
 
 # ================== occluded head overrides ========================
 # Train a binary occluded classifier (1=occluded, 0=visible) using gt_occluded.
-# FocalLoss alpha=0.85 upweights the minority occluded class (~15% of matched preds).
+# alpha=0.70: moderate minority boost; sits between balanced (0.85) and equal-weight
+# (0.50) — tests whether a lighter upweight avoids all-occluded collapse while still
+# correcting the 5.52:1 class imbalance.
 # invert_visibility=True in the decoder flips sigmoid(logit) back to P(visible)
 # so visibility_scores and accuracy metrics stay in the existing convention.
 model['head']['det_head']['gt_visibility_key'] = 'gt_occluded'
@@ -741,7 +743,7 @@ model['head']['det_head']['loss_visibility'] = dict(
     type='FocalLoss',
     use_sigmoid=True,
     gamma=2.0,
-    alpha=0.85,
+    alpha=0.70,
     loss_weight=1.0,
 )
 model['head']['det_head']['decoder'] = dict(

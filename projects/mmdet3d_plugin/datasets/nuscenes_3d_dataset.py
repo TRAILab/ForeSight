@@ -1141,18 +1141,23 @@ class NuScenes3DDataset(Dataset):
 
         return {f'all/{k}': v for k, v in metrics.items()}
 
-    def _evaluate_visibility_accuracy(self, results):
+    def _evaluate_visibility_accuracy(self, results, invert_visibility=True):
         """Evaluate the visibility head calibration on matched GT boxes.
 
         For each GT box (visible or occluded) we find the closest same-class
         prediction within MATCH_DIST metres (BEV).  We then compare the
-        prediction's sigmoid visibility score to the GT sensor-visibility flag
-        (num_lidar_pts > 0).
+        prediction's visibility score to the GT sensor-visibility flag
+        (num_lidar_pts > 0 = 1 for visible).
+
+        invert_visibility must match the decoder config:
+          True  (default) — decoder output is P(visible); metrics computed as-is.
+          False           — decoder output is P(occluded); scores are flipped to
+                           P(visible) before computing any metric.
 
         Returned metrics
         ----------------
         visibility/accuracy          : fraction correct at 0.5 threshold
-        visibility/auroc             : area under the ROC curve
+        visibility/auroc             : area under the ROC curve (positive = visible)
         visibility/accuracy_visible  : accuracy on visible-GT-matched pairs
         visibility/accuracy_occluded : accuracy on occluded-GT-matched pairs
         visibility/n_matched         : total matched pairs across the val set
@@ -1161,7 +1166,7 @@ class NuScenes3DDataset(Dataset):
         """
         MATCH_DIST = 4.0  # BEV centre-distance threshold in metres
 
-        all_scores = []   # predicted visibility scores (sigmoid)
+        all_scores = []   # predicted visibility scores, in P(visible) convention
         all_targets = []  # GT sensor-visibility (0.0 / 1.0)
 
         for i, result in enumerate(results):
@@ -1211,6 +1216,10 @@ class NuScenes3DDataset(Dataset):
 
         scores  = np.array(all_scores,  dtype=np.float64)
         targets = np.array(all_targets, dtype=np.float64)
+        if not invert_visibility:
+            # Decoder output is P(occluded); flip to P(visible) so that higher
+            # score means more likely visible, consistent with gt_vis = 1 for visible.
+            scores = 1.0 - scores
         preds   = (scores > 0.5).astype(np.float64)
 
         accuracy = float((preds == targets).mean())
@@ -1293,7 +1302,10 @@ class NuScenes3DDataset(Dataset):
                 if tmp_dir is not None:
                     tmp_dir.cleanup()
 
-            vis_metrics = self._evaluate_visibility_accuracy(results)
+            vis_metrics = self._evaluate_visibility_accuracy(
+                results,
+                invert_visibility=eval_mode.get('invert_visibility', True),
+            )
             results_dict.update(vis_metrics)
 
         if eval_mode['with_map']:
