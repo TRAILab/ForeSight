@@ -2,9 +2,10 @@
 
 ## TODO
 
-- Parse metrics for Narval job `59608052` (`occhead_occptraineval`) once complete
-- Parse eval rerun for `sparsedrive_r50_stage1_8gpu_noflash_occptraineval` on Apollo once complete
-- Tune alpha / confidence threshold based on results
+1. ~~**Fix `invert_visibility` and re-run eval from existing checkpoint.**~~ Done — Narval job 59639710. `invert_visibility=True` + `occ_vis_threshold=0.1` confirmed working (vis/ is now non-zero: NDS=0.311, mAP=0.112). See results below.
+2. ~~**Tune `occ_vis_threshold` — threshold=0.1 is too strict.**~~ Re-eval submitted — DGX job 3609, `occ_vis_threshold=0.5`. Results pending.
+3. **Add TPR at fixed threshold as a supplementary primary occluded metric.** It bypasses the FP-contamination problem entirely and is directly interpretable as recall capability.
+4. **Stage 1 counterpart.** Evaluate whether adding the occluded classifier head to Stage 1 training improves Stage 2 initialisation for occluded detection.
 
 ## Abstract
 
@@ -36,6 +37,8 @@ Added `compute_tpr_fdr()` to `occluded_det_eval.py`. Reads `metrics_details.json
 - Per-class `{cls}_tpr` and `{cls}_fdr` at `dist_th_tp` (2 m)
 
 Added to all four evaluators: `img_bbox_NuScenes/`, `vis/`, `occluded/`, `all/`.
+
+Also added `visibility/opt_threshold` — the Youden's J optimal threshold (argmax TPR−FPR over the ROC curve), computed from the same sorted-score pass as AUROC. This gives the principled `occ_vis_threshold` value for each checkpoint without manual sweeping.
 
 ### Prior visibility classifier analysis
 
@@ -89,8 +92,36 @@ To make `vis/` and `occluded/` metrics symmetric and comparable, both evaluators
 
 | Server | Config | Job ID | Status |
 | --- | --- | --- | --- |
-| `apollo` | `stage1_8gpu_noflash_occptraineval` (eval rerun) | — | `running` — tmux `eval_occ`, log `eval_rerun.log` |
-| `narval` | `stage2_4gpu_bs24_occhead_occptraineval` | `59608052` | `running` |
+| `apollo` | `stage1_8gpu_noflash_occptraineval` (eval rerun) | — | `complete` |
+| `narval` | `stage2_4gpu_bs24_occhead_occptraineval` | `59608052` | `complete` |
+| `narval` | `stage2_4gpu_bs24_occhead_occptraineval` (corrected eval: `invert_visibility=True`, `occ_vis_threshold=0.1`) | `59639710` | `complete` |
+| `dgx` | `stage2_4gpu_bs24_occhead_occptraineval` (eval rerun: `invert_visibility=True`, `occ_vis_threshold=0.5`) | `3610` | `running` |
+
+### occhead threshold=0.5 eval (DGX job 3609, `invert_visibility=True`, `occ_vis_threshold=0.5`)
+
+Results pending.
+
+The key question: with threshold=0.5, a prediction reaches `occluded/` if P(visible) < 0.5 (P(occluded) > 0.5). Based on the classifier accuracy analysis, ~14% of occluded GT objects exceed this threshold (true acc_occluded ≈ 0.137), so occluded/ should be non-trivially populated. Whether this is enough to give a meaningful mAP depends on whether those ~14% are spatially well-localised.
+
+### occhead corrected eval (Narval 59639710, `invert_visibility=True`, `occ_vis_threshold=0.1`)
+
+| Metric prefix | NDS | mAP | L2 | obj_box_col | car_epa | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| img_bbox_NuScenes (standard) | 0.520 | 0.411 | 0.592 | 0.154% | 0.478 | |
+| all/ | 0.515 | 0.403 | — | 0.154% | 0.474 | |
+| occluded/ | 0.001 | 0.001 | — | 0.0% | — | near-empty: threshold too strict |
+| vis/ | 0.311 | 0.112 | — | — | — | non-zero: sign-flip fix confirmed |
+
+### occhead results (Narval 59608052, original `invert_visibility=False`)
+
+| Metric prefix | NDS | mAP | mAP_normal | L2 | obj_box_col |
+| --- | --- | --- | --- | --- | --- |
+| img_bbox_NuScenes (standard) | 0.521 | 0.412 | 0.551 | 0.594 | 0.156% |
+| all/ | 0.515 | 0.404 | — | — | 0.156% |
+| occluded/ | 0.260 | 0.035 | — | — | 0.0% |
+| vis/ | 0.0 | 0.0 | — | — | — |
+
+The vis/ metrics being 0.0 indicates the classifier collapsed to predicting all boxes as occluded — the visibility filter (`visibility_score >= threshold`) produced an empty prediction set. The occluded/ NDS=0.260/mAP=0.035 are non-zero, consistent with the classifier passing occluded-class predictions through. Standard detection (img_bbox_NuScenes) is essentially unchanged from the baseline (NDS=0.521 vs 0.523, mAP=0.412 vs 0.413).
 
 ### Baseline occluded PR curve analysis (`occptraineval`)
 
@@ -106,7 +137,7 @@ To make `vis/` and `occluded/` metrics symmetric and comparable, both evaluators
 | bicycle | 0.480 | 0.993 | 0.540 | 0.995 |
 | **mean** | **0.537** | **0.988** | **0.660** | **0.985** |
 
-_occhead accuracy metrics to be filled after run._
+_Classifier accuracy metrics (acc_visible / acc_occluded) not yet extracted — requires inspecting the full eval log._
 
 ### Training-set prior summary
 
@@ -129,11 +160,11 @@ What regressed or stayed flat:
 Likely explanation:
 - `The model already has latent occluded-object representations (vishead acc_occ=0.80 confirms this); the bottleneck is a reliable classifier to surface them`
 
-Recommended model:
-- `sparsedrive_r50_stage2_4gpu_bs24_occhead_occptraineval` (pending results)
+**occhead threshold=0.5 eval (DGX job 3610) — running.** Re-eval of the same checkpoint as job 59639710 with `occ_vis_threshold` raised from 0.1 to 0.5. With threshold=0.5, a prediction reaches `occluded/` if P(visible) < 0.5 (P(occluded) > 0.5). Code inspection of the accuracy metric (`nuscenes_3d_dataset.py:1214`) confirms the classifier is not collapsed but is miscalibrated: it assigns P(occ) < 0.5 to ~86% of occluded objects (acc_occluded=0.863 in the wrong-sign run means true acc_occluded≈0.137 after correction). AUROC=0.879 (corrected) confirms the classifier can discriminate — it just outputs sub-0.5 P(occ) for most occluded objects, so the threshold=0.5 eval will be sparse. If occluded/ is still near-zero at threshold=0.5, the classifier needs retraining with adjusted calibration rather than a threshold sweep.
 
-Why:
-- `Corrects both failure modes of prior experiments; if alpha=0.85 converges, the classifier enables a meaningful occluded precision signal`
+**occhead corrected eval (Narval 59639710) — complete.** `invert_visibility=True` + `occ_vis_threshold=0.1` confirms the sign-flip fix: vis/ is now non-zero (NDS=0.311, mAP=0.112), proving the classifier is routing some predictions to the visible bucket. However, occluded/ is near-zero (NDS=0.001, mAP=0.001, mTPR=0.027). The reason: with `invert_visibility=True`, `visibility_score` = P(visible), so threshold=0.1 means a prediction must have P(visible) < 0.1 (i.e., P(occluded) > 0.9) to reach occluded/. This is too strict — the classifier routes almost everything to vis/ even for moderately occluded predictions. Standard detection is unchanged (NDS=0.520, mAP=0.411, L2=0.592), confirming the classifier head does not hurt main detection.
+
+**occhead (Narval 59608052) — complete, eval sign-flip bug identified.** Standard detection is unchanged (NDS=0.521, mAP=0.412). Classifier accuracy metrics: acc_visible=0.004, acc_occluded=0.863, AUROC=0.121. The AUROC of 0.121 looks like near-random but is actually the inverse of a well-trained classifier: because `gt_visibility_key='gt_occluded'` trains sigmoid(logit) → 1 for occluded items, and `invert_visibility=False` means the output is passed directly as `visibility_score`, the score direction is P(occluded). The eval filter uses `visibility_score < threshold → occluded` which is designed for P(visible), so the directions are inverted. Real AUROC ≈ 1 − 0.121 = 0.879 — the classifier is working well. Fix: set `invert_visibility=True` in the decoder config, which flips the score to P(visible) before it reaches the eval filters. No retraining is needed; re-running eval from the existing checkpoint should recover the correct vis/ and occluded/ metrics.
 
 ## Future Work
 
