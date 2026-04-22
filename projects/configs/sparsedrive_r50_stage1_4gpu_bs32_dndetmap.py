@@ -9,8 +9,8 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 64
-num_gpus = 8
+total_batch_size = 32
+num_gpus = 4
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
 num_epochs = 100
@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage1_8gpu_noflash_dndetmap',),
+                name='sparsedrive_r50_stage1_4gpu_bs32_dndetmap',),
             interval=50)
     ],
 )
@@ -170,7 +170,7 @@ model = dict(
                 * (num_decoder - num_single_frame_decoder)
             )[2:],
             temp_graph_model=dict(
-                type="MultiheadAttention",
+                type="MultiheadFlashAttention",
                 embed_dims=embed_dims if not decouple_attn else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -179,7 +179,7 @@ model = dict(
             if temporal
             else None,
             graph_model=dict(
-                type="MultiheadAttention",
+                type="MultiheadFlashAttention",
                 embed_dims=embed_dims if not decouple_attn else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -230,7 +230,7 @@ model = dict(
             sampler=dict(
                 type="SparseBox3DTarget",
                 num_dn_groups=5,
-                num_temp_dn_groups=3,
+                num_temp_dn_groups=0,
                 dn_noise_scale=[2.0] * 3 + [0.5] * 7,
                 max_dn_gt=32,
                 add_neg_dn=True,
@@ -311,7 +311,7 @@ model = dict(
                 * (num_decoder - num_single_frame_decoder_map)
             )[:],
             temp_graph_model=dict(
-                type="MultiheadAttention",
+                type="MultiheadFlashAttention",
                 embed_dims=embed_dims if not decouple_attn_map else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -320,7 +320,7 @@ model = dict(
             if temporal_map
             else None,
             graph_model=dict(
-                type="MultiheadAttention",
+                type="MultiheadFlashAttention",
                 embed_dims=embed_dims if not decouple_attn_map else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -444,14 +444,14 @@ model = dict(
                 dropout=drop_out,
             ),
             graph_model=dict(
-                type="MultiheadAttention",
+                type="MultiheadFlashAttention",
                 embed_dims=embed_dims if not decouple_attn_motion else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
                 dropout=drop_out,
             ),
             cross_graph_model=dict(
-                type="MultiheadAttention",
+                type="MultiheadFlashAttention",
                 embed_dims=embed_dims,
                 num_heads=num_groups,
                 batch_first=True,
@@ -691,7 +691,7 @@ data = dict(
 # ================== training ========================
 optimizer = dict(
     type="AdamW",
-    lr=4e-4,
+    lr=2e-4,
     weight_decay=0.001,
     paramwise_cfg=dict(
         custom_keys={
@@ -713,8 +713,6 @@ runner = dict(
 )
 
 # ================== eval ========================
-# Eval hook disabled during training: collect_results_cpu OOMs on 8-GPU Apollo.
-# eval_mode dict is still required by dataset.evaluate() for offline dist_test.sh runs.
 eval_mode = dict(
     with_det=True,
     with_tracking=True,
@@ -725,6 +723,6 @@ eval_mode = dict(
     motion_threshhold=0.2,
 )
 evaluation = dict(
-    interval=num_iters_per_epoch * checkpoint_epoch_interval,
+    interval=num_iters_per_epoch*checkpoint_epoch_interval,
     eval_mode=eval_mode,
 )
