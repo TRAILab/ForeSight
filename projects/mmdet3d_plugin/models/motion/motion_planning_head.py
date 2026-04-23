@@ -62,6 +62,8 @@ class MotionPlanningHead(BaseModule):
         planning_decoder=None,
         num_det=50,
         num_map=10,
+        use_planning_input_proj=False,
+        input_embed_dims=None,
         planning_cumulative_refinement=False,
         motion_cumulative_refinement=False,
         planning_deformable=False,
@@ -87,6 +89,12 @@ class MotionPlanningHead(BaseModule):
 
         self.decouple_attn = decouple_attn
         self.operation_order = operation_order
+        self.input_embed_dims = (
+            embed_dims if input_embed_dims is None else input_embed_dims
+        )
+        self.use_planning_input_proj = (
+            use_planning_input_proj and self.input_embed_dims != embed_dims
+        )
         self.planning_cumulative_refinement = planning_cumulative_refinement
         self.motion_cumulative_refinement = motion_cumulative_refinement
         self.planning_deformable = planning_deformable
@@ -126,6 +134,28 @@ class MotionPlanningHead(BaseModule):
             ]
         )
         self.embed_dims = embed_dims
+        if self.use_planning_input_proj:
+            self.instance_feature_proj = nn.Linear(
+                self.input_embed_dims, self.embed_dims, bias=False
+            )
+            self.anchor_embed_proj = nn.Linear(
+                self.input_embed_dims, self.embed_dims, bias=False
+            )
+            self.cache_feature_proj = nn.Linear(
+                self.embed_dims, self.input_embed_dims, bias=False
+            )
+            self.deformable_feature_proj = nn.Linear(
+                self.embed_dims, self.input_embed_dims, bias=False
+            )
+            self.deformable_output_proj = nn.Linear(
+                self.input_embed_dims, self.embed_dims, bias=False
+            )
+        else:
+            self.instance_feature_proj = nn.Identity()
+            self.anchor_embed_proj = nn.Identity()
+            self.cache_feature_proj = nn.Identity()
+            self.deformable_feature_proj = nn.Identity()
+            self.deformable_output_proj = nn.Identity()
 
         if self.motion_deformable_modeproj:
             self.motion_mode_projs = nn.ModuleList(
@@ -371,7 +401,7 @@ class MotionPlanningHead(BaseModule):
         # Mode query from noisy cumulative endpoint: (bs, num_dn*max_gt, 1, embed_dims)
         dn_endpoint = dn_traj.cumsum(dim=-2)[..., -1, :]
         dn_motion_mode_query = self.motion_anchor_encoder(
-            gen_sineembed_for_position(dn_endpoint)
+            gen_sineembed_for_position(dn_endpoint, hidden_dim=self.embed_dims)
         ).unsqueeze(2)
 
         num_dn_agents = self.num_dn_pred_groups * max_gt
@@ -412,7 +442,7 @@ class MotionPlanningHead(BaseModule):
         # Mode query from noisy cumulative endpoint: (bs, num_dn_ego, 1, embed_dims)
         dn_endpoint = dn_traj.cumsum(dim=-2)[..., -1, :]
         dn_plan_mode_query = self.plan_anchor_encoder(
-            gen_sineembed_for_position(dn_endpoint)
+            gen_sineembed_for_position(dn_endpoint, hidden_dim=self.embed_dims)
         ).unsqueeze(2)
 
         dn_ego_feat = torch.zeros(bs, self.num_dn_plan_groups, self.embed_dims, device=device, dtype=dtype)
@@ -442,6 +472,21 @@ class MotionPlanningHead(BaseModule):
         for m in self.modules():
             if hasattr(m, "init_weight"):
                 m.init_weight()
+
+    def _project_instance_feature(self, feature):
+        return self.instance_feature_proj(feature)
+
+    def _project_anchor_embed(self, anchor_embed):
+        return self.anchor_embed_proj(anchor_embed)
+
+    def _project_cache_feature(self, feature):
+        return self.cache_feature_proj(feature)
+
+    def _project_deformable_feature(self, feature):
+        return self.deformable_feature_proj(feature)
+
+    def _project_deformable_output(self, feature):
+        return self.deformable_output_proj(feature)
 
     def get_motion_anchor(
         self, 
@@ -506,8 +551,10 @@ class MotionPlanningHead(BaseModule):
         anchor_handler,
     ):   
         # =========== det/map feature/anchor ===========
-        instance_feature = det_output["instance_feature"]
-        anchor_embed = det_output["anchor_embed"]
+        raw_instance_feature = det_output["instance_feature"]
+        raw_anchor_embed = det_output["anchor_embed"]
+        instance_feature = self._project_instance_feature(raw_instance_feature)
+        anchor_embed = self._project_anchor_embed(raw_anchor_embed)
         det_classification = det_output["classification"][-1].sigmoid()
         det_anchors = det_output["prediction"][-1]
         det_confidence = det_classification.max(dim=-1).values
@@ -516,8 +563,12 @@ class MotionPlanningHead(BaseModule):
         )
 
         if map_output is not None:
-            map_instance_feature = map_output["instance_feature"]
-            map_anchor_embed = map_output["anchor_embed"]
+            map_instance_feature = self._project_instance_feature(
+                map_output["instance_feature"]
+            )
+            map_anchor_embed = self._project_anchor_embed(
+                map_output["anchor_embed"]
+            )
             map_classification = map_output["classification"][-1].sigmoid()
             map_anchors = map_output["prediction"][-1]
             map_confidence = map_classification.max(dim=-1).values
@@ -526,7 +577,7 @@ class MotionPlanningHead(BaseModule):
             )
 
         # =========== get ego/temporal feature/anchor ===========
-        bs, num_anchor, dim = instance_feature.shape
+        bs, num_anchor, _ = instance_feature.shape
         (
             ego_feature,
             ego_anchor,
@@ -541,11 +592,15 @@ class MotionPlanningHead(BaseModule):
             mask,
             anchor_handler,
         )
-        ego_anchor_embed = anchor_encoder(ego_anchor)
-        temp_anchor_embed = anchor_encoder(temp_anchor)
+        ego_feature_raw = ego_feature
+        ego_feature = self._project_instance_feature(ego_feature)
+        ego_anchor_embed = self._project_anchor_embed(anchor_encoder(ego_anchor))
+        temp_instance_feature = self._project_instance_feature(temp_instance_feature)
+        temp_anchor_embed = self._project_anchor_embed(anchor_encoder(temp_anchor))
         temp_instance_feature = temp_instance_feature.flatten(0, 1)
         temp_anchor_embed = temp_anchor_embed.flatten(0, 1)
         temp_mask = temp_mask.flatten(0, 1)
+        dim = self.embed_dims
 
         # =========== mode anchor init ===========
         motion_anchor = self.get_motion_anchor(det_classification, det_anchors)
@@ -554,8 +609,14 @@ class MotionPlanningHead(BaseModule):
         ).reshape(bs, -1, self.ego_fut_ts, 2)
 
         # =========== mode query init ===========
-        motion_mode_query = self.motion_anchor_encoder(gen_sineembed_for_position(motion_anchor[..., -1, :]))
-        plan_pos = gen_sineembed_for_position(plan_anchor[..., -1, :])
+        motion_mode_query = self.motion_anchor_encoder(
+            gen_sineembed_for_position(
+                motion_anchor[..., -1, :], hidden_dim=self.embed_dims
+            )
+        )
+        plan_pos = gen_sineembed_for_position(
+            plan_anchor[..., -1, :], hidden_dim=self.embed_dims
+        )
         plan_mode_query = self.plan_anchor_encoder(plan_pos)
 
         # =========== cat instance and ego ===========
@@ -681,10 +742,14 @@ class MotionPlanningHead(BaseModule):
                         .reshape(bs, num_anchor * self.fut_mode, self.embed_dims)
                     )
                     attended = self.layers[i](
-                        agent_feat_exp, all_anchors_flat, all_anchors_embed,
+                        self._project_deformable_feature(agent_feat_exp),
+                        all_anchors_flat,
+                        all_anchors_embed,
                         feature_maps, metas,
                     )  # (bs, num_det * fut_mode, embed_dims), includes residual
-                    attended = attended.reshape(bs, num_anchor, self.fut_mode, self.embed_dims)
+                    attended = self._project_deformable_output(attended).reshape(
+                        bs, num_anchor, self.fut_mode, self.embed_dims
+                    )
                     if self.motion_deformable_modeproj:
                         attended = torch.stack(
                             [self.motion_mode_projs[m](attended[:, :, m, :])
@@ -703,13 +768,15 @@ class MotionPlanningHead(BaseModule):
                     motion_anchor_ref = (
                         motion_endpoint_anchor if self.motion_deformable else det_anchors
                     )
-                    agent_feature = self.layers[i](
-                        instance_feature[:, :num_anchor],
+                    agent_feature = self._project_deformable_output(self.layers[i](
+                        self._project_deformable_feature(
+                            instance_feature[:, :num_anchor]
+                        ),
                         motion_anchor_ref,
                         anchor_encoder(motion_anchor_ref),
                         feature_maps,
                         metas,
-                    )
+                    ))
                 if self.planning_deformable:
                     plan_anchor_box = self._build_planning_anchor_boxes(
                         plan_anchor.detach(),
@@ -733,11 +800,14 @@ class MotionPlanningHead(BaseModule):
                             -1, num_plan_modes, -1
                         )  # (bs, num_plan_modes, embed_dims)
                         attended_plan = self.layers[i](
-                            ego_feat_exp,
+                            self._project_deformable_feature(ego_feat_exp),
                             plan_anchor_box,
                             plan_anchor_embed,
                             feature_maps,
                             metas,
+                        )
+                        attended_plan = self._project_deformable_output(
+                            attended_plan
                         )  # (bs, num_plan_modes, embed_dims)
                         if planning_classification:
                             plan_weights = (
@@ -772,20 +842,25 @@ class MotionPlanningHead(BaseModule):
                                 .reshape(bs, num_mode * K, self.embed_dims)
                             )
                             attended = self.layers[i](
-                                query_exp, boxes_flat, embed_flat,
+                                self._project_deformable_feature(query_exp),
+                                boxes_flat,
+                                embed_flat,
                                 feature_maps, metas,
-                            )  # (bs, num_mode*K, embed_dims)
-                            plan_mode_query = attended.reshape(
+                            )
+                            plan_mode_query = self._project_deformable_output(
+                                attended
+                            ).reshape(
                                 bs, num_mode, K, self.embed_dims
                             ).mean(dim=2)
                         else:
-                            plan_mode_query = self.layers[i](
-                                plan_mode_query,
+                            plan_mode_query = self._project_deformable_output(
+                                self.layers[i](
+                                self._project_deformable_feature(plan_mode_query),
                                 plan_anchor_box,
                                 plan_anchor_embed,
                                 feature_maps,
                                 metas,
-                            )
+                            ))
                         instance_feature = torch.cat(
                             [agent_feature, instance_feature[:, num_anchor:]], dim=1
                         )
@@ -823,7 +898,9 @@ class MotionPlanningHead(BaseModule):
                 motion_anchor_upd = motion_reg.detach().cumsum(dim=-2)
                 plan_anchor_upd = plan_reg.detach().squeeze(1).cumsum(dim=-2)
                 motion_mode_query = self.motion_anchor_encoder(
-                    gen_sineembed_for_position(motion_anchor_upd[..., -1, :])
+                    gen_sineembed_for_position(
+                        motion_anchor_upd[..., -1, :], hidden_dim=self.embed_dims
+                    )
                 )
                 if self.motion_deformable_multimode:
                     motion_endpoint_anchor_all = self._build_motion_endpoint_anchors_all_modes(
@@ -837,12 +914,24 @@ class MotionPlanningHead(BaseModule):
                     )
                 plan_anchor = plan_anchor_upd
                 plan_mode_query = self.plan_anchor_encoder(
-                    gen_sineembed_for_position(plan_anchor[..., -1, :])
+                    gen_sineembed_for_position(
+                        plan_anchor[..., -1, :], hidden_dim=self.embed_dims
+                    )
                 )
         
-        self.instance_queue.cache_motion(instance_feature[:, :num_anchor], det_output, metas)
+        cache_motion_feature = (
+            self._project_cache_feature(instance_feature[:, :num_anchor])
+            if self.use_planning_input_proj
+            else instance_feature[:, :num_anchor]
+        )
+        cache_ego_feature = (
+            self._project_cache_feature(instance_feature[:, num_anchor:num_anchor+1])
+            if self.use_planning_input_proj
+            else instance_feature[:, num_anchor:num_anchor+1]
+        )
+        self.instance_queue.cache_motion(cache_motion_feature, det_output, metas)
         # Cache only the real ego token, not DN ego tokens.
-        self.instance_queue.cache_planning(instance_feature[:, num_anchor:num_anchor+1], plan_status)
+        self.instance_queue.cache_planning(cache_ego_feature, plan_status)
 
         motion_output = {
             "classification": motion_classification,
