@@ -116,6 +116,7 @@ class InstanceBank(nn.Module):
                 self.anchor_handler is not None
                 and dn_metas is not None
                 and batch_size == dn_metas["dn_anchor"].shape[0]
+                and dn_metas["dn_anchor"].shape[1] > 0
             ):
                 num_dn_group, num_dn = dn_metas["dn_anchor"].shape[1:3]
                 dn_anchor = self.anchor_handler.anchor_projection(

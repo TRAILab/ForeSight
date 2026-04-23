@@ -99,39 +99,55 @@ class SparsePoint3DTarget(BaseTargetWithDenoising):
             for x in cls_target
         ])  # (bs, max_dn_gt)
 
-        # Flatten and normalize GT polylines to (N_i, state_dims)
+        # Flatten GT polylines to (N_i, state_dims); keep raw and normalized copies.
+        # Anchors live in [0,1] normalized space; targets must stay in raw BEV space
+        # so that SparseLineLoss.normalize_line() is applied exactly once (same as
+        # the normal loss path via sample()).
         pts_norm = []
+        pts_raw = []
         for i, pts in enumerate(pts_target):
             if len(pts) == 0:
                 pts_norm.append(cls_padded.new_zeros(0, state_dims).float())
+                pts_raw.append(cls_padded.new_zeros(0, state_dims).float())
                 continue
             if pts.dim() == 4:
                 pts = pts[:, 0].flatten(-2, -1)
             elif pts.dim() == 3:
                 pts = pts.reshape(pts.shape[0], -1)
             pts = pts[:, :state_dims]
+            pts_raw.append(pts)
             pts_norm.append(self.normalize_line(pts))
 
         pts_padded = torch.stack([
             F.pad(x, (0, 0, 0, max_dn_gt - x.shape[0]))
             for x in pts_norm
-        ])  # (bs, max_dn_gt, state_dims)
+        ])  # (bs, max_dn_gt, state_dims) in [0,1]
         pts_padded = torch.where(
             cls_padded[..., None] == -1, pts_padded.new_tensor(0.0), pts_padded
+        )
+
+        pts_raw_padded = torch.stack([
+            F.pad(x, (0, 0, 0, max_dn_gt - x.shape[0]))
+            for x in pts_raw
+        ])  # (bs, max_dn_gt, state_dims) in raw BEV coords
+        pts_raw_padded = torch.where(
+            cls_padded[..., None] == -1, pts_raw_padded.new_tensor(0.0), pts_raw_padded
         )
 
         # Tile for num_dn_groups
         if self.num_dn_groups > 1:
             cls_tiled = cls_padded.tile(self.num_dn_groups, 1)
             pts_tiled = pts_padded.tile(self.num_dn_groups, 1, 1)
+            pts_raw_tiled = pts_raw_padded.tile(self.num_dn_groups, 1, 1)
         else:
             cls_tiled = cls_padded
             pts_tiled = pts_padded
+            pts_raw_tiled = pts_raw_padded
 
-        # Positive DN: small noise in normalized [0,1] space
+        # Positive DN: anchors in [0,1]; targets in raw BEV (normalized once by SparseLineLoss)
         noise = (torch.rand_like(pts_tiled) * 2 - 1) * self.dn_noise_scale
         dn_anchor = (pts_tiled + noise).clamp(0.0, 1.0)
-        dn_pts_target = pts_tiled.clone()
+        dn_pts_target = pts_raw_tiled.clone()
         dn_cls_target = -torch.ones_like(cls_tiled) * 3
 
         if self.add_neg_dn:
@@ -144,7 +160,7 @@ class SparsePoint3DTarget(BaseTargetWithDenoising):
             dn_anchor = torch.cat(
                 [dn_anchor, (pts_tiled + noise_neg * flag).clamp(0.0, 1.0)], dim=1
             )
-            dn_pts_target = torch.cat([dn_pts_target, pts_tiled.clone()], dim=1)
+            dn_pts_target = torch.cat([dn_pts_target, pts_raw_tiled.clone()], dim=1)
             dn_cls_target = torch.cat([dn_cls_target, dn_cls_target], dim=1)
             num_gt = max_dn_gt * 2
         else:

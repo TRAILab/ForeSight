@@ -4,17 +4,17 @@
 
 This report documents a reproducible HD map head convergence failure that is **confirmed for stage 2**, not uniformly for all training stages. In stage 2, per-GPU batch size **6/GPU works** while **12/GPU fails**: `sparsedrive_r50_stage2_4gpu_bs24` (24 total batch, 4 GPUs, 6/GPU) reaches map mAP=0.553, while `sparsedrive_r50_stage2_4gpu` (48 total batch, 4 GPUs, 12/GPU) reaches only map mAP=0.078. The 8-GPU control `sparsedrive_r50_stage2_8gpu_noflash` (48 total batch, 8 GPUs, 6/GPU, map mAP=0.547) rules out total batch size and nominal LR as the primary cause.
 
-The earlier wording of this report overstated the result as a universal threshold of "per-GPU batch size > 6 fails." That is too broad. Current stage-1 evidence shows **6/GPU works**, **8/GPU works**, and a quick check at **16/GPU failed**, but stage 1 was not systematically ablated here. The strongest supported conclusion is therefore:
+The earlier wording of this report overstated the result as a universal threshold of "per-GPU batch size > 6 fails." That is too broad. Updated stage-1 evidence now shows a more nuanced picture: **6/GPU works**, the standard **8-GPU / 8-GPU** stage-1 baseline works, but the **4-GPU / 8-GPU** recipe used in the April 18 denoise controls still plateaus even without DN. A quick check at **16/GPU** also failed. The strongest supported conclusion is therefore:
 
 - Stage 2: safe at `6/GPU`, broken at `12/GPU`
-- Stage 1: safe at `6/GPU` and `8/GPU`, observed broken at `16/GPU`
-- Unknown: exact stage-1 failure boundary between `8/GPU` and `16/GPU`
+- Stage 1: safe at `6/GPU`; standard `8-GPU / 8-GPU` runs can work, but `4-GPU / 8-GPU` is unstable; `16/GPU` is broken
+- Unknown: whether stage-1 instability is governed mainly by per-GPU BS, GPU count / scene composition, total batch, or their interaction
 
 ## Intro
 
 This document covers a systematic investigation into a stage-2 failure mode where the HD map head catastrophically fails to converge at high per-GPU batch size. The motivating observation was that `sparsedrive_r50_stage2_4gpu.py` (12/GPU) fails badly while `sparsedrive_r50_stage2_4gpu_bs24.py` (6/GPU) converges normally. Because both runs train the same map head, the goal was to determine whether the root cause was per-GPU batch size, total batch size, learning rate, BN behavior, or some map-specific implementation issue.
 
-The original April 1 ablation was a stage-2 study. Stage-1 evidence is included only to clarify the final conclusion and avoid overgeneralizing the stage-2 threshold.
+The original April 1 ablation was a stage-2 study. Stage-1 evidence is included only to clarify the final conclusion and avoid overgeneralizing the stage-2 threshold. That stage-1 evidence now includes the April 18 denoise controls, which show that the 4-GPU stage-1 recipe can still plateau at 8/GPU even without DN.
 
 ## Method
 
@@ -69,22 +69,24 @@ The strongest current hypothesis is initialization-time scene composition. With 
 
 This report does **not** present a controlled stage-1 ablation. The current evidence relevant to stage 1 is:
 
-- `6/GPU` works: `sparsedrive_r50_stage1_4gpu_bs24_aux2d`
-- `8/GPU` works: standard `sparsedrive_r50_stage1_8gpu_noflash` baseline and `stage1_8gpu_noflash_aux2d`
-- `16/GPU` failed in a quick check: `sparsedrive_r50_stage1_4gpu`
+- `6/GPU` works: `sparsedrive_r50_stage1_4gpu_bs24_aux2d`, and the April 18 no-DN control `stage1_4gpu_bs24` also converged at 6/GPU.
+- Standard `8-GPU / 8-GPU` stage-1 runs work: `sparsedrive_r50_stage1_8gpu_noflash` and `stage1_8gpu_noflash_aux2d`.
+- `4-GPU / 8-GPU` can still fail: the April 18 no-DN control `stage1_4gpu_bs32` plateaued at the same map-loss level as the DN variant, showing that the instability there is not DN-specific.
+- `16/GPU` failed in a quick check: `sparsedrive_r50_stage1_4gpu`.
 
-So stage 1 is more tolerant than stage 2, but its exact failure boundary is still unknown.
+So stage 1 is more tolerant than stage 2, but it is not accurate to summarize it as simply "8/GPU works." The current evidence is better described as: 6/GPU is safe, some 8/GPU recipes work, and the 4-GPU 8/GPU recipe can still collapse.
 
 ## Discussion
 
-The main conclusion is stage-specific. For **stage 2**, the map head is reliable at `6/GPU` and broken at `12/GPU`; that conclusion is directly supported by controlled comparisons and multiple failed ablations. For **stage 1**, the data only support that `6/GPU` and `8/GPU` are safe while `16/GPU` is not. The earlier wording of this report overgeneralized the stage-2 result into a universal rule, which is not supported by the current evidence.
+The main conclusion is stage-specific. For **stage 2**, the map head is reliable at `6/GPU` and broken at `12/GPU`; that conclusion is directly supported by controlled comparisons and multiple failed ablations. For **stage 1**, the data do not support a single clean per-GPU threshold: `6/GPU` is safe, the standard 8-GPU baseline also works at `8/GPU`, but the 4-GPU `8/GPU` controls from the denoise follow-up still collapse, and `16/GPU` is broken. The earlier wording of this report overgeneralized the stage-2 result into a universal rule, which is not supported by the current evidence.
 
 The failed `normeval`, `mapfeatnograd`, and `gradacc` ablations rule out several simple explanations: BN running statistics, anchor-init gradients, and optimizer-step variance are not the primary cause of the stage-2 collapse. The `8gpu_noflash` control also rules out total batch size and nominal LR. No explicit code-level batch-size bug was found in the audited map-head path. The best remaining explanation is that the map head is highly sensitive to scene composition early in training and that larger per-GPU batches in stage 2 expose it to a worse initial loss landscape.
 
 Operationally, the safe rule is:
 
 - keep **stage-2 with-map** training at `6/GPU`
-- allow **stage-1 with-map** training at `8/GPU`
+- prefer **stage-1 with-map** training at `6/GPU` when using the 4-GPU recipe
+- do not assume **stage-1 8/GPU** is universally safe across different GPU-count / batch-layout recipes
 - avoid claiming a universal cross-stage threshold without a dedicated stage-1 sweep
 
 ## Future Work
