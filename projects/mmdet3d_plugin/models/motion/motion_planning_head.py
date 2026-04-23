@@ -30,6 +30,54 @@ from ..blocks import linear_relu_ln
 from ..instance_bank import topk
 
 
+class _MotionPlanningAdapter(nn.Module):
+    """Owns width conversion between perception and planning spaces."""
+
+    def __init__(self, input_embed_dims, planning_embed_dims, enabled):
+        super().__init__()
+        self.input_embed_dims = input_embed_dims
+        self.planning_embed_dims = planning_embed_dims
+        self.enabled = enabled and input_embed_dims != planning_embed_dims
+
+        if self.enabled:
+            self.feature_to_planning = nn.Linear(
+                input_embed_dims, planning_embed_dims, bias=False
+            )
+            self.anchor_to_planning = nn.Linear(
+                input_embed_dims, planning_embed_dims, bias=False
+            )
+            self.planning_to_deformable = nn.Linear(
+                planning_embed_dims, input_embed_dims, bias=False
+            )
+            self.deformable_to_planning = nn.Linear(
+                input_embed_dims, planning_embed_dims, bias=False
+            )
+        else:
+            self.feature_to_planning = nn.Identity()
+            self.anchor_to_planning = nn.Identity()
+            self.planning_to_deformable = nn.Identity()
+            self.deformable_to_planning = nn.Identity()
+
+    def feature(self, tensor):
+        return self.feature_to_planning(tensor)
+
+    def anchor(self, tensor):
+        return self.anchor_to_planning(tensor)
+
+    def deformable_query(self, tensor):
+        return self.planning_to_deformable(tensor)
+
+    def deformable_output(self, tensor):
+        return self.deformable_to_planning(tensor)
+
+    def cache(self, tensor):
+        if not self.enabled:
+            return tensor
+        # Queue state is detached and reused on later timesteps, so keep the
+        # cache path parameter-free.
+        return tensor[..., : self.input_embed_dims]
+
+
 @HEADS.register_module()
 class MotionPlanningHead(BaseModule):
     def __init__(
@@ -134,28 +182,11 @@ class MotionPlanningHead(BaseModule):
             ]
         )
         self.embed_dims = embed_dims
-        if self.use_planning_input_proj:
-            self.instance_feature_proj = nn.Linear(
-                self.input_embed_dims, self.embed_dims, bias=False
-            )
-            self.anchor_embed_proj = nn.Linear(
-                self.input_embed_dims, self.embed_dims, bias=False
-            )
-            self.cache_feature_proj = nn.Linear(
-                self.embed_dims, self.input_embed_dims, bias=False
-            )
-            self.deformable_feature_proj = nn.Linear(
-                self.embed_dims, self.input_embed_dims, bias=False
-            )
-            self.deformable_output_proj = nn.Linear(
-                self.input_embed_dims, self.embed_dims, bias=False
-            )
-        else:
-            self.instance_feature_proj = nn.Identity()
-            self.anchor_embed_proj = nn.Identity()
-            self.cache_feature_proj = nn.Identity()
-            self.deformable_feature_proj = nn.Identity()
-            self.deformable_output_proj = nn.Identity()
+        self.adapter = _MotionPlanningAdapter(
+            input_embed_dims=self.input_embed_dims,
+            planning_embed_dims=self.embed_dims,
+            enabled=self.use_planning_input_proj,
+        )
 
         if self.motion_deformable_modeproj:
             self.motion_mode_projs = nn.ModuleList(
@@ -474,19 +505,19 @@ class MotionPlanningHead(BaseModule):
                 m.init_weight()
 
     def _project_instance_feature(self, feature):
-        return self.instance_feature_proj(feature)
+        return self.adapter.feature(feature)
 
     def _project_anchor_embed(self, anchor_embed):
-        return self.anchor_embed_proj(anchor_embed)
+        return self.adapter.anchor(anchor_embed)
 
     def _project_cache_feature(self, feature):
-        return self.cache_feature_proj(feature)
+        return self.adapter.cache(feature)
 
     def _project_deformable_feature(self, feature):
-        return self.deformable_feature_proj(feature)
+        return self.adapter.deformable_query(feature)
 
     def _project_deformable_output(self, feature):
-        return self.deformable_output_proj(feature)
+        return self.adapter.deformable_output(feature)
 
     def get_motion_anchor(
         self, 
