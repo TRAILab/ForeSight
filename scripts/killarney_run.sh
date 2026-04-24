@@ -22,6 +22,11 @@ CMD=${@:-bash}
 # Load env if needed (e.g. when submitted via non-interactive SSH)
 [[ -f ~/.bashrc ]] && source ~/.bashrc
 
+# Enroot user-space paths (compute nodes lack write access to /var/lib/enroot, /run/enroot)
+export ENROOT_RUNTIME_PATH=$SLURM_TMPDIR/enroot/runtime
+export ENROOT_DATA_PATH=$SLURM_TMPDIR/enroot/data
+mkdir -p $ENROOT_RUNTIME_PATH $ENROOT_DATA_PATH
+
 # Command
 CONTAINER_CMD="enroot start \
 --mount $TMP_DIR:/tmp \
