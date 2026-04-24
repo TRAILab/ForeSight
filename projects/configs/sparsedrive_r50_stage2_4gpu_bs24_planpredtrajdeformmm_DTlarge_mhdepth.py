@@ -69,7 +69,7 @@ queue_length = 4 # history + current
 
 embed_dims = 256
 num_groups = 8
-motion_num_heads = 24
+motion_num_heads = 16
 motion_decoder_repeats = 12
 num_decoder = 6
 num_single_frame_decoder = 1
