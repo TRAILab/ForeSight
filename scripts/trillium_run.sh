@@ -29,8 +29,9 @@ CONTAINER_CMD="apptainer exec --nv -c -e --pwd /workspace/ForeSight/ \
 --bind=/home/spapais/ForeSight:/workspace/ForeSight/ \
 --bind=$TMP_DATA_DIR:/workspace/ForeSight/data/nuscenes \
 --bind=$WORK_DIR:/workspace/ForeSight/work_dirs \
-docker/foresight_cuda118.sif $CMD
-"
+docker/foresight_cuda118.sif \
+bash -c 'export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:$LD_LIBRARY_PATH && '"$CMD"
+
 
 # Extract dataset
 SECONDS=0
