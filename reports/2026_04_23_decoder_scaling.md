@@ -5,7 +5,7 @@
 - Record training stability, memory, and validation planning metrics for the active `DTlarge_mhdepth` run.
 - Compare motion-head-only scaling against the stage-2 baseline and the projection variants.
 - Decide whether the projection-path branch should be kept for further study or dropped in favor of motion-head-only scaling.
-- If stage-1 scaling remains interesting, create corrected `DTbase` / `DTlarge` configs with widened detection anchor encoders from the start.
+- If stage-1 scaling remains interesting, continue the current `DTbase` Apollo run and add a matching corrected `DTlarge` run.
 
 ## Abstract
 
@@ -28,7 +28,7 @@ Implementation changes:
 - Added a config-gated projection path inside `MotionPlanningHead` with `use_planning_input_proj=False` by default. When enabled, detection/map/ego/temporal features and anchor embeddings are projected from the perception width into a larger planning width, and cached planning features are projected back to the queue width.
 - Added two stage-2-only configs: `sparsedrive_r50_stage2_4gpu_bs24_ppdeformmm_DTbaseproj` with planning width `512`, and `sparsedrive_r50_stage2_4gpu_bs24_ppdeformmm_DTlargeproj` with planning width `768` plus a deeper planning decoder stack.
 - Added two stage-2-only motion-head-depth configs: `sparsedrive_r50_stage2_4gpu_bs24_planpredtrajdeformmm_DTbase_mhdepth` and `sparsedrive_r50_stage2_4gpu_bs24_planpredtrajdeformmm_DTlarge_mhdepth`. These keep `embed_dims=256` everywhere and scale only the `motion_plan_head` depth and attention head count.
-- Added stage-1 full-width configs `sparsedrive_r50_stage1_8gpu_noflash_DTbase` and `sparsedrive_r50_stage1_8gpu_noflash_DTlarge`. The first direct copies were invalid because the detection anchor encoder still output `256`; the corrected `DTbase` config makes the detection anchor encoder output match the widened model width.
+- Added stage-1 full-width configs `sparsedrive_r50_stage1_8gpu_noflash_DTbase` and `sparsedrive_r50_stage1_8gpu_noflash_DTlarge` to compare full-model width scaling against the stage-2-only motion-head variants.
 - Losses, datasets, augmentation, perception width, detection/map decoder depth, and stage-1 checkpoints are unchanged.
 
 Memory note:
@@ -57,7 +57,7 @@ _Use the first table for run tracking. Add metric tables below it once runs fini
 | `dgx` | `DTbase_mhdepth` | `3628` | `COMPLETED` |
 | `dgx` | `DTbaseproj` | `3629` | `COMPLETED` |
 | `dgx` | `DTlarge_mhdepth` reduced-depth rerun | `3635` | `RUNNING` |
-| `apollo` | `stage1 DTbase` corrected anchor-encoder rerun | n/a | `RUNNING` |
+| `apollo` | `stage1 DTbase` | n/a | `RUNNING` |
 
 _Add one or more tables here for the metrics that matter for the experiment. Keep the baseline and best variant easy to compare._
 
@@ -70,7 +70,7 @@ Experiment summary:
 | --- | --- | --- | --- |
 | `DTbaseproj` / `DTlargeproj` | Keep perception at `256`, widen planning internals with projections | Yes | `DTbaseproj` trains but underperforms baseline overall; `DTlargeproj` was brittle and not worth pursuing first |
 | `DTbase_mhdepth` / `DTlarge_mhdepth` | Keep width at `256`, scale only motion/planning decoder depth and attention partitioning | Yes | `DTbase_mhdepth` is the best result so far; `DTlarge_mhdepth` is still being tuned for memory/stability |
-| stage-1 `DTbase` / `DTlarge` | Widen full perception/det/map model in stage 1 | No stage-2-only shortcut | First direct copies were invalid because the detection anchor encoder stayed at 256; corrected `DTbase` is now running on Apollo |
+| stage-1 `DTbase` / `DTlarge` | Widen full perception/det/map model in stage 1 | No stage-2-only shortcut | `DTbase` is running on Apollo; `DTlarge` remains the larger full-model reference point |
 
 Scale comparison:
 
@@ -104,8 +104,6 @@ What improved:
 What regressed or stayed flat:
 - `DTbase_mhdepth` does not uniformly improve planning metrics: `car EPA` is slightly better, `ped EPA` is slightly worse, and `ADE` is essentially flat versus baseline.
 - `DTbaseproj` underperforms the baseline on the main aggregate metrics and has noticeably worse `obj_box_col` and `L2`.
-- The stage-1 `DTbase` / `DTlarge` direct-copy configs were not valid widening experiments at first, because the detection anchor encoder stayed at `256` while the shared model width was increased.
-
 Likely explanation:
 - Scaling only the motion/planning decoder depth is a cleaner way to add stage-2 capacity than introducing a wider projected planning space. The motion-head-only variant preserves the baseline feature interface while giving the planner more iterative refinement depth.
 - The current `mhdepth` comparison is depth-aligned with DriveTransformer, but not head-geometry-aligned. At `embed_dims=256`, a DT-style setting would use `4` heads, while the current SparseDrive motion-head experiments use `16`.
@@ -125,5 +123,5 @@ _List the next experiments that follow naturally from the results in this report
 
 - Finish the active `DTlarge_mhdepth` run and compare it directly against `DTbase_mhdepth`.
 - Try a DT-style head-count ablation for motion-head-only scaling at `embed_dims=256`, i.e. use `4` heads instead of `16`.
-- If stage-1 width scaling is retried, fix both `DTbase` and `DTlarge` configs by making the detection anchor encoder output match the widened `embed_dims`.
+- If stage-1 width scaling remains promising, run the matching `DTlarge` variant so the full-model comparison is complete.
 - Drop the projection-path branch unless a later result justifies its extra complexity.
