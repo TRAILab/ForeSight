@@ -22,22 +22,19 @@ CMD=${@:-bash}
 # Load env if needed (e.g. when submitted via non-interactive SSH)
 [[ -f ~/.bashrc ]] && source ~/.bashrc
 
-# Enroot user-space paths (compute nodes lack write access to /var/lib/enroot, /run/enroot)
-export ENROOT_RUNTIME_PATH=$SLURM_TMPDIR/enroot/runtime
-export ENROOT_DATA_PATH=$SLURM_TMPDIR/enroot/data
-mkdir -p $ENROOT_RUNTIME_PATH $ENROOT_DATA_PATH
+# apptainer available via CVMFS full path (not exposed as a module on Killarney)
+APPTAINER=/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/Core/apptainer/1.4.5/bin/apptainer
 
 # Command
-CONTAINER_CMD="enroot start \
---mount $TMP_DIR:/tmp \
---mount /home/spapais/ForeSight:/workspace/ForeSight \
---mount $TMP_DATA_DIR:/workspace/ForeSight/data/nuscenes \
---mount $WORK_DIR:/workspace/ForeSight/work_dirs \
+CONTAINER_CMD="$APPTAINER exec --nv -c -e --pwd /workspace/ForeSight/ \
 --env WANDB_API_KEY=$WANDB_API_KEY \
 --env WANDB_MODE=offline \
 --env TMPDIR=/tmp \
-/home/spapais/ForeSight/docker/foresight_cuda118.sqsh \
-bash -c \"cd /workspace/ForeSight && $CMD\""
+--bind=$TMP_DIR:/tmp \
+--bind=/home/spapais/ForeSight:/workspace/ForeSight/ \
+--bind=$TMP_DATA_DIR:/workspace/ForeSight/data/nuscenes \
+--bind=$WORK_DIR:/workspace/ForeSight/work_dirs \
+docker/foresight_cuda118.sif $CMD"
 
 # Extract dataset
 SECONDS=0
