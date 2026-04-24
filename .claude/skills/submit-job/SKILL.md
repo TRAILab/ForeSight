@@ -19,7 +19,7 @@ Verify the config exists on the remote host:
 ssh <host> "test -f <remote_repo>/<config> && echo exists || echo MISSING"
 ```
 
-If missing, stop and tell the user to sync code first.
+If missing, stop and tell the user to push locally and run `git pull` on the remote server.
 
 ## Wrapped command
 - Train: `bash ./tools/dist_train.sh <config> <gpus> --deterministic`
@@ -47,15 +47,16 @@ Parse `Submitted batch job <ID>`.
 
 ### Trillium
 ```bash
-ssh trillium "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/trillium_run.sh <wrapped_cmd>"
+ssh trillium_gpu "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/trillium_run.sh <wrapped_cmd>"
 ```
 Parse `Submitted batch job <ID>`.
 
 ### Killarney
 ```bash
-ssh killarney "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/killarney_run.sh <wrapped_cmd>"
+ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && sbatch --export=ALL /home/spapais/ForeSight/scripts/killarney_run.sh <wrapped_cmd>"
 ```
 Parse `Submitted batch job <ID>`.
+Note: apptainer is not yet installed on Killarney — container jobs will fail until Vector sysadmins install it.
 
 ## Output
 - For DGX, Narval, Trillium, and Killarney, print the job ID and suggest `/parse-metrics --server <server> --job <ID>`.

@@ -68,20 +68,23 @@ Autonomous driving research codebase built on SparseDrive. Training and evaluati
 - WandB runs in offline mode on Narval.
 
 ### Trillium
-- Host: `trillium`
+- CPU login host: `trillium` (`trillium.scinet.utoronto.ca`)
+- GPU login host: `trillium_gpu` (`trillium-gpu.scinet.utoronto.ca`) — GPU jobs must be submitted from here
 - Repo: `/home/spapais/ForeSight`
 - No VPN required
 - Home is read-only on compute nodes; output logs go to `/scratch/spapais/ForeSight/logs/`
-- Remote submission over SSH:
-  `ssh trillium "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/trillium_run.sh <cmd>"`
+- GPU scheduling uses `--gpus-per-node=N` (not `--gres`); only 1 or 4 GPUs allowed per node
+- Remote submission over SSH (must use GPU login node):
+  `ssh trillium_gpu "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/trillium_run.sh <cmd>"`
 - WandB runs in offline mode on Trillium.
 
 ### Killarney
 - Host: `killarney`
 - Repo: `/home/spapais/ForeSight`
 - No VPN required (geo-blocked; requires access from a Canadian institution network)
-- Remote submission over SSH:
-  `ssh killarney "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/killarney_run.sh <cmd>"`
+- SLURM requires module init; `--chdir=/scratch` is baked into the script:
+  `ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && sbatch --export=ALL /home/spapais/ForeSight/scripts/killarney_run.sh <cmd>"`
+- Apptainer is not installed — contact Vector sysadmins before running container jobs.
 - WandB runs in offline mode on Killarney.
 
 ## Git Workflow

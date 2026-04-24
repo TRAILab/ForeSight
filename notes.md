@@ -12,20 +12,20 @@ rsync -av ForeSight/ apollo:/home/spapais/ForeSight/
 # Build images
 docker build -f docker/Dockerfile -t foresight:latest .
 sudo singularity build docker/foresight.sif docker-daemon://foresight:latest
+sudo singularity build docker/foresight_cuda118.sif docker-daemon://foresight:latest
+singularity sif list docker/foresight_cuda118.sif # find squashfs partition ID                                           
+singularity sif dump <id> docker/foresight_cuda118.sif > docker/foresight_cuda118.sqsh
 
-# Sync the code to the Apollo server
+# Sync binary artifacts to servers (code changes go via git push/pull)
+# Apollo
 sudo openconnect -v vpn.uwaterloo.ca -u s2papais
-rsync -av projects scripts docker tools ckpt data requirement.txt apollo:/home/spapais/ForeSight/
-rsync -av --exclude='*.pyc' projects scripts apollo:/home/spapais/ForeSight/
-
-# Sync the code to the DGX server
-sudo nmcli con up id utias-robotics && rsync -av projects scripts docker tools ckpt data requirement.txt spapais@192.168.42.200:/raid/home/spapais/ForeSight/ && sudo nmcli con down id utias-robotics
-sudo nmcli con up id utias-robotics && rsync -av --exclude='*.pyc' projects scripts spapais@192.168.42.200:/raid/home/spapais/ForeSight/ && sudo nmcli con down id utias-robotics
-
-# Sync the code to CC server
-rsync -av projects docker ckpt data spapais@narval.alliancecan.ca:/home/spapais/ForeSight/
-rsync -av projects docker ckpt data trillium:/home/spapais/ForeSight/
-rsync -av projects docker ckpt data killarney:/home/spapais/ForeSight/
+rsync -av docker ckpt apollo:/home/spapais/ForeSight/
+# DGX
+sudo nmcli con up id utias-robotics && rsync -av docker ckpt spapais@192.168.42.200:/raid/home/spapais/ForeSight/ && sudo nmcli con down id utias-robotics
+# CC servers (Narval, Trillium, Killarney)
+rsync -av docker ckpt spapais@narval.alliancecan.ca:/home/spapais/ForeSight/
+rsync -av docker ckpt trillium:/home/spapais/ForeSight/
+rsync -av docker ckpt killarney:/home/spapais/ForeSight/
 
 # Test Stage 1
 ./scripts/local_run.sh bash ./tools/dist_test.sh projects/configs/sparsedrive_r50_stage1_1gpu.py ckpt/sparsedrive_stage1.pth 1 --deterministic --eval bbox

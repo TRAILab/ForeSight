@@ -5,7 +5,8 @@
 #SBATCH --mem=120gb
 #SBATCH --time=11:59:00 # 3 hours or 12 hours max recommended
 #SBATCH --output=/scratch/spapais/ForeSight/logs/%x-%j.log
-#SBATCH --cpus-per-task=24
+#SBATCH --chdir=/scratch/spapais/ForeSight
+#SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:l40s:4
 #SBATCH --mail-user="sandro.papais@robotics.utias.utoronto.ca"
 #SBATCH --mail-type=END,FAIL
@@ -47,9 +48,9 @@ echo "Done extracting data"
 
 # Run command
 # echo "Debug mode: sleep engaged" && sleep 5d # Uncomment to debug
-[[ -f /etc/profile.d/modules.sh ]] && source /etc/profile.d/modules.sh
-module load StdEnv/2023
-module load apptainer
+source /etc/profile.d/modules.sh
+module load slurm/killarney/24.05.7
+module load apptainer  # requires Vector sysadmins to install apptainer
 duration=$SECONDS
 echo "[$((duration/3600))h$(((duration%3600)/60))m]: Running command"
 echo "$CONTAINER_CMD"

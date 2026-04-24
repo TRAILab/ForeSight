@@ -23,12 +23,12 @@ ssh narval "source ~/.bashrc && squeue -u spapais --format='%.10i %.20j %.8T %.1
 
 ### Trillium
 ```bash
-ssh trillium "source ~/.bashrc && squeue -u spapais --format='%.10i %.20j %.8T %.10M %.6D %R' 2>/dev/null"
+ssh trillium_gpu "source ~/.bashrc && squeue -u spapais --format='%.10i %.20j %.8T %.10M %.6D %R' 2>/dev/null"
 ```
 
 ### Killarney
 ```bash
-ssh killarney "source ~/.bashrc && squeue -u spapais --format='%.10i %.20j %.8T %.10M %.6D %R' 2>/dev/null"
+ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && squeue -u spapais --format='%.10i %.20j %.8T %.10M %.6D %R' 2>/dev/null"
 ```
 
 ### Apollo
