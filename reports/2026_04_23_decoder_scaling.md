@@ -43,10 +43,10 @@ SparseDrive variants tested here:
 - Stage-2 baseline: `embed_dims=256`, motion/planning repeats `3`, motion heads `8`
 - `DTbase_mhdepth`: `embed_dims=256`, motion/planning repeats `6`, motion heads `16`
 - `DTlarge_mhdepth`: `embed_dims=256`, motion/planning repeats `8` or `12` depending on run, motion heads `16`
-- `DTbaseproj`: perception stays `256`, planning width `512`
-- `DTlargeproj`: perception stays `256`, planning width `768`
-- stage-1 `DTbase`: full model width `512`, detection/map decoder depth `6`
-- stage-1 `DTlarge`: full model width `768`, detection/map decoder depth `12`
+- `DTbaseproj`: perception stays `256`, planning width `512`, motion heads `8`
+- `DTlargeproj`: perception stays `256`, planning width `768`, motion heads `12`
+- stage-1 `DTbase`: full model width `512`, detection/map decoder depth `6`, det/map heads `8`
+- stage-1 `DTlarge`: full model width `768`, detection/map decoder depth `12`, det/map heads `12`
 
 ## Results
 

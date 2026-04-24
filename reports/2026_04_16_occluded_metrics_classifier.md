@@ -5,7 +5,7 @@
 1. ~~**Fix `invert_visibility` and re-run eval from existing checkpoint.**~~ Done — Narval job 59639710. `invert_visibility=True` + `occ_vis_threshold=0.1` confirmed working (vis/ is now non-zero: NDS=0.311, mAP=0.112). See results below.
 2. ~~**Tune `occ_vis_threshold` — threshold=0.1 is too strict.**~~ Re-eval complete — DGX job 3610, `occ_vis_threshold=0.5`. Classifier collapsed to predicting occluded for everything (acc_visible=0.004); threshold sweep cannot fix this. Needs retraining with lower alpha.
 3. ~~**Fix AUROC direction bug in `_evaluate_visibility_accuracy`.**~~ Fixed — `invert_visibility` flag threaded from `eval_mode` into the function; scores flipped to P(visible) when `False`. All new configs set `eval_mode.invert_visibility=True`.
-4. **Retrain with lower alpha.** DGX jobs 3611 (alpha=0.5) and 3612 (alpha=0.7) — running.
+4. ~~**Retrain with lower alpha.**~~ DGX job 3611 (alpha=0.5) complete — still collapsed to occluded. Job 3612 (alpha=0.7) cancelled. DGX job 3616 (alpha=0.2) complete — no single-class collapse, but classifier quality is still poor (`acc_visible=0.214`, `acc_occluded=0.190`, `AUROC=0.119`, `occluded/mAP=0.018`).
 5. **Add TPR at fixed threshold as a supplementary primary occluded metric.** It bypasses the FP-contamination problem entirely and is directly interpretable as recall capability.
 6. **Stage 1 counterpart.** Evaluate whether adding the occluded classifier head to Stage 1 training improves Stage 2 initialisation for occluded detection.
 
@@ -107,8 +107,20 @@ To make `vis/` and `occluded/` metrics symmetric and comparable, both evaluators
 | `narval` | `stage2_4gpu_bs24_occhead_occptraineval` | `59608052` | `complete` |
 | `narval` | `stage2_4gpu_bs24_occhead_occptraineval` (corrected eval: `invert_visibility=True`, `occ_vis_threshold=0.1`) | `59639710` | `complete` |
 | `dgx` | `stage2_4gpu_bs24_occhead_occptraineval` (eval rerun: `invert_visibility=True`, `occ_vis_threshold=0.5`) | `3610` | `complete` |
-| `dgx` | `stage2_4gpu_bs24_occhead_a50_occptraineval` (alpha=0.5) | `3611` | `running` |
-| `dgx` | `stage2_4gpu_bs24_occhead_a70_occptraineval` (alpha=0.7) | `3612` | `running` |
+| `dgx` | `stage2_4gpu_bs24_occhead_a50_occptraineval` (alpha=0.5) | `3611` | `complete` |
+| `dgx` | `stage2_4gpu_bs24_occhead_a70_occptraineval` (alpha=0.7) | `3612` | `cancelled` |
+| `dgx` | `stage2_4gpu_bs24_occhead_a20_occptraineval` (alpha=0.2) | `3616` | `complete` |
+
+| Run | mAP | mAP_all | mAP_occluded | acc_visible | acc_occluded | AUROC |
+| --- | --- | --- | --- | --- | --- | --- |
+| `vishead_occptraineval` | 0.41000 | 0.40300 | 0.01400 | 0.99200 | 0.06500 | 0.76700 |
+| `occhead` original (`59608052`) | 0.41200 | 0.40400 | 0.03500 | 0.00400 | 0.86300 | 0.12100 |
+| `occhead` corrected eval (`59639710`) | 0.41100 | 0.40300 | 0.00100 | - | - | - |
+| `occhead` rerun threshold=0.5 (`3610`) | 0.41000 | 0.40300 | 0.03600 | 0.00400 | 0.86200 | - |
+| `occhead_a50` (`3611`) | 0.41000 | 0.40300 | 0.03300 | 0.05600 | 0.55500 | 0.11800 |
+| `occhead_a20` (`3616`) | 0.40752 | 0.39912 | 0.01818 | 0.21433 | 0.19039 | 0.11860 |
+
+`mAP` is the standard full-val nuScenes detection mAP. `mAP_all` and `mAP_occluded` are from the custom all/occluded splits. Accuracy and AUROC come from the visibility classifier evaluation when the run logged trustworthy values.
 
 ### vishead reference (DGX `sparsedrive_r50_stage2_4gpu_bs24_vishead_occptraineval`, 2026-02-26)
 
@@ -142,6 +154,42 @@ Classifier collapsed to predicting visible for everything. AUROC=0.767 in the wr
 | opt_threshold (Youden's J) | 0.007 |
 
 Classifier collapsed to predicting occluded for everything — the mirror image of vishead. With `visibility_score = P(visible)` and threshold=0.5, `acc_visible=0.004` means 99.6% of all predictions (visible and occluded alike) get P(visible) < 0.5 and pass to `occluded/`. This makes `occluded/` nearly identical to the unfiltered baseline and leaves `vis/` empty. `opt_threshold=0.007` confirms the distribution: the entire output is packed near zero, with visible and occluded predictions both assigned P(visible) ≈ 0. Threshold sweeping cannot recover useful separation from a collapsed classifier.
+
+### occhead_a50 (DGX job 3611, alpha=0.5)
+
+| Metric prefix | NDS | mAP | mTPR | mFDR | obj_box_col |
+| --- | --- | --- | --- | --- | --- |
+| img_bbox_NuScenes (standard) | 0.523 | 0.410 | — | — | — |
+| all/ | 0.518 | 0.403 | 0.643 | 0.869 | 0.124% |
+| occluded/ | 0.275 | 0.033 | 0.384 | 0.987 | 0.0% |
+| vis/ | 0.0 | 0.0 | 0.028 | 0.897 | — |
+
+| Visibility classifier | Value |
+| --- | --- |
+| acc_visible | 0.056 |
+| acc_occluded | 0.555 |
+| AUROC | 0.118 |
+| opt_threshold (Youden's J) | 0.010 |
+
+L2=0.591. Still collapsed to occluded — vis/ empty, occluded/ reflects unfiltered prediction set. Less severe than alpha=0.85 (acc_visible was 0.004) but opt_threshold=0.010 confirms P(visible) packed near zero. Focal term suppression of easy visible examples likely responsible.
+
+### occhead_a20 (DGX job 3616, alpha=0.2)
+
+| Metric prefix | NDS | mAP | mTPR | mFDR | obj_box_col |
+| --- | --- | --- | --- | --- | --- |
+| img_bbox_NuScenes (standard) | 0.524 | 0.408 | — | — | — |
+| all/ | 0.519 | 0.399 | 0.642 | 0.871 | 0.098% |
+| occluded/ | 0.247 | 0.018 | 0.220 | 0.976 | 0.0% |
+| vis/ | 0.110 | 0.008 | 0.120 | 0.960 | — |
+
+| Visibility classifier | Value |
+| --- | --- |
+| acc_visible | 0.214 |
+| acc_occluded | 0.190 |
+| AUROC | 0.119 |
+| opt_threshold (Youden's J) | 0.014 |
+
+L2=0.615. This run no longer collapses fully to a single class, but it is still not a usable classifier. Both visible and occluded accuracy are poor, vis/ and occluded/ are both weak, and the classifier does not recover the strong occluded-filtering behavior needed to turn latent recall into precision. Standard detection remains healthy, but the visibility head is still not solving the FP contamination problem.
 
 ### occhead corrected eval (Narval 59639710, `invert_visibility=True`, `occ_vis_threshold=0.1`)
 
@@ -206,7 +254,11 @@ Likely explanation:
 
 **occhead (Narval 59608052) — complete, eval sign-flip bug identified.** Standard detection is unchanged (NDS=0.521, mAP=0.412). Classifier accuracy metrics: acc_visible=0.004, acc_occluded=0.863, AUROC=0.121. The AUROC of 0.121 looks like near-random but is actually the inverse of a well-trained classifier: because `gt_visibility_key='gt_occluded'` trains sigmoid(logit) → 1 for occluded items, and `invert_visibility=False` means the output is passed directly as `visibility_score`, the score direction is P(occluded). The eval filter uses `visibility_score < threshold → occluded` which is designed for P(visible), so the directions are inverted. Real AUROC ≈ 1 − 0.121 = 0.879 — the classifier is working well. Fix: set `invert_visibility=True` in the decoder config, which flips the score to P(visible) before it reaches the eval filters. No retraining is needed; re-running eval from the existing checkpoint should recover the correct vis/ and occluded/ metrics.
 
-**alpha sweep (DGX jobs 3611/3612) — running.** Two new training runs bracket the collapse problem. `alpha=0.85` (job 59608052) gave total gradient balance (15% × 0.85 ≈ 85% × 0.15) but still collapsed to predicting occluded for everything. `alpha=0.5` (job 3611) gives equal per-example weight; visible dominates by count (5.52:1), so if collapse is gradient-driven the model should drift toward visible — the mirror of the vishead failure. `alpha=0.7` (job 3612) is an intermediate point that provides moderate minority boost without hitting the balance point that proved unstable. Both configs have `eval_mode.invert_visibility=True` and decoder `invert_visibility=True`, so AUROC will be correctly computed for the first time. Key metrics to watch: AUROC > 0.5, acc_visible and acc_occluded both non-trivial (neither near 0 nor near 1), opt_threshold near 0.5.
+**occhead_a50 (DGX job 3611) — complete.** Still collapsed to predicting occluded. acc_visible=0.056, acc_occluded=0.555, AUROC=0.118, opt_threshold=0.010. vis/ NDS=0.0, mAP=0.0; occluded/ NDS=0.275, mAP=0.033 (unfiltered baseline). Standard detection unchanged (NDS=0.523, mAP=0.410, L2=0.591). The collapse is less severe than alpha=0.85 (acc_visible was 0.004) but the opt_threshold=0.010 confirms P(visible) is still packed near zero — the focal term (1−p)² is likely suppressing gradient on easy visible examples, so effective pressure continues to favour the occluded class even with equal per-example alpha. The balance point is at a lower alpha than expected.
+
+**alpha=0.7 (DGX job 3612) — cancelled.** Redundant given alpha=0.5 already failed; alpha=0.7 would only confirm collapse in the same direction. Replaced by alpha=0.2 (job 3616).
+
+**occhead_a20 (DGX job 3616) — complete.** alpha=0.2 avoided the earlier single-class collapse, but the classifier is still poor: acc_visible=0.214, acc_occluded=0.190, AUROC=0.1186, opt_threshold=0.0139. The model now routes predictions into both vis/ and occluded/ buckets, but both are weak (`vis/mAP=0.0078`, `occluded/mAP=0.0182`). This means lowering alpha did not find the useful operating region between the visible-collapse and occluded-collapse regimes; it mostly destroyed separability instead. The next step should be to treat this as a calibration/representation problem rather than continuing a one-dimensional alpha sweep.
 
 **AUROC fix — complete.** `_evaluate_visibility_accuracy` now accepts `invert_visibility` from `eval_mode` and flips scores when `False`. All prior runs had AUROC potentially wrong (0.121 in both 59608052 and 3610); new runs with the consistent flag will be the first reliable measurements.
 
