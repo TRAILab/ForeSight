@@ -5,7 +5,7 @@ description: Pulls remote `work_dirs` logs and metrics back to the local repo wh
 
 ## Inputs
 Parse from: `$ARGUMENTS`
-- `--server` (default: `all`): `dgx` | `apollo` | `narval` | `all`
+- `--server` (default: `all`): `dgx` | `apollo` | `narval` | `trillium` | `killarney` | `all`
 
 Use the host and repo mappings from `.claude/CLAUDE.md`.
 
@@ -15,6 +15,8 @@ Pull `work_dirs/` from the remote repo with `rsync`:
 rsync -av --exclude='*.pkl' --exclude='*.pth' trail_dgx:/raid/home/spapais/ForeSight/work_dirs/ ./work_dirs/
 rsync -av --exclude='*.pkl' --exclude='*.pth' apollo:/home/spapais/ForeSight/work_dirs/ ./work_dirs/
 rsync -av --exclude='*.pkl' --exclude='*.pth' narval:/home/spapais/ForeSight/work_dirs/ ./work_dirs/
+rsync -av --exclude='*.pkl' --exclude='*.pth' trillium:/scratch/spapais/ForeSight/work_dirs/ ./work_dirs/
+rsync -av --exclude='*.pkl' --exclude='*.pth' killarney:/scratch/spapais/ForeSight/work_dirs/ ./work_dirs/
 ```
 
 ## Rules

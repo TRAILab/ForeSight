@@ -24,6 +24,8 @@ sudo nmcli con up id utias-robotics && rsync -av --exclude='*.pyc' projects scri
 
 # Sync the code to CC server
 rsync -av projects docker ckpt data spapais@narval.alliancecan.ca:/home/spapais/ForeSight/
+rsync -av projects docker ckpt data trillium:/home/spapais/ForeSight/
+rsync -av projects docker ckpt data killarney:/home/spapais/ForeSight/
 
 # Test Stage 1
 ./scripts/local_run.sh bash ./tools/dist_test.sh projects/configs/sparsedrive_r50_stage1_1gpu.py ckpt/sparsedrive_stage1.pth 1 --deterministic --eval bbox
@@ -64,6 +66,8 @@ claude
 sudo rsync -av --exclude='*.pkl' --exclude='*.pth' apollo:/home/spapais/ForeSight/work_dirs/ ./work_dirs/
 sudo rsync -av --exclude='*.pkl' --exclude='*.pth' spapais@192.168.42.200:/raid/home/spapais/ForeSight/work_dirs/ ./work_dirs/
 sudo rsync -av --exclude='*.pkl' --exclude='*.pth' spapais@narval.alliancecan.ca:/home/spapais/ForeSight/work_dirs/ ./work_dirs/
+rsync -av --exclude='*.pkl' --exclude='*.pth' trillium:/scratch/spapais/ForeSight/work_dirs/ ./work_dirs/
+rsync -av --exclude='*.pkl' --exclude='*.pth' killarney:/scratch/spapais/ForeSight/work_dirs/ ./work_dirs/
 
 # Narval wandb sync
 screen -S wandb-sync

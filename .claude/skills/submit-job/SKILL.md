@@ -1,13 +1,13 @@
 ---
 name: submit-job
-description: Submits a ForeSight training or evaluation run to DGX, Apollo, or Narval when given a server and config path.
+description: Submits a ForeSight training or evaluation run to DGX, Apollo, Narval, Trillium, or Killarney when given a server and config path.
 ---
 
 ## Inputs
 Parse from: `$ARGUMENTS`
-- `--server` (required): `dgx` | `apollo` | `narval`
+- `--server` (required): `dgx` | `apollo` | `narval` | `trillium` | `killarney`
 - `--config` (required): repo-relative config path such as `projects/configs/sparsedrive_r50_stage2_4gpu.py`
-- `--gpus`: default by server (`dgx=4`, `apollo=8`, `narval=4`)
+- `--gpus`: default by server (`dgx=4`, `apollo=8`, `narval=4`, `trillium=4`, `killarney=4`)
 - `--test`: run evaluation instead of training
 - `--ckpt`: checkpoint path required with `--test`
 
@@ -45,8 +45,20 @@ ssh narval "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=AL
 ```
 Parse `Submitted batch job <ID>`.
 
+### Trillium
+```bash
+ssh trillium "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/trillium_run.sh <wrapped_cmd>"
+```
+Parse `Submitted batch job <ID>`.
+
+### Killarney
+```bash
+ssh killarney "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/killarney_run.sh <wrapped_cmd>"
+```
+Parse `Submitted batch job <ID>`.
+
 ## Output
-- For DGX and Narval, print the job ID and suggest `/parse-metrics --server <server> --job <ID>`.
+- For DGX, Narval, Trillium, and Killarney, print the job ID and suggest `/parse-metrics --server <server> --job <ID>`.
 - For Apollo, warn that the session stays attached unless the user manages it with `tmux` on the remote host.
 
 ## Rules

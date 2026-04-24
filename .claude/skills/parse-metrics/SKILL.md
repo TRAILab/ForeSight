@@ -5,7 +5,7 @@ description: Extracts key training or evaluation metrics from remote ForeSight l
 
 ## Inputs
 Parse from: `$ARGUMENTS`
-- `--server` (required): `dgx` | `apollo` | `narval`
+- `--server` (required): `dgx` | `apollo` | `narval` | `trillium` | `killarney`
 - `--job <id>`: SLURM job ID for DGX or Narval
 - `--config <stem>`: config stem such as `auto_apr26_exp001_foo`
 
@@ -44,4 +44,5 @@ Add one status hint:
 
 ## Rules
 - Apollo does not use SLURM logs, so `--config` is effectively required there.
+- On Trillium and Killarney, SLURM logs are at `/scratch/spapais/ForeSight/logs/` (not home).
 - Prefer the most recent metrics near the end of the log, not intermediate training output.

@@ -14,6 +14,8 @@ Autonomous driving research codebase built on SparseDrive. Training and evaluati
 - DGX: `sbatch scripts/dgx_run.sh <cmd>`
 - Apollo: `./scripts/apollo_run.sh <cmd>`
 - Narval: `sbatch scripts/narval_run.sh <cmd>`
+- Trillium: `sbatch scripts/trillium_run.sh <cmd>`
+- Killarney: `sbatch scripts/killarney_run.sh <cmd>`
 - Build custom ops after a fresh clone: `cd projects/mmdet3d_plugin/ops && python setup.py develop`
 
 ## Config Rules
@@ -64,6 +66,23 @@ Autonomous driving research codebase built on SparseDrive. Training and evaluati
 - Remote submission over SSH:
   `ssh narval "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/narval_run.sh <cmd>"`
 - WandB runs in offline mode on Narval.
+
+### Trillium
+- Host: `trillium`
+- Repo: `/home/spapais/ForeSight`
+- No VPN required
+- Home is read-only on compute nodes; output logs go to `/scratch/spapais/ForeSight/logs/`
+- Remote submission over SSH:
+  `ssh trillium "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/trillium_run.sh <cmd>"`
+- WandB runs in offline mode on Trillium.
+
+### Killarney
+- Host: `killarney`
+- Repo: `/home/spapais/ForeSight`
+- No VPN required (geo-blocked; requires access from a Canadian institution network)
+- Remote submission over SSH:
+  `ssh killarney "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/killarney_run.sh <cmd>"`
+- WandB runs in offline mode on Killarney.
 
 ## Git Workflow
 - Work locally, then push and pull on the target server.

@@ -1,11 +1,11 @@
 ---
 name: job-status
-description: Checks running and queued jobs on DGX, Apollo, or Narval when the user asks for remote job status.
+description: Checks running and queued jobs on DGX, Apollo, Narval, Trillium, or Killarney when the user asks for remote job status.
 ---
 
 ## Inputs
 Parse from: `$ARGUMENTS`
-- `--server` (default: `all`): `dgx` | `apollo` | `narval` | `all`
+- `--server` (default: `all`): `dgx` | `apollo` | `narval` | `trillium` | `killarney` | `all`
 
 Use the host and VPN rules from `.claude/CLAUDE.md` as needed.
 
@@ -19,6 +19,16 @@ ssh trail_dgx "source ~/.bashrc && squeue -u spapais --format='%.10i %.20j %.8T 
 ### Narval
 ```bash
 ssh narval "source ~/.bashrc && squeue -u spapais --format='%.10i %.20j %.8T %.10M %.6D %R' 2>/dev/null"
+```
+
+### Trillium
+```bash
+ssh trillium "source ~/.bashrc && squeue -u spapais --format='%.10i %.20j %.8T %.10M %.6D %R' 2>/dev/null"
+```
+
+### Killarney
+```bash
+ssh killarney "source ~/.bashrc && squeue -u spapais --format='%.10i %.20j %.8T %.10M %.6D %R' 2>/dev/null"
 ```
 
 ### Apollo
