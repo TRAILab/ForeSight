@@ -47,6 +47,7 @@ echo "Done extracting data"
 
 # Run command
 # echo "Debug mode: sleep engaged" && sleep 5d # Uncomment to debug
+[[ -f /etc/profile.d/modules.sh ]] && source /etc/profile.d/modules.sh
 module load StdEnv/2023
 module load apptainer
 duration=$SECONDS
