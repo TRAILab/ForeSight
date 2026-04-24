@@ -9,12 +9,12 @@ dist_params = dict(backend="nccl")
 log_level = "INFO"
 work_dir = None
 
-total_batch_size = 24
-num_gpus = 4
+total_batch_size = 64
+num_gpus = 8
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
-num_epochs = 10
-checkpoint_epoch_interval = 10
+num_epochs = 100
+checkpoint_epoch_interval = 20
 
 checkpoint_config = dict(
     interval=num_iters_per_epoch * checkpoint_epoch_interval
@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_bs24_planpredtrajdeformmm_DTlarge_mhdepth',),
+                name='sparsedrive_r50_stage1_8gpu_noflash_DTbase',),
             interval=50)
     ],
 )
@@ -67,10 +67,8 @@ ego_fut_ts = 6
 ego_fut_mode = 6
 queue_length = 4 # history + current
 
-embed_dims = 256
+embed_dims = 512
 num_groups = 8
-motion_num_heads = 16
-motion_decoder_repeats = 8
 num_decoder = 6
 num_single_frame_decoder = 1
 num_single_frame_decoder_map = 1
@@ -89,7 +87,7 @@ with_quality_estimation = True
 task_config = dict(
     with_det=True,
     with_map=True,
-    with_motion_plan=True,
+    with_motion_plan=False,
 )
 
 model = dict(
@@ -143,9 +141,9 @@ model = dict(
             anchor_encoder=dict(
                 type="SparseBox3DEncoder",
                 vel_dims=3,
-                embed_dims=[128, 32, 32, 64] if decouple_attn else 256,
+                embed_dims=[256, 64, 64, 128, embed_dims] if decouple_attn else embed_dims,
                 mode="cat" if decouple_attn else "add",
-                output_fc=not decouple_attn,
+                output_fc=True,
                 in_loops=1,
                 out_loops=4 if decouple_attn else 2,
             ),
@@ -172,7 +170,7 @@ model = dict(
                 * (num_decoder - num_single_frame_decoder)
             )[2:],
             temp_graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -181,7 +179,7 @@ model = dict(
             if temporal
             else None,
             graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -281,7 +279,7 @@ model = dict(
                 embed_dims=embed_dims,
                 anchor="data/kmeans/kmeans_map_100.npy",
                 anchor_handler=dict(type="SparsePoint3DKeyPointsGenerator"),
-                num_temp_instances=33 if temporal_map else -1,
+                num_temp_instances=0 if temporal_map else -1,
                 confidence_decay=0.6,
                 feat_grad=True,
             ),
@@ -313,7 +311,7 @@ model = dict(
                 * (num_decoder - num_single_frame_decoder_map)
             )[:],
             temp_graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn_map else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -322,7 +320,7 @@ model = dict(
             if temporal_map
             else None,
             graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn_map else embed_dims * 2,
                 num_heads=num_groups,
                 batch_first=True,
@@ -427,57 +425,33 @@ model = dict(
                     "norm",
                     "cross_gnn",
                     "norm",
-                    "deformable",
-                    "norm",
                     "ffn",                    
                     "norm",
+                ] * 3 +
+                [
                     "refine",
-                ] * motion_decoder_repeats
+                ]
             ),
             temp_graph_model=dict(
                 type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn_motion else embed_dims * 2,
-                num_heads=motion_num_heads,
+                num_heads=num_groups,
                 batch_first=True,
                 dropout=drop_out,
             ),
             graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims if not decouple_attn_motion else embed_dims * 2,
-                num_heads=motion_num_heads,
+                num_heads=num_groups,
                 batch_first=True,
                 dropout=drop_out,
             ),
             cross_graph_model=dict(
-                type="MultiheadFlashAttention",
+                type="MultiheadAttention",
                 embed_dims=embed_dims,
-                num_heads=motion_num_heads,
+                num_heads=num_groups,
                 batch_first=True,
                 dropout=drop_out,
-            ),
-            deformable_model=dict(
-                type="DeformableFeatureAggregation",
-                embed_dims=embed_dims,
-                num_groups=num_groups,
-                num_levels=num_levels,
-                num_cams=6,
-                attn_drop=0.15,
-                use_deformable_func=use_deformable_func,
-                use_camera_embed=True,
-                residual_mode="add",
-                kps_generator=dict(
-                    type="SparseBox3DKeyPointsGenerator",
-                    num_learnable_pts=6,
-                    fix_scale=[
-                        [0, 0, 0],
-                        [0.45, 0, 0],
-                        [-0.45, 0, 0],
-                        [0, 0.45, 0],
-                        [0, -0.45, 0],
-                        [0, 0, 0.45],
-                        [0, 0, -0.45],
-                    ],
-                ),
             ),
             norm_layer=dict(type="LN", normalized_shape=embed_dims),
             ffn=dict(
@@ -530,10 +504,6 @@ model = dict(
                 ego_fut_mode=ego_fut_mode,
                 use_rescore=True,
             ),
-            planning_cumulative_refinement=True,
-            motion_cumulative_refinement=True,
-            planning_deformable=True,
-            motion_deformable_multimode=True,
             num_det=50,
             num_map=10,
         ),
@@ -717,11 +687,11 @@ data = dict(
 # ================== training ========================
 optimizer = dict(
     type="AdamW",
-    lr=1.5e-4,
+    lr=4e-4,
     weight_decay=0.001,
     paramwise_cfg=dict(
         custom_keys={
-            "img_backbone": dict(lr_mult=0.1),
+            "img_backbone": dict(lr_mult=0.5),
         }
     ),
 )
@@ -743,8 +713,8 @@ eval_mode = dict(
     with_det=True,
     with_tracking=True,
     with_map=True,
-    with_motion=True,
-    with_planning=True,
+    with_motion=False,
+    with_planning=False,
     tracking_threshold=0.2,
     motion_threshhold=0.2,
 )
@@ -752,5 +722,3 @@ evaluation = dict(
     interval=num_iters_per_epoch*checkpoint_epoch_interval,
     eval_mode=eval_mode,
 )
-# ================== pretrained model ========================
-load_from = 'ckpt/sparsedrive_stage1.pth'
