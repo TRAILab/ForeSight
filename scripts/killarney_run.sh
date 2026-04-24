@@ -34,7 +34,7 @@ CONTAINER_CMD="$APPTAINER exec --nv -c -e --pwd /workspace/ForeSight/ \
 --bind=/home/spapais/ForeSight:/workspace/ForeSight/ \
 --bind=$TMP_DATA_DIR:/workspace/ForeSight/data/nuscenes \
 --bind=$WORK_DIR:/workspace/ForeSight/work_dirs \
-docker/foresight_cuda118.sif $CMD"
+/home/spapais/ForeSight/docker/foresight_cuda118.sif $CMD"
 
 # Extract dataset
 SECONDS=0
