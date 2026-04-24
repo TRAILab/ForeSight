@@ -84,7 +84,7 @@ Autonomous driving research codebase built on SparseDrive. Training and evaluati
 - No VPN required (geo-blocked; requires access from a Canadian institution network)
 - SLURM requires module init; `--chdir=/scratch` is baked into the script:
   `ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && sbatch --export=ALL /home/spapais/ForeSight/scripts/killarney_run.sh <cmd>"`
-- Apptainer is not installed — contact Vector sysadmins before running container jobs.
+- Container runtime is `enroot` (system binary, no module needed); image: `docker/foresight_cuda118.sqsh`
 - WandB runs in offline mode on Killarney.
 
 ## Git Workflow

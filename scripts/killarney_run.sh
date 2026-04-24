@@ -23,16 +23,16 @@ CMD=${@:-bash}
 [[ -f ~/.bashrc ]] && source ~/.bashrc
 
 # Command
-CONTAINER_CMD="apptainer exec --nv -c -e --pwd /workspace/ForeSight/ \
---env "WANDB_API_KEY=$WANDB_API_KEY"
---env "WANDB_MODE=offline"
---env "TMPDIR=/tmp"
---bind=$TMP_DIR:/tmp \
---bind=/home/spapais/ForeSight:/workspace/ForeSight/ \
---bind=$TMP_DATA_DIR:/workspace/ForeSight/data/nuscenes \
---bind=$WORK_DIR:/workspace/ForeSight/work_dirs \
-docker/foresight_cuda118.sif $CMD
-"
+CONTAINER_CMD="enroot start \
+--mount $TMP_DIR:/tmp \
+--mount /home/spapais/ForeSight:/workspace/ForeSight \
+--mount $TMP_DATA_DIR:/workspace/ForeSight/data/nuscenes \
+--mount $WORK_DIR:/workspace/ForeSight/work_dirs \
+--env WANDB_API_KEY=$WANDB_API_KEY \
+--env WANDB_MODE=offline \
+--env TMPDIR=/tmp \
+/home/spapais/ForeSight/docker/foresight_cuda118.sqsh \
+bash -c \"cd /workspace/ForeSight && $CMD\""
 
 # Extract dataset
 SECONDS=0
@@ -50,7 +50,6 @@ echo "Done extracting data"
 # echo "Debug mode: sleep engaged" && sleep 5d # Uncomment to debug
 source /etc/profile.d/modules.sh
 module load slurm/killarney/24.05.7
-module load apptainer  # requires Vector sysadmins to install apptainer
 duration=$SECONDS
 echo "[$((duration/3600))h$(((duration%3600)/60))m]: Running command"
 echo "$CONTAINER_CMD"

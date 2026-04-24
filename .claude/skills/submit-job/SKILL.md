@@ -56,7 +56,6 @@ Parse `Submitted batch job <ID>`.
 ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && sbatch --export=ALL /home/spapais/ForeSight/scripts/killarney_run.sh <wrapped_cmd>"
 ```
 Parse `Submitted batch job <ID>`.
-Note: apptainer is not yet installed on Killarney — container jobs will fail until Vector sysadmins install it.
 
 ## Output
 - For DGX, Narval, Trillium, and Killarney, print the job ID and suggest `/parse-metrics --server <server> --job <ID>`.
