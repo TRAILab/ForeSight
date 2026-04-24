@@ -13,7 +13,7 @@
 TMP_DIR=$SLURM_TMPDIR/tmp
 TMP_DATA_DIR=$SLURM_TMPDIR/data
 # TMP_DATA_DIR=/home/spapais/scratch/temp_data # Temporary data directory alternative
-DATA_DIR=/home/spapais/projects/rrg-swasland/datasets/nuscenes/
+DATA_DIR=/home/spapais/links/projects/rrg-swasland/datasets/nuscenes/
 WORK_DIR=/scratch/spapais/ForeSight/work_dirs
 CMD=${@:-bash}
 
