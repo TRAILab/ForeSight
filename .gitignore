@@ -4,6 +4,7 @@
 *.whl
 *.swp
 *.sif
+*.sqsh
 
 wandb/
 data/
