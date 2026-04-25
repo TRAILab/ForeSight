@@ -64,7 +64,7 @@ Implementation changes:
 | Server | Config | Job ID | Status |
 | --- | --- | --- | --- |
 | DGX | `ptaux2d_ppdeformmm_planifls` (baseline) | 3614 | COMPLETED |
-| DGX | `ptaux2d_ppdeformmm_planifls_detrel` | — | PENDING |
+| Killarney | `ptaux2d_ppdeformmm_planifls_detrel` | — | PENDING |
 | Apollo | `stage1_8gpu_noflash_detrel` | — | PENDING |
 | DGX | `ptdetrel_ppdeformmm_planifls` | — | PENDING |
 | DGX | `ptaux2d_ppdeformmm_planifls_detrel_maprel` | — | PENDING |

@@ -41,6 +41,7 @@ class Sparse4DHead(BaseModule):
         loss_cls: dict = None,
         loss_reg: dict = None,
         loss_visibility: dict = None,
+        loss_relevance: dict = None,
         decoder: dict = None,
         sampler: dict = None,
         gt_cls_key: str = "gt_labels_3d",
@@ -54,6 +55,8 @@ class Sparse4DHead(BaseModule):
         cls_threshold_to_reg: float = -1,
         dn_loss_weight: float = 5.0,
         decouple_attn: bool = True,
+        relevance_corridor: float = 2.0,
+        relevance_horizon: int = 6,
         temporal_warmup_order: Optional[List[str]] = None,
         warmup_refine_layer: dict = None,
         warmup_ffn: dict = None,
@@ -107,6 +110,9 @@ class Sparse4DHead(BaseModule):
         self.loss_cls = build(loss_cls, LOSSES)
         self.loss_reg = build(loss_reg, LOSSES)
         self.loss_visibility = build(loss_visibility, LOSSES) if loss_visibility else None
+        self.loss_relevance = build(loss_relevance, LOSSES) if loss_relevance else None
+        self.relevance_corridor = relevance_corridor
+        self.relevance_horizon = relevance_horizon
         self.op_config_map = {
             "temp_gnn": [temp_graph_model, ATTENTION],
             "gnn": [graph_model, ATTENTION],
@@ -334,7 +340,7 @@ class Sparse4DHead(BaseModule):
                 w_anchor = anchor[:, :num_ti]
                 w_anchor_embed = anchor_embed[:, :num_ti]
                 is_temporal = False
-            w_cls, w_qt, w_vis = None, None, None
+            w_cls, w_qt, w_vis, w_rel = None, None, None, None
             for i, op in enumerate(self.temporal_warmup_order):
                 if self.warmup_layers[i] is None:
                     continue
@@ -345,7 +351,7 @@ class Sparse4DHead(BaseModule):
                 elif op in ("norm", "ffn"):
                     w_feat = self.warmup_layers[i](w_feat)
                 elif op == "refine":
-                    w_anchor, w_cls, w_qt, w_vis = self.warmup_layers[i](
+                    w_anchor, w_cls, w_qt, w_vis, w_rel = self.warmup_layers[i](
                         w_feat,
                         w_anchor,
                         w_anchor_embed,
@@ -374,6 +380,7 @@ class Sparse4DHead(BaseModule):
         classification = []
         quality = []
         visibility = []
+        relevance = []
         num_warmup_preds = 0
         # If warmup produced a refine prediction on temporal instances, prepend it
         # so it gets supervised like any other intermediate decoder stage.
@@ -423,11 +430,23 @@ class Sparse4DHead(BaseModule):
                 if w_vis is not None
                 else None
             )
+            warmup_rel = (
+                torch.cat(
+                    [
+                        w_rel,
+                        w_rel.new_zeros(batch_size, num_anchor - num_ti, w_rel.shape[-1]),
+                    ],
+                    dim=1,
+                )
+                if w_rel is not None
+                else None
+            )
             prediction.append(warmup_pred)
             classification.append(warmup_cls)
             quality.append(warmup_qt)
             num_warmup_preds = 1
             visibility.append(warmup_vis)
+            relevance.append(warmup_rel)
         num_main_decoder_refines = 0
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
@@ -463,7 +482,7 @@ class Sparse4DHead(BaseModule):
                     metas,
                 )
             elif op == "refine":
-                anchor, cls, qt, vis = self.layers[i](
+                anchor, cls, qt, vis, rel = self.layers[i](
                     instance_feature,
                     anchor,
                     anchor_embed,
@@ -474,6 +493,7 @@ class Sparse4DHead(BaseModule):
                 classification.append(cls)
                 quality.append(qt)
                 visibility.append(vis)
+                relevance.append(rel)
                 num_main_decoder_refines += 1
                 if num_main_decoder_refines == self.num_single_frame_decoder:
                     instance_feature, anchor = self.instance_bank.update(
@@ -532,6 +552,10 @@ class Sparse4DHead(BaseModule):
                 x[:, :num_free_instance] if x is not None else None
                 for x in visibility
             ]
+            relevance = [
+                x[:, :num_free_instance] if x is not None else None
+                for x in relevance
+            ]
             output.update(
                 {
                     "dn_prediction": dn_prediction,
@@ -573,6 +597,7 @@ class Sparse4DHead(BaseModule):
                 "prediction": prediction,
                 "quality": quality,
                 "visibility": visibility,
+                "relevance": relevance,
                 "instance_feature": instance_feature,
                 "anchor_embed": anchor_embed,
                 "num_warmup_preds": num_warmup_preds,
@@ -597,10 +622,11 @@ class Sparse4DHead(BaseModule):
         reg_preds = model_outs["prediction"]
         quality = model_outs["quality"]
         vis_scores = model_outs.get("visibility", [None] * len(cls_scores))
+        rel_scores = model_outs.get("relevance", [None] * len(cls_scores))
         num_warmup_preds = model_outs.get("num_warmup_preds", 0)
         output = {}
-        for decoder_idx, (cls, reg, qt, vis) in enumerate(
-            zip(cls_scores, reg_preds, quality, vis_scores)
+        for decoder_idx, (cls, reg, qt, vis, rel) in enumerate(
+            zip(cls_scores, reg_preds, quality, vis_scores, rel_scores)
         ):
             reg = reg[..., : len(self.reg_weights)]
             if (
@@ -696,6 +722,20 @@ class Sparse4DHead(BaseModule):
                     f"{self.task_prefix}_loss_visibility_{decoder_idx}"
                 ] = vis_loss
 
+            # ---- planning-relevance loss (matched positives only) ----
+            if rel is not None and self.loss_relevance is not None:
+                rel_target = self._build_relevance_target(rel, data)
+                if rel_target is not None:
+                    matched = mask_valid.reshape(-1)
+                    rel_loss = self.loss_relevance(
+                        rel.squeeze(-1).flatten(end_dim=1)[matched].unsqueeze(-1),
+                        rel_target.flatten(end_dim=1)[matched].long(),
+                        avg_factor=num_pos,
+                    )
+                    output[
+                        f"{self.task_prefix}_loss_relevance_{decoder_idx}"
+                    ] = rel_loss
+
         if "dn_prediction" not in model_outs:
             return output
 
@@ -771,6 +811,73 @@ class Sparse4DHead(BaseModule):
             reg_weights,
             num_dn_pos,
         )
+
+    def _build_relevance_target(self, rel, data):
+        """Build per-anchor binary planning-relevance target on Hungarian-matched positives.
+
+        An agent is labeled relevant if its GT future BEV position comes within
+        `self.relevance_corridor` metres of the ego's GT future path at any
+        timestep within `self.relevance_horizon` planning steps.
+        """
+        gt_ego = data.get('gt_ego_fut_trajs')
+        gt_agent = data.get('gt_agent_fut_trajs')
+        gt_boxes = data.get(self.gt_reg_key)
+        if gt_ego is None or gt_agent is None or gt_boxes is None:
+            return None
+        gt_ego_mask = data.get('gt_ego_fut_masks')
+        gt_agent_mask = data.get('gt_agent_fut_masks')
+
+        bs, num_pred = rel.shape[:2]
+        target = rel.new_zeros(bs, num_pred)
+        H = self.relevance_horizon
+        thr2 = self.relevance_corridor ** 2
+
+        for b_i, (pred_idx, target_idx) in enumerate(self.sampler.indices):
+            if pred_idx is None or len(pred_idx) == 0:
+                continue
+            ego_b = gt_ego[b_i].to(rel.device)  # (ego_fut_ts, 2)
+            if ego_b.numel() == 0:
+                continue
+            ego_T = min(ego_b.shape[0], H)
+            ego_abs = ego_b[:ego_T].cumsum(dim=0)
+            if gt_ego_mask is not None:
+                em = gt_ego_mask[b_i].to(rel.device)[:ego_T].bool()
+            else:
+                em = torch.ones(ego_T, dtype=torch.bool, device=rel.device)
+
+            agents_b = gt_agent[b_i].to(rel.device)  # (num_gt, fut_ts, 2)
+            boxes_b = gt_boxes[b_i].to(rel.device)
+            if agents_b.shape[0] == 0:
+                continue
+            num_gt, agent_fut_ts, _ = agents_b.shape
+            T = min(agent_fut_ts, ego_T)
+            if T == 0:
+                continue
+            agents_xy0 = boxes_b[:, :2]  # (num_gt, 2)
+            agents_abs = agents_xy0.unsqueeze(1) + agents_b[:, :T].cumsum(dim=1)  # (num_gt, T, 2)
+            ego_xy = ego_abs[:T]  # (T, 2)
+            diff = agents_abs - ego_xy.unsqueeze(0)  # (num_gt, T, 2)
+            d2 = (diff ** 2).sum(dim=-1)  # (num_gt, T)
+
+            valid = em[:T].unsqueeze(0).expand(num_gt, -1)
+            if gt_agent_mask is not None:
+                am = gt_agent_mask[b_i].to(rel.device)[:, :T].bool()
+                valid = valid & am
+            d2 = torch.where(valid, d2, d2.new_full((), float('inf')))
+            min_d2, _ = d2.min(dim=1)  # (num_gt,)
+            relevant = (min_d2 < thr2).float()  # (num_gt,)
+
+            if isinstance(pred_idx, torch.Tensor):
+                pred_idx_t = pred_idx.to(rel.device)
+            else:
+                pred_idx_t = torch.as_tensor(pred_idx, device=rel.device, dtype=torch.long)
+            if isinstance(target_idx, torch.Tensor):
+                target_idx_t = target_idx.to(rel.device)
+            else:
+                target_idx_t = torch.as_tensor(target_idx, device=rel.device, dtype=torch.long)
+            target[b_i, pred_idx_t] = relevant[target_idx_t]
+
+        return target
 
     @force_fp32(apply_to=("model_outs"))
     def post_process(self, model_outs, output_idx=-1):
