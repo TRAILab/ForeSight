@@ -20,26 +20,31 @@ NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # ---------------------------------------------------------------------------
 
 remote_snapshot() {
-  local host="$1" init="$2" part="$3"
-  timeout "$SNAPSHOT_TIMEOUT" ssh "$host" "bash -s -- $(printf '%q' "$init") $(printf '%q' "$part")" <<'REMOTE'
-eval "$1"; part="$2"
+  local host="$1" init="$2" part="$3" account="$4"
+  timeout "$SNAPSHOT_TIMEOUT" ssh "$host" "bash -s -- $(printf '%q' "$init") $(printf '%q' "$part") $(printf '%q' "$account")" <<'REMOTE'
+eval "$1"; part="$2"; account="$3"
 STATES=$(sinfo -p "$part" --noheader -o '%n %t' 2>/dev/null | sort -k1,1 -u | awk '
   {st=$2; gsub(/[^a-z]/,"",st)
    if(st=="idle") i++; else if(st=="mix") m++; else if(st=="alloc") a++; else d++}
   END{printf "%d %d %d %d\n", i+0, m+0, a+0, d+0}')
 PENDING=$(squeue -p "$part" -t PENDING --noheader 2>/dev/null | wc -l)
-FS=$(sshare -u spapais --noheader 2>/dev/null | awk '/spapais/{if($NF>fs)fs=$NF} END{print (fs==""?"N/A":fs)}')
+# sshare -l columns: Account|User|RawShares|NormShares|RawUsage|NormUsage|EffectvUsage|FairShare|LevelFS|...
+# Group row has empty User; we want that row's LevelFS ($9).
+# Empty account skips the lookup (e.g. Killarney does not expose GPU LevelFS).
+if [[ -n "$account" ]]; then
+  LFS=$(sshare -l -A "$account" --parsable2 --noheader 2>/dev/null | awk -F'|' '$2==""{print $9; exit}')
+fi
 echo "STATES $STATES"
 echo "PENDING $PENDING"
-echo "FAIRSHARE ${FS:-N/A}"
+echo "LEVELFS ${LFS:-N/A}"
 REMOTE
 }
 
 T_N=$(mktemp); T_T=$(mktemp); T_K=$(mktemp)
 
-remote_snapshot narval       "source ~/.bashrc"                                                         gpubase_bygpu_b1 > "$T_N" 2>&1 &
-remote_snapshot trillium_gpu "source ~/.bashrc"                                                         compute          > "$T_T" 2>&1 &
-remote_snapshot killarney    "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7" gpubase_l40s_b1  > "$T_K" 2>&1 &
+remote_snapshot narval       "source ~/.bashrc"                                                         gpubase_bygpu_b1 rrg-swasland_gpu > "$T_N" 2>&1 &
+remote_snapshot trillium_gpu "source ~/.bashrc"                                                         compute          rrg-swasland     > "$T_T" 2>&1 &
+remote_snapshot killarney    "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7" gpubase_l40s_b1  ""               > "$T_K" 2>&1 &
 
 wait
 
@@ -54,15 +59,15 @@ parse() {
 
 N_IDLE=$(parse "$T_N" STATES 2); N_MIX=$(parse "$T_N" STATES 3)
 N_ALLOC=$(parse "$T_N" STATES 4); N_DOWN=$(parse "$T_N" STATES 5)
-N_PEND=$(parse "$T_N" PENDING 2); N_FS=$(parse "$T_N" FAIRSHARE 2)
+N_PEND=$(parse "$T_N" PENDING 2); N_FS=$(parse "$T_N" LEVELFS 2)
 
 T_IDLE=$(parse "$T_T" STATES 2); T_MIX=$(parse "$T_T" STATES 3)
 T_ALLOC=$(parse "$T_T" STATES 4); T_DOWN=$(parse "$T_T" STATES 5)
-T_PEND=$(parse "$T_T" PENDING 2); T_FS=$(parse "$T_T" FAIRSHARE 2)
+T_PEND=$(parse "$T_T" PENDING 2); T_FS=$(parse "$T_T" LEVELFS 2)
 
 K_IDLE=$(parse "$T_K" STATES 2); K_MIX=$(parse "$T_K" STATES 3)
 K_ALLOC=$(parse "$T_K" STATES 4); K_DOWN=$(parse "$T_K" STATES 5)
-K_PEND=$(parse "$T_K" PENDING 2); K_FS=$(parse "$T_K" FAIRSHARE 2)
+K_PEND=$(parse "$T_K" PENDING 2); K_FS=$(parse "$T_K" LEVELFS 2)
 
 for var in N_IDLE N_MIX N_ALLOC N_DOWN N_PEND N_FS \
            T_IDLE T_MIX T_ALLOC T_DOWN T_PEND T_FS \
@@ -88,17 +93,17 @@ printf '\n'
 printf '**Narval** (A100 80GB, 4 GPU/node)\n'
 printf '  Nodes — idle: %s  mix: %s  alloc: %s  down: %s\n' "$N_IDLE" "$N_MIX" "$N_ALLOC" "$N_DOWN"
 printf '  Pending GPU jobs: %s\n' "$N_PEND"
-printf '  Your fairshare: %s\n' "$N_FS"
+printf '  Group LevelFS: %s\n' "$N_FS"
 printf '\n'
 printf '**Trillium** (H100 80GB, 4 GPU/node)\n'
 printf '  Nodes — idle: %s  mix: %s  alloc: %s  down: %s\n' "$T_IDLE" "$T_MIX" "$T_ALLOC" "$T_DOWN"
 printf '  Pending GPU jobs: %s\n' "$T_PEND"
-printf '  Your fairshare: %s\n' "$T_FS"
+printf '  Group LevelFS: %s\n' "$T_FS"
 printf '\n'
 printf '**Killarney** (L40S 48GB, 4 GPU/node)\n'
 printf '  Nodes — idle: %s  mix: %s  alloc: %s  down: %s\n' "$K_IDLE" "$K_MIX" "$K_ALLOC" "$K_DOWN"
 printf '  Pending GPU jobs: %s\n' "$K_PEND"
-printf '  Your fairshare: %s\n' "$K_FS"
+printf '  Group LevelFS: %s\n' "$K_FS"
 printf '\n'
 
 verdict() {
@@ -118,7 +123,7 @@ verdict() {
       elif [[ "$mix" -gt 0 ]] 2>/dev/null; then
         best_reason="$pend pending jobs, $mix mix nodes draining"
       else
-        best_reason="fewest pending jobs ($pend) with fairshare $fs"
+        best_reason="fewest pending jobs ($pend) with LevelFS $fs"
       fi
     fi
   done
