@@ -120,7 +120,9 @@ class MotionPlanningHead(BaseModule):
         planning_deformable_instfeat_laststage=False,
         motion_deformable=False,
         motion_deformable_multimode=False,
+        motion_deformable_multimode_uniform=False,
         motion_deformable_modeproj=False,
+        planning_deformable_instfeat_additive=False,
         deformable_waypoint=-1,
         planning_deformable_waypoints=None,
         num_dn_pred_groups=0,
@@ -139,6 +141,8 @@ class MotionPlanningHead(BaseModule):
         conflict_threshold=2.0,
         conflict_pos_weight=10.0,
         roi_size=(30, 60),
+        plan_mode_softtgt=False,
+        plan_mode_softtgt_tau=1.0,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -162,7 +166,15 @@ class MotionPlanningHead(BaseModule):
         self._n_deformable_stages = sum(1 for op in operation_order if op == "deformable")
         self.motion_deformable = motion_deformable
         self.motion_deformable_multimode = motion_deformable_multimode
+        self.motion_deformable_multimode_uniform = (
+            motion_deformable_multimode_uniform and motion_deformable_multimode
+        )
         self.motion_deformable_modeproj = motion_deformable_modeproj and motion_deformable_multimode
+        self.planning_deformable_instfeat_additive = (
+            planning_deformable_instfeat_additive and self.planning_deformable_instfeat
+        )
+        self.plan_mode_softtgt = plan_mode_softtgt
+        self.plan_mode_softtgt_tau = plan_mode_softtgt_tau
         self.deformable_waypoint = deformable_waypoint
         self.planning_deformable_waypoints = planning_deformable_waypoints
         self.use_alldet_kv = use_alldet_kv
@@ -836,7 +848,12 @@ class MotionPlanningHead(BaseModule):
                              for m in range(self.fut_mode)],
                             dim=2,
                         )
-                    if motion_classification:
+                    if self.motion_deformable_multimode_uniform:
+                        mode_weights = torch.full(
+                            (bs, num_anchor, self.fut_mode), 1.0 / self.fut_mode,
+                            device=det_anchors.device, dtype=det_anchors.dtype,
+                        )
+                    elif motion_classification:
                         mode_weights = motion_classification[-1].detach().softmax(dim=-1)
                     else:
                         mode_weights = torch.full(
@@ -879,33 +896,54 @@ class MotionPlanningHead(BaseModule):
                         ego_feat_exp = instance_feature[:, num_anchor:num_anchor+1].expand(
                             -1, num_plan_modes, -1
                         )  # (bs, num_plan_modes, embed_dims)
-                        attended_plan = self.layers[i](
-                            self._project_deformable_feature(ego_feat_exp),
-                            plan_anchor_box,
-                            plan_anchor_embed,
-                            feature_maps,
-                            metas,
-                        )
-                        attended_plan = self._project_deformable_output(
-                            attended_plan
-                        )  # (bs, num_plan_modes, embed_dims)
-                        if planning_classification:
-                            plan_weights = (
-                                planning_classification[-1].detach()
-                                .squeeze(1).softmax(dim=-1)
-                            )  # (bs, num_plan_modes)
-                        else:
-                            plan_weights = torch.full(
-                                (bs, num_plan_modes), 1.0 / num_plan_modes,
-                                device=det_anchors.device, dtype=det_anchors.dtype,
+                        if self.planning_deformable_instfeat_additive:
+                            # Additive variant: query = plan_mode_query + ego_feat_exp.
+                            # Preserves per-mode specificity (plan_mode_query is
+                            # mode-distinct) while still injecting ego instance
+                            # feature. Update plan_mode_query like standard branch;
+                            # leave ego token in instance_feature unchanged.
+                            daf_query = plan_mode_query + ego_feat_exp
+                            attended_plan = self.layers[i](
+                                self._project_deformable_feature(daf_query),
+                                plan_anchor_box,
+                                plan_anchor_embed,
+                                feature_maps,
+                                metas,
                             )
-                        ego_new = (attended_plan * plan_weights.unsqueeze(-1)).sum(
-                            dim=1, keepdim=True
-                        )  # (bs, 1, embed_dims)
-                        # Preserve DN tokens after the updated ego.
-                        instance_feature = torch.cat(
-                            [agent_feature, ego_new, instance_feature[:, num_anchor+1:]], dim=1
-                        )
+                            plan_mode_query = self._project_deformable_output(
+                                attended_plan
+                            )
+                            instance_feature = torch.cat(
+                                [agent_feature, instance_feature[:, num_anchor:]], dim=1
+                            )
+                        else:
+                            attended_plan = self.layers[i](
+                                self._project_deformable_feature(ego_feat_exp),
+                                plan_anchor_box,
+                                plan_anchor_embed,
+                                feature_maps,
+                                metas,
+                            )
+                            attended_plan = self._project_deformable_output(
+                                attended_plan
+                            )  # (bs, num_plan_modes, embed_dims)
+                            if planning_classification:
+                                plan_weights = (
+                                    planning_classification[-1].detach()
+                                    .squeeze(1).softmax(dim=-1)
+                                )  # (bs, num_plan_modes)
+                            else:
+                                plan_weights = torch.full(
+                                    (bs, num_plan_modes), 1.0 / num_plan_modes,
+                                    device=det_anchors.device, dtype=det_anchors.dtype,
+                                )
+                            ego_new = (attended_plan * plan_weights.unsqueeze(-1)).sum(
+                                dim=1, keepdim=True
+                            )  # (bs, 1, embed_dims)
+                            # Preserve DN tokens after the updated ego.
+                            instance_feature = torch.cat(
+                                [agent_feature, ego_new, instance_feature[:, num_anchor+1:]], dim=1
+                            )
                     else:
                         if self.planning_deformable_waypoints is not None:
                             K = len(self.planning_deformable_waypoints)
@@ -1181,9 +1219,42 @@ class MotionPlanningHead(BaseModule):
             reg_target = reg_target.flatten(end_dim=1)
             reg_weight = reg_weight.unsqueeze(-1)
 
-            reg_loss = self.plan_loss_reg(
-                reg_pred, reg_target, weight=reg_weight
-            )
+            if self.plan_mode_softtgt:
+                # Distance-softmax weighted L1 across all 6 modes for the
+                # cmd-indexed slice. Replaces winner-takes-all L1 to densify
+                # mode gradients and mitigate mode collapse.
+                bs_st = reg.shape[0]
+                M = self.ego_fut_mode
+                cmd_idx = data['gt_ego_fut_cmd'].argmax(dim=-1)
+                bs_idx = torch.arange(bs_st, device=reg.device)
+                reg_modes = reg.reshape(
+                    bs_st, 3, M, self.ego_fut_ts, 2
+                )[bs_idx, cmd_idx]  # (bs, M, T, 2)
+                gt_traj_exp = data['gt_ego_fut_trajs'].unsqueeze(1)
+                gt_mask_exp = data['gt_ego_fut_masks'].unsqueeze(1)
+
+                reg_cum = reg_modes.cumsum(dim=-2)
+                gt_cum = gt_traj_exp.cumsum(dim=-2)
+                dist = torch.linalg.norm(reg_cum - gt_cum, dim=-1)
+                denom = gt_mask_exp.sum(dim=-1).clamp(min=1.0)
+                mean_dist = (dist * gt_mask_exp).sum(dim=-1) / denom
+                # Detach so weight gradients don't amplify mode collapse.
+                weights_st = torch.softmax(
+                    -mean_dist.detach() / self.plan_mode_softtgt_tau, dim=-1
+                )
+
+                diff = (reg_modes - gt_traj_exp).abs()
+                masked_diff = diff * gt_mask_exp.unsqueeze(-1)
+                per_mode_l1 = (
+                    masked_diff.sum(dim=(-1, -2)) / float(self.ego_fut_ts * 2)
+                )
+                sample_loss = (per_mode_l1 * weights_st).sum(dim=-1).mean()
+                reg_loss_weight = getattr(self.plan_loss_reg, 'loss_weight', 1.0)
+                reg_loss = sample_loss * reg_loss_weight
+            else:
+                reg_loss = self.plan_loss_reg(
+                    reg_pred, reg_target, weight=reg_weight
+                )
             status_loss = self.plan_loss_status(status.squeeze(1), data['ego_status'])
 
             output.update(
