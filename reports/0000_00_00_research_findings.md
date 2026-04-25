@@ -51,6 +51,8 @@
   The GT perception oracle improves car motion prediction strongly and reduces collision rate, but planning L2 does not improve.
 - **Planning changes are largely isolated from upstream detection.**
   Across the planning-refinement batch, NDS, detection mAP, AMOTA, and IDS stay close to baseline while planning metrics improve.
+- **Planning-relevance aux supervision on the detection head regresses planning without affecting detection.**
+  On a same-host Killarney comparison against `ptaux2d_ppdeformmm_planifls`, adding a 2 m / 6-step planning-relevance BCE head to the detection refine module (`detrel_s2`) regressed L2 by 8.1% and `obj_box_col` by 66.7% relative, while NDS and mAP stayed flat. Reshaping detection features toward a planning-relevance axis the planner cannot consume costs planning information without compensating gain.
 
 ---
 
@@ -81,6 +83,10 @@
   Both pretraining runs degrade NDS, mAP, AMOTA, planning L2, and collision rate relative to baseline; one also destroys map mAP.
 - **Increasing `num_det` from 50 to 100 is a reliable planning/tracking win.**
   In AutoResearch, `num_det=100` improved L2 and collision rate on both nomap and with-map recipes, and also cut IDS heavily in the with-map run.
+- **Removing the detection top-k bottleneck entirely does not help planning.**
+  In `plan_unified` `alldet` (Killarney 3284640), letting planning queries cross-attend to all 900 detection tokens (instead of `topk(det_confidence, 50)`) leaves L2 essentially unchanged vs. the server-matched baseline (0.4987 → 0.5018) and worsens collision rate (0.063% → 0.084%). With the prior `numdemapx2` null, this is consistent evidence that the planning ↔ detection interface is not the binding constraint — the bottleneck is what detection features encode, not how planning accesses them.
+- **Adding bidirectional planning ↔ detection coupling at the decoder hurts planning.**
+  In `plan_unified` `bidir` (Killarney 3284641), inserting a reverse cross-attention per decoder stage so detection features attend to current planning state regresses L2 from 0.4987 to 0.5378 (server-matched comparison), with no compensating gains elsewhere. Coupling detection and planning at the K/V layer in either direction does not improve planning.
 - **`queue_length=6` helps on nomap but not with map.**
   In AutoResearch, queue length 6 improves L2 on nomap runs but hurts collision rate on with-map runs.
 - **Longer stage-2 training helps on nomap but not with map.**
@@ -89,6 +95,8 @@
   Both changes degraded planning in AutoResearch.
 - **Naively stacking individually positive changes often fails.**
   Multiple combo experiments showed negative synergy even when the single changes were beneficial in isolation.
+- **Auxiliary planning heads on `MotionPlanningRefinementModule` did not help at default settings.**
+  At loss weight 0.2 applied to every refine stage, both `planaux_da` (per-waypoint drivable-area BCE; Killarney 3284570) and `planaux_conf` (per-anchor pos-weighted conflict BCE; Killarney 3284571) regressed against the same-server Killarney baseline (`L2=0.4988`, `obj_box_col=0.063%`): `planaux_da` reached `L2=0.5362`, `obj_box_col=0.086%`; `planaux_conf` reached `L2=0.5202`, `obj_box_col=0.124%`. Detection (NDS, mAP) was flat. Plausible causes — aux-loss interference at this weight/attachment, label noise in the boundary-flood-fill drivable mask, and recursive supervision in conflict (label depends on the model's own predicted ego trajectory) — none retested yet.
 
 ---
 
