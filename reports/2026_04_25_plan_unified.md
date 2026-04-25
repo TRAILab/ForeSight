@@ -69,24 +69,33 @@ Deferred (Experiments 1, 4):
 | --- | --- | --- | --- |
 | Apollo | `stage1_8gpu_noflash_planifls` | — | DEFERRED |
 | DGX | `ptplan1_ppdeformmm_planifls` | — | DEFERRED |
-| Killarney | `ptaux2d_ppdeformmm_planifls_alldet` | — | PENDING |
-| Killarney | `ptaux2d_ppdeformmm_planifls_bidir` | — | PENDING |
+| Killarney | `ptaux2d_ppdeformmm_planifls` (baseline) | 3282987 | COMPLETED |
+| Killarney | `ptaux2d_ppdeformmm_planifls_alldet` | 3284640 | COMPLETED |
+| Killarney | `ptaux2d_ppdeformmm_planifls_bidir` | 3284641 | COMPLETED |
 | DGX | `ptaux2d_egoquery_planifls` | — | DEFERRED |
 
 | Config | L2 | obj_box_col | car_ade | ped_ade | car_epa | ped_epa | NDS | mAP |
 |--------|-----|-------------|---------|---------|---------|---------|-----|-----|
 | `ptaux2d_ppdeformmm_planifls` (baseline, DGX 3614) | 0.5057 | 0.043% | 0.6141 | 0.7177 | 0.5055 | 0.4365 | 0.5436 | 0.4383 |
+| `ptaux2d_ppdeformmm_planifls` (baseline, Killarney 3282987) | 0.4987 | 0.063% | 0.6228 | 0.7201 | 0.5073 | 0.4302 | 0.5447 | 0.4403 |
 | `ptplan1_ppdeformmm_planifls` | — | — | — | — | — | — | — | — |
-| `ptaux2d_ppdeformmm_planifls_alldet` | — | — | — | — | — | — | — | — |
-| `ptaux2d_ppdeformmm_planifls_bidir` | — | — | — | — | — | — | — | — |
+| `ptaux2d_ppdeformmm_planifls_alldet` (Killarney 3284640) | 0.5018 | 0.084% | 0.6031 | 0.7119 | 0.5090 | 0.4270 | 0.5477 | 0.4404 |
+| `ptaux2d_ppdeformmm_planifls_bidir` (Killarney 3284641) | 0.5378 | 0.057% | 0.6069 | 0.7227 | 0.5134 | 0.4280 | 0.5442 | 0.4386 |
 | `ptaux2d_egoquery_planifls` | — | — | — | — | — | — | — | — |
 
 ## Discussion
 
+Both experiments are compared against the **server-matched** killarney baseline (3282987) rather than the DGX 3614 baseline, because the cross-server L2 gap (0.5057 → 0.4987) is comparable to the per-experiment effect size and would otherwise mask the result.
+
+**`alldet` (job 3284640): no planning improvement.** L2 moves from 0.4987 → 0.5018 (+0.0031, within run-to-run noise) and `obj_box_col` worsens from 0.063% → 0.084%. Motion-prediction metrics tick up slightly (`car_ade` 0.6228 → 0.6031, `ped_ade` 0.7201 → 0.7119) and detection metrics are essentially unchanged. Removing the top-50 detection bottleneck and giving planning queries direct cross-attention to all 900 detection tokens does not improve planning. This rules out token-quantity / selection-heuristic as the binding constraint at the K/V layer — the selection is not throwing away planning-relevant information that planning could otherwise use. Consistent with the earlier `numdemapx2` null result (50 → 100 had no effect): the bottleneck is not how many detection tokens planning sees, it is what those tokens encode.
+
+**`bidir` (job 3284641): planning regresses.** L2 0.4987 → 0.5378 (+0.039, clearly outside noise); `obj_box_col` improves marginally (0.063% → 0.057%); detection and motion metrics are flat. Adding reverse cross-attention so detection features attend to the current planning state per decoder stage hurts more than it helps. Hypothesis: writing planning information into the agent token slice destabilizes the detection-side refine targets the same tokens are still being supervised against — the agent representation has to serve both detection regression/classification and a planning-conditioned write, and the joint objective drifts. The fact that collision rate did not regress alongside L2 also suggests the planning head is producing more conservative trajectories rather than learning a better policy.
+
+**Combined reading.** Both interventions targeted the *coupling layer* between detection and planning (more access via `alldet`, two-way flow via `bidir`) and neither improved planning. Together with the prior `numdemapx2` null, this is now a fairly strong signal that the binding constraint is not the planning ↔ detection interface — it is upstream, in what detection features encode. The `plan_relevance` direction (auxiliary planning-relevance supervision shaping detection features through their own loss) is a more promising lever, since it changes the features themselves rather than how planning accesses them.
+
 ## Future Work
 
-- If `ptplan1` beats `ptaux2d`: combine planning + aux2d at stage 1 to test additivity; the stage-1 gradient alignment story becomes central to the paper.
-- If `alldet` does nothing: the selection bottleneck is not binding; the information is not in the detection features regardless of how many you see. Motivates `plan_relevance` (better detection features) as the primary lever.
-- If `alldet` helps: confidence-based top-k was discarding relevant agents; combine with `detrel` from `plan_relevance` to test whether better features and better access are additive.
-- If `bidir` helps over `alldet`: the unidirectional flow is a real constraint; proceed to `egoquery`.
-- Combine with `plan_relevance` and `plan_aux` findings once all three mature.
+- The `egoquery` experiment (Experiment 4) was conditioned on `bidir` providing directional validation. With `bidir` regressing, the cleanest next motivation for ego-query integration would now have to come from `plan_relevance` showing that planning-shaped detection features help — pursue `egoquery` only after that signal exists.
+- Stage-1 planning supervision (`ptplan1`, Experiment 1) is still worth running: it shapes the *backbone* with planning gradients rather than coupling at the decoder. It is mechanistically distinct from `alldet`/`bidir` and the null results here do not predict its outcome.
+- If a second run of `bidir` reproduces the L2 regression, ablate the placement: try `rev_gnn` *only* in the last decoder stage rather than all 3, and try detaching the planning state in the K/V (so the reverse attention conditions on but does not gradient-couple back to planning). Either may recover baseline.
+- Combine `alldet` with `detrel` from `plan_relevance`: if relevance supervision improves the *features*, then giving planning access to all 900 of those improved features may finally produce additive gains. The current null suggests testing access and feature quality together rather than in isolation.
