@@ -6,6 +6,7 @@ import numpy as np
 import cv2
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from mmcv.utils import build_from_cfg
 from mmcv.cnn import Linear, bias_init_with_prob
@@ -131,6 +132,13 @@ class MotionPlanningHead(BaseModule):
         use_alldet_kv=False,
         bidir_planning=False,
         rev_graph_model=None,
+        with_da_head=False,
+        with_conflict_head=False,
+        da_loss_weight=0.2,
+        conflict_loss_weight=0.2,
+        conflict_threshold=2.0,
+        conflict_pos_weight=10.0,
+        roi_size=(30, 60),
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -159,6 +167,13 @@ class MotionPlanningHead(BaseModule):
         self.planning_deformable_waypoints = planning_deformable_waypoints
         self.use_alldet_kv = use_alldet_kv
         self.bidir_planning = bidir_planning
+        self.with_da_head = with_da_head
+        self.with_conflict_head = with_conflict_head
+        self.da_loss_weight = da_loss_weight
+        self.conflict_loss_weight = conflict_loss_weight
+        self.conflict_threshold = conflict_threshold
+        self.conflict_pos_weight = conflict_pos_weight
+        self.roi_size = roi_size
 
         # =========== build modules ===========
         def build(cfg, registry):
@@ -700,6 +715,8 @@ class MotionPlanningHead(BaseModule):
         planning_classification = []
         planning_prediction = []
         planning_status = []
+        planning_da_logits = []
+        planning_conflict_logits = []
         # Initialize motion endpoint anchors from k-means prior for first decoder
         # deformable stage — a future position rather than the current det box.
         if self.motion_deformable_multimode:
@@ -935,18 +952,28 @@ class MotionPlanningHead(BaseModule):
                 motion_query = motion_mode_query + (instance_feature + anchor_embed)[:, :num_anchor].unsqueeze(2)
                 # Use only the ego token (index num_anchor), not DN tokens that follow it.
                 plan_query = plan_mode_query.unsqueeze(1) + (instance_feature + anchor_embed)[:, num_anchor:num_anchor+1].unsqueeze(2)
+                agent_features_for_refine = (
+                    instance_feature[:, :num_anchor] if self.with_conflict_head else None
+                )
                 (
                     motion_cls,
                     motion_reg,
                     plan_cls,
                     plan_reg,
                     plan_status,
+                    plan_da,
+                    plan_conflict,
                 ) = self.layers[i](
                     motion_query,
                     plan_query,
                     instance_feature[:, num_anchor:num_anchor+1],
                     anchor_embed[:, num_anchor:num_anchor+1],
+                    agent_features=agent_features_for_refine,
                 )
+                if plan_da is not None:
+                    planning_da_logits.append(plan_da)
+                if plan_conflict is not None:
+                    planning_conflict_logits.append(plan_conflict)
                 if self.motion_cumulative_refinement and motion_prediction:
                     motion_reg = motion_reg + motion_prediction[-1].detach()
                 if self.planning_cumulative_refinement and planning_prediction:
@@ -1009,6 +1036,10 @@ class MotionPlanningHead(BaseModule):
             "period": self.instance_queue.ego_period,
             "anchor_queue": self.instance_queue.ego_anchor_queue,
         }
+        if planning_da_logits:
+            planning_output["da_logits"] = planning_da_logits
+        if planning_conflict_logits:
+            planning_output["conflict_logits"] = planning_conflict_logits
 
         if self.training:
             refine_module = self.layers[self._dn_refine_idx]
@@ -1051,7 +1082,7 @@ class MotionPlanningHead(BaseModule):
         loss = {}
         motion_loss = self.loss_motion(motion_model_outs, data, motion_loss_cache)
         loss.update(motion_loss)
-        planning_loss = self.loss_planning(planning_model_outs, data)
+        planning_loss = self.loss_planning(planning_model_outs, data, motion_loss_cache)
         loss.update(planning_loss)
         return loss
 
@@ -1116,10 +1147,12 @@ class MotionPlanningHead(BaseModule):
         return output
 
     @force_fp32(apply_to=("model_outs"))
-    def loss_planning(self, model_outs, data):
+    def loss_planning(self, model_outs, data, motion_loss_cache=None):
         cls_scores = model_outs["classification"]
         reg_preds = model_outs["prediction"]
         status_preds = model_outs["status"]
+        da_logits_list = model_outs.get("da_logits", [])
+        conf_logits_list = model_outs.get("conflict_logits", [])
         output = {}
         for decoder_idx, (cls, reg, status) in enumerate(
             zip(cls_scores, reg_preds, status_preds)
@@ -1161,6 +1194,24 @@ class MotionPlanningHead(BaseModule):
                 }
             )
 
+            if decoder_idx < len(da_logits_list):
+                da_loss = self._loss_planning_da(
+                    da_logits_list[decoder_idx], reg, data
+                )
+                if da_loss is not None:
+                    output[f"planning_loss_da_{decoder_idx}"] = (
+                        da_loss * self.da_loss_weight
+                    )
+
+            if decoder_idx < len(conf_logits_list):
+                conf_loss = self._loss_planning_conflict(
+                    conf_logits_list[decoder_idx], reg, data, motion_loss_cache
+                )
+                if conf_loss is not None:
+                    output[f"planning_loss_conf_{decoder_idx}"] = (
+                        conf_loss * self.conflict_loss_weight
+                    )
+
         if 'dn_plan_reg' in model_outs:
             dn_reg = model_outs['dn_plan_reg']          # (bs, num_dn, ego_fut_ts, 2)
             dn_target = model_outs['dn_plan_reg_target'] # (bs, num_dn, ego_fut_ts, 2)
@@ -1176,9 +1227,120 @@ class MotionPlanningHead(BaseModule):
 
         return output
 
+    def _loss_planning_da(self, da_logits, reg, data):
+        """Drivable-area compliance BCE on per-mode per-waypoint predictions.
+
+        da_logits: (bs, 1, M, ego_fut_ts) raw logits.
+        reg: (bs, 1, M, ego_fut_ts, 2) delta-XY plan predictions in lidar frame.
+        data['gt_drivable_mask']: (bs, H_pix, W_pix) uint8/long, 1=drivable.
+        """
+        gt_mask = data.get('gt_drivable_mask')
+        if gt_mask is None:
+            return None
+        if isinstance(gt_mask, list):
+            gt_mask = torch.stack([m for m in gt_mask], dim=0)
+        gt_mask = gt_mask.to(device=da_logits.device, dtype=da_logits.dtype)
+        bs = da_logits.shape[0]
+        M = da_logits.shape[2]
+        T = da_logits.shape[3]
+
+        pred_xy = reg.detach().squeeze(1).cumsum(dim=-2)  # (bs, M, T, 2)
+        # Normalize lidar XY to grid_sample range [-1, 1]:
+        # roi_size = (W_m, H_m). x is lateral (col), y is longitudinal (row).
+        nx = pred_xy[..., 0] / (self.roi_size[0] / 2.0)
+        ny = pred_xy[..., 1] / (self.roi_size[1] / 2.0)
+        in_roi = (nx.abs() <= 1.0) & (ny.abs() <= 1.0)
+
+        grid = torch.stack([nx, ny], dim=-1).reshape(bs, 1, M * T, 2)
+        sampled = F.grid_sample(
+            gt_mask.unsqueeze(1),
+            grid,
+            mode='bilinear',
+            padding_mode='zeros',
+            align_corners=False,
+        )
+        target = (sampled.squeeze(1).squeeze(1).reshape(bs, M, T) > 0.5).float()
+
+        logits = da_logits.squeeze(1)  # (bs, M, T)
+        weight = in_roi.to(logits.dtype)
+        loss = F.binary_cross_entropy_with_logits(
+            logits, target, reduction='none'
+        )
+        denom = weight.sum().clamp(min=1.0)
+        return (loss * weight).sum() / denom
+
+    def _loss_planning_conflict(self, conf_logits, reg, data, motion_loss_cache):
+        """Object-conflict BCE on (matched-anchor, plan-mode) pairs.
+
+        conf_logits: (bs, num_anchor, M) raw logits.
+        reg: (bs, 1, M, ego_fut_ts, 2) delta plan predictions.
+        Hungarian indices from motion_loss_cache pair pred_idx <-> GT idx.
+        """
+        if motion_loss_cache is None:
+            return None
+        gt_boxes = data.get('gt_bboxes_3d')
+        gt_traj = data.get('gt_agent_fut_trajs')
+        gt_traj_mask = data.get('gt_agent_fut_masks')
+        if gt_boxes is None or gt_traj is None:
+            return None
+
+        bs, num_anchor, M = conf_logits.shape
+        device = conf_logits.device
+        T_ego = reg.shape[-2]
+
+        ego_pred_xy = reg.detach().squeeze(1).cumsum(dim=-2)  # (bs, M, T_ego, 2)
+
+        target = conf_logits.new_zeros(bs, num_anchor, M)
+        weight = conf_logits.new_zeros(bs, num_anchor, M)
+
+        thr2 = float(self.conflict_threshold) ** 2
+        for b in range(bs):
+            pred_idx, target_idx = motion_loss_cache['indices'][b]
+            if pred_idx is None or len(pred_idx) == 0:
+                continue
+            boxes_b = gt_boxes[b].to(device)
+            trajs_b = gt_traj[b].to(device)
+            if trajs_b.shape[0] == 0:
+                continue
+            T = min(trajs_b.shape[1], T_ego)
+            if T == 0:
+                continue
+            agent_xy0 = boxes_b[target_idx, :2]  # (n_pos, 2)
+            agent_traj = trajs_b[target_idx, :T]  # (n_pos, T, 2)
+            agent_pos = agent_xy0.unsqueeze(1) + agent_traj.cumsum(dim=1)  # (n_pos, T, 2)
+
+            ego_pos = ego_pred_xy[b, :, :T, :]  # (M, T, 2)
+
+            diff = agent_pos.unsqueeze(1) - ego_pos.unsqueeze(0)  # (n_pos, M, T, 2)
+            d2 = (diff ** 2).sum(dim=-1)  # (n_pos, M, T)
+
+            if gt_traj_mask is not None:
+                tmask = gt_traj_mask[b].to(device)[target_idx, :T].bool()
+                d2 = torch.where(
+                    tmask.unsqueeze(1).expand(-1, M, -1),
+                    d2,
+                    d2.new_full((), float('inf')),
+                )
+            min_d2 = d2.min(dim=-1).values  # (n_pos, M)
+            label = (min_d2 < thr2).to(target.dtype)  # (n_pos, M)
+
+            if isinstance(pred_idx, torch.Tensor):
+                pidx = pred_idx.to(device).long()
+            else:
+                pidx = torch.as_tensor(pred_idx, device=device, dtype=torch.long)
+            target[b, pidx] = label
+            weight[b, pidx] = 1.0
+
+        denom = weight.sum().clamp(min=1.0)
+        pos_w = conf_logits.new_tensor([float(self.conflict_pos_weight)])
+        loss = F.binary_cross_entropy_with_logits(
+            conf_logits, target, reduction='none', pos_weight=pos_w
+        )
+        return (loss * weight).sum() / denom
+
     @force_fp32(apply_to=("model_outs"))
     def post_process(
-        self, 
+        self,
         det_output,
         motion_output,
         planning_output,

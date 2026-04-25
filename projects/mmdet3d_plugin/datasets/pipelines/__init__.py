@@ -12,7 +12,7 @@ from .augment import (
     PhotoMetricDistortionMultiViewImage,
 )
 from .loading import LoadMultiViewImageFromFiles, LoadPointsFromFile
-from .vectorize import VectorizeMap
+from .vectorize import VectorizeMap, RasterizeDrivableArea
 
 __all__ = [
     "InstanceNameFilter",
@@ -27,4 +27,5 @@ __all__ = [
     "LoadMultiViewImageFromFiles",
     "LoadPointsFromFile",
     "VectorizeMap",
+    "RasterizeDrivableArea",
 ]

@@ -1,5 +1,6 @@
 from typing import List, Tuple, Union, Dict
 
+import cv2
 import numpy as np
 from shapely.geometry import LineString
 from numpy.typing import NDArray
@@ -200,9 +201,85 @@ class VectorizeMap(object):
         repr_str = self.__class__.__name__
         repr_str += f'(simplify={self.simplify}, '
         repr_str += f'sample_num={self.sample_num}), '
-        repr_str += f'sample_dist={self.sample_dist}), ' 
+        repr_str += f'sample_dist={self.sample_dist}), '
         repr_str += f'roi_size={self.roi_size})'
         repr_str += f'normalize={self.normalize})'
         repr_str += f'coords_dim={self.coords_dim})'
 
         return repr_str
+
+
+@PIPELINES.register_module(force=True)
+class RasterizeDrivableArea(object):
+    """Build a binary BEV drivable-area mask from boundary linestrings.
+
+    Reads ``input_dict['map_geoms']['boundary']`` (List[LineString] tracing the
+    drivable region edges, possibly cut by the ROI) and produces a binary mask
+    in lidar-frame ROI by rasterizing boundaries as walls and flood-filling
+    from the ego origin. Output: ``input_dict['gt_drivable_mask']`` shape
+    ``(H_pix, W_pix)`` uint8 with 1 = drivable.
+
+    Pixel ``(i, j)`` corresponds to lidar XY:
+        x = -roi_size[0]/2 + (j + 0.5) * resolution  (lateral)
+        y = -roi_size[1]/2 + (i + 0.5) * resolution  (longitudinal)
+    """
+
+    def __init__(self, roi_size=(30, 60), resolution=0.5, wall_thickness=2):
+        self.roi_size = tuple(roi_size)
+        self.resolution = float(resolution)
+        self.W = int(round(self.roi_size[0] / self.resolution))
+        self.H = int(round(self.roi_size[1] / self.resolution))
+        self.wall_thickness = int(wall_thickness)
+
+    def _xy_to_pixel(self, xy):
+        cols = (xy[:, 0] + self.roi_size[0] / 2.0) / self.resolution
+        rows = (xy[:, 1] + self.roi_size[1] / 2.0) / self.resolution
+        return np.stack([cols, rows], axis=-1).round().astype(np.int32)
+
+    def __call__(self, input_dict):
+        if 'map_geoms' not in input_dict:
+            return input_dict
+        boundaries = input_dict['map_geoms'].get('boundary', [])
+        walls = np.zeros((self.H, self.W), dtype=np.uint8)
+        for ls in boundaries:
+            coords = np.asarray(ls.coords)[:, :2]
+            if len(coords) < 2:
+                continue
+            pts = self._xy_to_pixel(coords)
+            cv2.polylines(
+                walls, [pts], isClosed=False,
+                color=1, thickness=self.wall_thickness,
+            )
+        # Close the ROI box so flood-fill from origin stays within the patch.
+        walls[0, :] = 1
+        walls[-1, :] = 1
+        walls[:, 0] = 1
+        walls[:, -1] = 1
+
+        ox = int(round(self.W / 2))
+        oy = int(round(self.H / 2))
+        ox = max(0, min(self.W - 1, ox))
+        oy = max(0, min(self.H - 1, oy))
+        if walls[oy, ox] == 1:
+            free = np.argwhere(walls == 0)
+            if len(free) == 0:
+                input_dict['gt_drivable_mask'] = np.zeros(
+                    (self.H, self.W), dtype=np.uint8
+                )
+                return input_dict
+            d = (free[:, 0] - oy) ** 2 + (free[:, 1] - ox) ** 2
+            i = int(np.argmin(d))
+            oy, ox = int(free[i, 0]), int(free[i, 1])
+
+        ff_img = walls.copy()
+        ff_mask = np.zeros((self.H + 2, self.W + 2), dtype=np.uint8)
+        cv2.floodFill(ff_img, ff_mask, (ox, oy), 2)
+        drivable = (ff_img == 2).astype(np.uint8)
+        input_dict['gt_drivable_mask'] = drivable
+        return input_dict
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(roi_size={self.roi_size}, "
+            f"resolution={self.resolution}, wall_thickness={self.wall_thickness})"
+        )

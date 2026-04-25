@@ -22,6 +22,8 @@ class MotionPlanningRefinementModule(BaseModule):
         fut_mode=6,
         ego_fut_ts=6,
         ego_fut_mode=3,
+        with_da_head=False,
+        with_conflict_head=False,
     ):
         super(MotionPlanningRefinementModule, self).__init__()
         self.embed_dims = embed_dims
@@ -60,10 +62,37 @@ class MotionPlanningRefinementModule(BaseModule):
             nn.Linear(embed_dims, 10),
         )
 
+        self.with_da_head = with_da_head
+        if with_da_head:
+            # Per-mode per-waypoint drivable-area compliance logit.
+            self.plan_da_branch = nn.Sequential(
+                nn.Linear(embed_dims, embed_dims),
+                nn.ReLU(),
+                nn.Linear(embed_dims, embed_dims),
+                nn.ReLU(),
+                nn.Linear(embed_dims, ego_fut_ts),
+            )
+
+        self.with_conflict_head = with_conflict_head
+        if with_conflict_head:
+            # Pairwise (plan_query mode m, agent_feature j) -> conflict logit.
+            self.plan_conflict_branch = nn.Sequential(
+                nn.Linear(embed_dims * 2, embed_dims),
+                nn.ReLU(),
+                nn.Linear(embed_dims, embed_dims),
+                nn.ReLU(),
+                nn.Linear(embed_dims, 1),
+            )
+
     def init_weight(self):
         bias_init = bias_init_with_prob(0.01)
         nn.init.constant_(self.motion_cls_branch[-1].bias, bias_init)
         nn.init.constant_(self.plan_cls_branch[-1].bias, bias_init)
+        if self.with_da_head:
+            nn.init.constant_(self.plan_da_branch[-1].bias, 0.0)
+        if self.with_conflict_head:
+            # Conflicts are rare — bias toward "no conflict" matches the prior.
+            nn.init.constant_(self.plan_conflict_branch[-1].bias, bias_init)
 
     def forward(
         self,
@@ -71,6 +100,7 @@ class MotionPlanningRefinementModule(BaseModule):
         plan_query,
         ego_feature,
         ego_anchor_embed,
+        agent_features=None,
     ):
         bs, num_anchor = motion_query.shape[:2]
         motion_cls = self.motion_cls_branch(motion_query).squeeze(-1)
@@ -78,4 +108,20 @@ class MotionPlanningRefinementModule(BaseModule):
         plan_cls = self.plan_cls_branch(plan_query).squeeze(-1)
         plan_reg = self.plan_reg_branch(plan_query).reshape(bs, 1, 3 * self.ego_fut_mode, self.ego_fut_ts, 2)
         planning_status = self.plan_status_branch(ego_feature + ego_anchor_embed)
-        return motion_cls, motion_reg, plan_cls, plan_reg, planning_status
+
+        plan_da = None
+        if self.with_da_head:
+            # plan_query: (bs, 1, M, D) -> (bs, 1, M, ego_fut_ts) per-waypoint logit.
+            plan_da = self.plan_da_branch(plan_query)
+
+        plan_conflict = None
+        if self.with_conflict_head and agent_features is not None:
+            # plan_query: (bs, 1, M, D); agent_features: (bs, num_anchor, D).
+            M = plan_query.shape[2]
+            plan_q_flat = plan_query.squeeze(1)  # (bs, M, D)
+            agents_exp = agent_features.unsqueeze(2).expand(-1, -1, M, -1)
+            plan_exp = plan_q_flat.unsqueeze(1).expand(-1, num_anchor, -1, -1)
+            pair = torch.cat([agents_exp, plan_exp], dim=-1)
+            plan_conflict = self.plan_conflict_branch(pair).squeeze(-1)  # (bs, num_anchor, M)
+
+        return motion_cls, motion_reg, plan_cls, plan_reg, planning_status, plan_da, plan_conflict

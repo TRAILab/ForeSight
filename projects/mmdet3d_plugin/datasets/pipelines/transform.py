@@ -261,6 +261,7 @@ class NuScenesSparse4DAdaptor(object):
             'gt_ego_fut_masks',
             'gt_ego_fut_cmd',
             'ego_status',
+            'gt_drivable_mask',
         ]:
             if key not in input_dict:
                 continue
