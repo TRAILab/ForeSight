@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-# GPU queue snapshot for Narval, Trillium, Killarney.
-# Usage: queue_time.sh [--probe]
-#   --probe  submit a 4-GPU no-op job to each cluster and record actual queue time
+# GPU queue snapshot and probe for Narval, Trillium, Killarney.
+# Submits a 4-GPU no-op probe job to each cluster and records actual queue time.
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-METRICS="$REPO/logs/queue_metrics"
-SNAP_CSV="$METRICS/snapshots.csv"
-PROBE_CSV="$METRICS/probes.csv"
-PROBE=false
-[[ "${1:-}" == "--probe" ]] && PROBE=true
+QUEUE_CSV="$REPO/reports/queue_time.csv"
+SNAPSHOT_TIMEOUT=45
+SUBMIT_TIMEOUT=15
+QUERY_TIMEOUT=10
+POLL_SECONDS=60
+MAX_WAIT_SECONDS=14400
 
-mkdir -p "$METRICS"
-[[ -f "$SNAP_CSV" ]] || echo "timestamp,cluster,idle,mix,alloc,down,pending,fairshare" > "$SNAP_CSV"
-[[ -f "$PROBE_CSV" ]] || echo "submit_time,cluster,job_id,start_time,queue_seconds" > "$PROBE_CSV"
+mkdir -p "$REPO/reports"
+[[ -f "$QUEUE_CSV" ]] || echo "timestamp,record_type,cluster,idle,mix,alloc,down,pending,fairshare,job_id,submit_time,start_time,queue_seconds,status" > "$QUEUE_CSV"
 
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -20,50 +19,27 @@ NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # Parallel snapshot collection
 # ---------------------------------------------------------------------------
 
+remote_snapshot() {
+  local host="$1" init="$2" part="$3"
+  timeout "$SNAPSHOT_TIMEOUT" ssh "$host" "bash -s -- $(printf '%q' "$init") $(printf '%q' "$part")" <<'REMOTE'
+eval "$1"; part="$2"
+STATES=$(sinfo -p "$part" --noheader -o '%n %t' 2>/dev/null | sort -k1,1 -u | awk '
+  {st=$2; gsub(/[^a-z]/,"",st)
+   if(st=="idle") i++; else if(st=="mix") m++; else if(st=="alloc") a++; else d++}
+  END{printf "%d %d %d %d\n", i+0, m+0, a+0, d+0}')
+PENDING=$(squeue -p "$part" -t PENDING --noheader 2>/dev/null | wc -l)
+FS=$(sshare -u spapais --noheader 2>/dev/null | awk '/spapais/{if($NF>fs)fs=$NF} END{print (fs==""?"N/A":fs)}')
+echo "STATES $STATES"
+echo "PENDING $PENDING"
+echo "FAIRSHARE ${FS:-N/A}"
+REMOTE
+}
+
 T_N=$(mktemp); T_T=$(mktemp); T_K=$(mktemp)
 
-(timeout 45 ssh narval bash -s << 'EOF'
-source ~/.bashrc
-STATES=$(sinfo -p gpubase_bygpu_b1 --noheader -o '%n %t' 2>/dev/null | sort -k1,1 -u | awk '
-  {st=$2; gsub(/[^a-z]/,"",st)
-   if(st=="idle") i++; else if(st=="mix") m++; else if(st=="alloc") a++; else d++}
-  END{printf "%d %d %d %d\n", i+0, m+0, a+0, d+0}')
-PENDING=$(squeue -p gpubase_bygpu_b1 --noheader -o '%T' 2>/dev/null | { grep -c PENDING || echo 0; })
-FS=$(sshare -u spapais --noheader 2>/dev/null | grep spapais | awk '{print $NF}' | sort -n | tail -1 || echo "N/A")
-echo "STATES $STATES"
-echo "PENDING $PENDING"
-echo "FAIRSHARE ${FS:-N/A}"
-EOF
-) > "$T_N" 2>&1 &
-
-(timeout 45 ssh trillium_gpu bash -s << 'EOF'
-source ~/.bashrc
-STATES=$(sinfo -p compute --noheader -o '%n %t' 2>/dev/null | sort -k1,1 -u | awk '
-  {st=$2; gsub(/[^a-z]/,"",st)
-   if(st=="idle") i++; else if(st=="mix") m++; else if(st=="alloc") a++; else d++}
-  END{printf "%d %d %d %d\n", i+0, m+0, a+0, d+0}')
-PENDING=$(squeue -p compute --noheader -o '%T' 2>/dev/null | { grep -c PENDING || echo 0; })
-FS=$(sshare -u spapais --noheader 2>/dev/null | grep spapais | awk '{print $NF}' | sort -n | tail -1 || echo "N/A")
-echo "STATES $STATES"
-echo "PENDING $PENDING"
-echo "FAIRSHARE ${FS:-N/A}"
-EOF
-) > "$T_T" 2>&1 &
-
-(timeout 45 ssh killarney bash -s << 'EOF'
-source /etc/profile.d/modules.sh
-module load slurm/killarney/24.05.7
-STATES=$(sinfo -p gpubase_l40s_b1 --noheader -o '%n %t' 2>/dev/null | sort -k1,1 -u | awk '
-  {st=$2; gsub(/[^a-z]/,"",st)
-   if(st=="idle") i++; else if(st=="mix") m++; else if(st=="alloc") a++; else d++}
-  END{printf "%d %d %d %d\n", i+0, m+0, a+0, d+0}')
-PENDING=$(squeue -p gpubase_l40s_b1 --noheader -o '%T' 2>/dev/null | { grep -c PENDING || echo 0; })
-FS=$(sshare -u spapais --noheader 2>/dev/null | grep spapais | awk '{print $NF}' | sort -n | tail -1 || echo "N/A")
-echo "STATES $STATES"
-echo "PENDING $PENDING"
-echo "FAIRSHARE ${FS:-N/A}"
-EOF
-) > "$T_K" 2>&1 &
+remote_snapshot narval       "source ~/.bashrc"                                                         gpubase_bygpu_b1 > "$T_N" 2>&1 &
+remote_snapshot trillium_gpu "source ~/.bashrc"                                                         compute          > "$T_T" 2>&1 &
+remote_snapshot killarney    "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7" gpubase_l40s_b1  > "$T_K" 2>&1 &
 
 wait
 
@@ -88,7 +64,6 @@ K_IDLE=$(parse "$T_K" STATES 2); K_MIX=$(parse "$T_K" STATES 3)
 K_ALLOC=$(parse "$T_K" STATES 4); K_DOWN=$(parse "$T_K" STATES 5)
 K_PEND=$(parse "$T_K" PENDING 2); K_FS=$(parse "$T_K" FAIRSHARE 2)
 
-# Default N/A when SSH failed
 for var in N_IDLE N_MIX N_ALLOC N_DOWN N_PEND N_FS \
            T_IDLE T_MIX T_ALLOC T_DOWN T_PEND T_FS \
            K_IDLE K_MIX K_ALLOC K_DOWN K_PEND K_FS; do
@@ -98,43 +73,15 @@ done
 rm -f "$T_N" "$T_T" "$T_K"
 
 # ---------------------------------------------------------------------------
-# Append snapshot CSV
+# Append snapshot CSV rows
 # ---------------------------------------------------------------------------
 
-echo "$NOW,narval,$N_IDLE,$N_MIX,$N_ALLOC,$N_DOWN,$N_PEND,$N_FS"     >> "$SNAP_CSV"
-echo "$NOW,trillium,$T_IDLE,$T_MIX,$T_ALLOC,$T_DOWN,$T_PEND,$T_FS"   >> "$SNAP_CSV"
-echo "$NOW,killarney,$K_IDLE,$K_MIX,$K_ALLOC,$K_DOWN,$K_PEND,$K_FS"  >> "$SNAP_CSV"
+echo "$NOW,snapshot,narval,$N_IDLE,$N_MIX,$N_ALLOC,$N_DOWN,$N_PEND,$N_FS,,,,,"     >> "$QUEUE_CSV"
+echo "$NOW,snapshot,trillium,$T_IDLE,$T_MIX,$T_ALLOC,$T_DOWN,$T_PEND,$T_FS,,,,,"   >> "$QUEUE_CSV"
+echo "$NOW,snapshot,killarney,$K_IDLE,$K_MIX,$K_ALLOC,$K_DOWN,$K_PEND,$K_FS,,,,,"  >> "$QUEUE_CSV"
 
 # ---------------------------------------------------------------------------
-# Verdict
-# ---------------------------------------------------------------------------
-
-verdict() {
-  local best="" best_pend=999999 best_reason=""
-  for cluster in narval trillium killarney; do
-    case $cluster in
-      narval)    pend=$N_PEND; fs=$N_FS; idle=$N_IDLE; mix=$N_MIX ;;
-      trillium)  pend=$T_PEND; fs=$T_FS; idle=$T_IDLE; mix=$T_MIX ;;
-      killarney) pend=$K_PEND; fs=$K_FS; idle=$K_IDLE; mix=$K_MIX ;;
-    esac
-    [[ "$pend" == "N/A" ]] && continue
-    if [[ $pend -lt $best_pend ]] || \
-       [[ $pend -eq $best_pend && "$fs" != "N/A" && $(awk "BEGIN{print ($fs > ${best_fs:-0})}") -eq 1 ]]; then
-      best=$cluster; best_pend=$pend; best_fs=$fs
-      if [[ "$idle" -gt 0 ]] 2>/dev/null; then
-        best_reason="$idle idle nodes → near-instant start"
-      elif [[ "$mix" -gt 0 ]] 2>/dev/null; then
-        best_reason="$pend pending jobs, $mix mix nodes draining"
-      else
-        best_reason="fewest pending jobs ($pend) with fairshare $fs"
-      fi
-    fi
-  done
-  echo "Submit to **$best**: $best_reason."
-}
-
-# ---------------------------------------------------------------------------
-# Print output
+# Print + verdict
 # ---------------------------------------------------------------------------
 
 printf '\n'
@@ -154,106 +101,92 @@ printf '  Pending GPU jobs: %s\n' "$K_PEND"
 printf '  Your fairshare: %s\n' "$K_FS"
 printf '\n'
 
+verdict() {
+  local best="" best_pend=999999 best_reason="" pend fs idle mix best_fs=0
+  for cluster in narval trillium killarney; do
+    case $cluster in
+      narval)    pend=$N_PEND; fs=$N_FS; idle=$N_IDLE; mix=$N_MIX ;;
+      trillium)  pend=$T_PEND; fs=$T_FS; idle=$T_IDLE; mix=$T_MIX ;;
+      killarney) pend=$K_PEND; fs=$K_FS; idle=$K_IDLE; mix=$K_MIX ;;
+    esac
+    [[ "$pend" == "N/A" ]] && continue
+    if [[ $pend -lt $best_pend ]] || \
+       [[ $pend -eq $best_pend && "$fs" != "N/A" && $(awk "BEGIN{print ($fs > $best_fs)}") -eq 1 ]]; then
+      best=$cluster; best_pend=$pend; best_fs=$fs
+      if [[ "$idle" -gt 0 ]] 2>/dev/null; then
+        best_reason="$idle idle nodes → near-instant start"
+      elif [[ "$mix" -gt 0 ]] 2>/dev/null; then
+        best_reason="$pend pending jobs, $mix mix nodes draining"
+      else
+        best_reason="fewest pending jobs ($pend) with fairshare $fs"
+      fi
+    fi
+  done
+  echo "Submit to **$best**: $best_reason."
+}
+
 verdict
 
 # ---------------------------------------------------------------------------
-# Probe jobs (--probe only)
+# Probe jobs
 # Each probe submits a 4-GPU job with the same scheduler resource request as
-# the corresponding run wrapper, polls until it starts, records queue time to
-# probes.csv, then cancels the job.
+# the corresponding run wrapper, waits for SLURM accounting to report Submit
+# and Start timestamps, then records actual queue time to queue_time.csv.
 # ---------------------------------------------------------------------------
 
-if $PROBE; then
+submit_probe() {
+  local cluster="$1" host="$2" prefix="$3" sbatch_opts="$4"
+  local submitted_at out job_id elapsed acct submit start state queue_seconds recorded_at
 
-  # Narval
-  (
-    ST=$(date -u +%Y-%m-%dT%H:%M:%SZ); SE=$(date +%s)
-    OUT=$(timeout 15 ssh narval \
-      "source ~/.bashrc && sbatch \
-        --account=rrg-swasland --ntasks=1 --cpus-per-task=12 --mem=120gb \
-        --time=11:59:00 --gres=gpu:a100:4 \
-        --job-name=queue_probe --output=/dev/null \
-        --wrap='sleep 120'" 2>&1) || { echo "[probe:narval] submit failed: $OUT" >&2; exit 1; }
-    JID=$(awk '/Submitted batch job/{print $NF}' <<< "$OUT")
-    [[ -z "$JID" ]] && { echo "[probe:narval] no job ID: $OUT" >&2; exit 1; }
-    echo "[probe:narval] submitted $JID"
-    elapsed=0
-    while [[ $elapsed -lt 14400 ]]; do
-      sleep 60; elapsed=$((elapsed + 60))
-      STATE=$(timeout 10 ssh narval \
-        "source ~/.bashrc && squeue -j $JID --noheader -o '%T' 2>/dev/null" 2>/dev/null | tr -d ' ')
-      if [[ "$STATE" == "RUNNING" || "$STATE" == "COMPLETING" || -z "$STATE" ]]; then
-        QS=$(( $(date +%s) - SE ))
-        echo "$ST,narval,$JID,$(date -u +%Y-%m-%dT%H:%M:%SZ),$QS" >> "$PROBE_CSV"
-        echo "[probe:narval] $JID started: ${QS}s queue time"
-        timeout 10 ssh narval "source ~/.bashrc && scancel $JID" 2>/dev/null || true
-        exit 0
-      fi
-    done
-    echo "$ST,narval,$JID,TIMEOUT,>14400" >> "$PROBE_CSV"
-    timeout 10 ssh narval "source ~/.bashrc && scancel $JID" 2>/dev/null || true
-  ) &
+  submitted_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  out=$(timeout "$SUBMIT_TIMEOUT" ssh "$host" \
+    "$prefix sbatch $sbatch_opts --job-name=queue_probe --output=/dev/null --wrap='true'" 2>&1) || {
+      echo "[probe:$cluster] submit failed: $out" >&2
+      return 1
+    }
 
-  # Trillium
-  (
-    ST=$(date -u +%Y-%m-%dT%H:%M:%SZ); SE=$(date +%s)
-    OUT=$(timeout 15 ssh trillium_gpu \
-      "source ~/.bashrc && sbatch \
-        --account=rrg-swasland --ntasks=1 --cpus-per-task=24 \
-        --time=11:59:00 --gpus-per-node=4 \
-        --job-name=queue_probe --output=/dev/null \
-        --wrap='sleep 120'" 2>&1) || { echo "[probe:trillium] submit failed: $OUT" >&2; exit 1; }
-    JID=$(awk '/Submitted batch job/{print $NF}' <<< "$OUT")
-    [[ -z "$JID" ]] && { echo "[probe:trillium] no job ID: $OUT" >&2; exit 1; }
-    echo "[probe:trillium] submitted $JID"
-    elapsed=0
-    while [[ $elapsed -lt 14400 ]]; do
-      sleep 60; elapsed=$((elapsed + 60))
-      STATE=$(timeout 10 ssh trillium_gpu \
-        "source ~/.bashrc && squeue -j $JID --noheader -o '%T' 2>/dev/null" 2>/dev/null | tr -d ' ')
-      if [[ "$STATE" == "RUNNING" || "$STATE" == "COMPLETING" || -z "$STATE" ]]; then
-        QS=$(( $(date +%s) - SE ))
-        echo "$ST,trillium,$JID,$(date -u +%Y-%m-%dT%H:%M:%SZ),$QS" >> "$PROBE_CSV"
-        echo "[probe:trillium] $JID started: ${QS}s queue time"
-        timeout 10 ssh trillium_gpu "source ~/.bashrc && scancel $JID" 2>/dev/null || true
-        exit 0
-      fi
-    done
-    echo "$ST,trillium,$JID,TIMEOUT,>14400" >> "$PROBE_CSV"
-    timeout 10 ssh trillium_gpu "source ~/.bashrc && scancel $JID" 2>/dev/null || true
-  ) &
+  job_id=$(awk '/Submitted batch job/{print $NF}' <<< "$out")
+  if [[ -z "$job_id" ]]; then
+    echo "[probe:$cluster] no job ID: $out" >&2
+    return 1
+  fi
 
-  # Killarney
-  (
-    ST=$(date -u +%Y-%m-%dT%H:%M:%SZ); SE=$(date +%s)
-    OUT=$(timeout 15 ssh killarney \
-      "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && sbatch \
-        --account=aip-swasland --ntasks=1 --cpus-per-task=16 --mem=120gb \
-        --time=11:59:00 --gres=gpu:l40s:4 \
-        --job-name=queue_probe --output=/dev/null \
-        --wrap='sleep 120'" 2>&1) || { echo "[probe:killarney] submit failed: $OUT" >&2; exit 1; }
-    JID=$(awk '/Submitted batch job/{print $NF}' <<< "$OUT")
-    [[ -z "$JID" ]] && { echo "[probe:killarney] no job ID: $OUT" >&2; exit 1; }
-    echo "[probe:killarney] submitted $JID"
-    elapsed=0
-    while [[ $elapsed -lt 14400 ]]; do
-      sleep 60; elapsed=$((elapsed + 60))
-      STATE=$(timeout 10 ssh killarney \
-        "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && \
-         squeue -j $JID --noheader -o '%T' 2>/dev/null" 2>/dev/null | tr -d ' ')
-      if [[ "$STATE" == "RUNNING" || "$STATE" == "COMPLETING" || -z "$STATE" ]]; then
-        QS=$(( $(date +%s) - SE ))
-        echo "$ST,killarney,$JID,$(date -u +%Y-%m-%dT%H:%M:%SZ),$QS" >> "$PROBE_CSV"
-        echo "[probe:killarney] $JID started: ${QS}s queue time"
-        timeout 10 ssh killarney \
-          "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && scancel $JID" 2>/dev/null || true
-        exit 0
-      fi
-    done
-    echo "$ST,killarney,$JID,TIMEOUT,>14400" >> "$PROBE_CSV"
-    timeout 10 ssh killarney \
-      "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && scancel $JID" 2>/dev/null || true
-  ) &
+  echo "[probe:$cluster] submitted $job_id"
+  elapsed=0
+  while [[ $elapsed -lt $MAX_WAIT_SECONDS ]]; do
+    sleep "$POLL_SECONDS"
+    elapsed=$((elapsed + POLL_SECONDS))
+    acct=$(timeout "$QUERY_TIMEOUT" ssh "$host" \
+      "$prefix sacct -j $job_id -X --noheader --parsable2 --format=Submit,Start,State 2>/dev/null | head -n 1" 2>/dev/null)
+    IFS='|' read -r submit start state <<< "$acct"
+    if [[ -n "$submit" && -n "$start" && "$start" != "Unknown" ]]; then
+      queue_seconds=$(( $(date -d "$start" +%s) - $(date -d "$submit" +%s) ))
+      recorded_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      echo "$recorded_at,probe,$cluster,,,,,,,$job_id,$submit,$start,$queue_seconds,$state" >> "$QUEUE_CSV"
+      echo "[probe:$cluster] $job_id queued for ${queue_seconds}s"
+      return 0
+    fi
+  done
 
-  echo "Probe jobs submitted. Pollers running in background; results → $PROBE_CSV"
-fi
+  recorded_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  echo "$recorded_at,probe,$cluster,,,,,,,$job_id,$submitted_at,TIMEOUT,>$MAX_WAIT_SECONDS,timeout" >> "$QUEUE_CSV"
+  timeout "$QUERY_TIMEOUT" ssh "$host" "$prefix scancel $job_id" 2>/dev/null || true
+}
+
+submit_probe \
+  narval narval \
+  "source ~/.bashrc &&" \
+  "--account=rrg-swasland --ntasks=1 --cpus-per-task=12 --mem=120gb --time=11:59:00 --gres=gpu:a100:4" &
+
+submit_probe \
+  trillium trillium_gpu \
+  "source ~/.bashrc &&" \
+  "--account=rrg-swasland --ntasks=1 --cpus-per-task=24 --time=11:59:00 --gpus-per-node=4" &
+
+submit_probe \
+  killarney killarney \
+  "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && cd /scratch &&" \
+  "--account=aip-swasland --ntasks=1 --cpus-per-task=16 --mem=120gb --time=11:59:00 --gres=gpu:l40s:4" &
+
+echo "Probe jobs submitted. Waiting for SLURM accounting results; results -> $QUEUE_CSV"
+wait
