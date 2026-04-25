@@ -1,7 +1,7 @@
 ---
 name: run-experiments
 description: Plans, creates, submits, monitors, and logs a small ForeSight experiment batch after surveying prior results and waiting at two confirmation checkpoints.
-allowed-tools: Read, Write, Edit, Bash(git:*), Bash(ssh:*), Bash(cp:*), Bash(date:*), Bash(cat:*), Bash(head:*), Bash(tail:*), Bash(ls:*)
+allowed-tools: Read, Write, Edit, Bash(git:*), Bash(ssh:*), Bash(cp:*), Bash(date:*), Bash(cat:*), Bash(head:*), Bash(tail:*), Bash(ls:*), Bash(./scripts/local_run.sh:*)
 ---
 
 Goal: `$ARGUMENTS`
@@ -70,7 +70,13 @@ Summarize all source code changes and config changes. Ask exactly:
 
 Do not commit or push until the user confirms.
 
-6. Commit, push, and sync the target server:
+6. Smoke test each config locally before committing. For each config run:
+```bash
+./scripts/local_run.sh bash ./tools/dist_train.sh projects/configs/<config_stem>.py 1 --deterministic --cfg-options data.samples_per_gpu=2 runner.max_iters=5
+```
+Wait for the run to finish. If it errors, fix the root cause and re-read the affected files to confirm the fix before continuing. Do not proceed to commit until all configs pass cleanly.
+
+7. Commit, push, and sync the target server:
 ```bash
 git add projects/configs/<config_stem_1>.py projects/configs/<config_stem_2>.py ... <changed source files>
 git commit -m "sd_<feature>: add experiment configs
