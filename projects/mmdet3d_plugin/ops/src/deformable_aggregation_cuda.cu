@@ -127,7 +127,7 @@ __device__ void bilinear_sampling_grad(
 
 
 __global__ void deformable_aggregation_kernel(
-    const int num_kernels,
+    const int64_t num_kernels,
     float* output,
     const float* mc_ms_feat,
     const int* spatial_shape,
@@ -143,7 +143,7 @@ __global__ void deformable_aggregation_kernel(
     int num_pts,
     int num_groups
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_kernels) return;
 
     const float weight = *(weights + idx / (num_embeds / num_groups));
@@ -188,7 +188,7 @@ __global__ void deformable_aggregation_kernel(
 
 
 __global__ void deformable_aggregation_grad_kernel(
-    const int num_kernels,
+    const int64_t num_kernels,
     const float* mc_ms_feat,
     const int* spatial_shape,
     const int* scale_start_index,
@@ -207,7 +207,7 @@ __global__ void deformable_aggregation_grad_kernel(
     int num_pts,
     int num_groups
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_kernels) return;
 
     const int weights_ptr = idx / (num_embeds / num_groups);
@@ -278,9 +278,9 @@ void deformable_aggregation(
     int num_pts,
     int num_groups
 ) {
-    const int num_kernels = batch_size * num_pts * num_embeds * num_anchors * num_cams * num_scale;
+    const int64_t num_kernels = (int64_t)batch_size * num_pts * num_embeds * num_anchors * num_cams * num_scale;
     deformable_aggregation_kernel
-        <<<(int)ceil(((double)num_kernels/128)), 128>>>(
+        <<<(int64_t)ceil(((double)num_kernels/128)), 128>>>(
         num_kernels, output,
         mc_ms_feat, spatial_shape, scale_start_index, sample_location, weights,
         batch_size, num_cams, num_feat, num_embeds, num_scale, num_anchors, num_pts, num_groups
@@ -307,9 +307,9 @@ void deformable_aggregation_grad(
   int num_pts,
   int num_groups
 ) {
-    const int num_kernels = batch_size * num_pts * num_embeds * num_anchors * num_cams * num_scale;
+    const int64_t num_kernels = (int64_t)batch_size * num_pts * num_embeds * num_anchors * num_cams * num_scale;
     deformable_aggregation_grad_kernel
-        <<<(int)ceil(((double)num_kernels/128)), 128>>>(
+        <<<(int64_t)ceil(((double)num_kernels/128)), 128>>>(
         num_kernels,
         mc_ms_feat, spatial_shape, scale_start_index, sample_location, weights,
         grad_output, grad_mc_ms_feat, grad_sampling_location, grad_weights,
