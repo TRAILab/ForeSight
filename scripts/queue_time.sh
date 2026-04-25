@@ -7,8 +7,8 @@ QUEUE_CSV="$REPO/reports/queue_time.csv"
 SNAPSHOT_TIMEOUT=45
 SUBMIT_TIMEOUT=15
 QUERY_TIMEOUT=10
-POLL_SECONDS=60
-MAX_WAIT_SECONDS=14400
+POLL_SECONDS=120
+MAX_WAIT_SECONDS=28800
 
 mkdir -p "$REPO/reports"
 [[ -f "$QUEUE_CSV" ]] || echo "timestamp,record_type,cluster,idle,mix,alloc,down,pending,fairshare,job_id,submit_time,start_time,queue_seconds,status" > "$QUEUE_CSV"
