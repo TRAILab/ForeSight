@@ -25,6 +25,7 @@ CONTAINER_CMD="apptainer exec --nv -c -e --pwd /workspace/ForeSight/ \
 --env WANDB_API_KEY=$WANDB_API_KEY \
 --env WANDB_MODE=offline \
 --env TMPDIR=/tmp \
+--env NCCL_NVLS_ENABLE=0 \
 --bind=$TMP_DIR:/tmp \
 --bind=/home/spapais/ForeSight:/workspace/ForeSight/ \
 --bind=$TMP_DATA_DIR:/workspace/ForeSight/data/nuscenes \
