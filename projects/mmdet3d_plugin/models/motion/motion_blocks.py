@@ -24,6 +24,7 @@ class MotionPlanningRefinementModule(BaseModule):
         ego_fut_mode=3,
         with_da_head=False,
         with_conflict_head=False,
+        plan_mode_time_queries=False,
     ):
         super(MotionPlanningRefinementModule, self).__init__()
         self.embed_dims = embed_dims
@@ -31,6 +32,7 @@ class MotionPlanningRefinementModule(BaseModule):
         self.fut_mode = fut_mode
         self.ego_fut_ts = ego_fut_ts
         self.ego_fut_mode = ego_fut_mode
+        self.plan_mode_time_queries = plan_mode_time_queries
 
         self.motion_cls_branch = nn.Sequential(
             *linear_relu_ln(embed_dims, 1, 2),
@@ -47,12 +49,15 @@ class MotionPlanningRefinementModule(BaseModule):
             *linear_relu_ln(embed_dims, 1, 2),
             Linear(embed_dims, 1),
         )
+        # Time-queries mode: each query produces a single (x, y) waypoint.
+        # Default: each query produces all ego_fut_ts waypoints at once.
+        plan_reg_out = 2 if plan_mode_time_queries else ego_fut_ts * 2
         self.plan_reg_branch = nn.Sequential(
             nn.Linear(embed_dims, embed_dims),
             nn.ReLU(),
             nn.Linear(embed_dims, embed_dims),
             nn.ReLU(),
-            nn.Linear(embed_dims, ego_fut_ts * 2),
+            nn.Linear(embed_dims, plan_reg_out),
         )
         self.plan_status_branch = nn.Sequential(
             nn.Linear(embed_dims, embed_dims),
@@ -105,8 +110,19 @@ class MotionPlanningRefinementModule(BaseModule):
         bs, num_anchor = motion_query.shape[:2]
         motion_cls = self.motion_cls_branch(motion_query).squeeze(-1)
         motion_reg = self.motion_reg_branch(motion_query).reshape(bs, num_anchor, self.fut_mode, self.fut_ts, 2)
-        plan_cls = self.plan_cls_branch(plan_query).squeeze(-1)
-        plan_reg = self.plan_reg_branch(plan_query).reshape(bs, 1, 3 * self.ego_fut_mode, self.ego_fut_ts, 2)
+        if self.plan_mode_time_queries:
+            # plan_query: (bs, 1, M_total*T, D) -> per-(mode, ts) reshape.
+            M_total = 3 * self.ego_fut_mode
+            T = self.ego_fut_ts
+            plan_query_mt = plan_query.reshape(bs, 1, M_total, T, self.embed_dims)
+            # Per-(mode, ts) (x, y).
+            plan_reg = self.plan_reg_branch(plan_query_mt).reshape(bs, 1, M_total, T, 2)
+            # Mode classification: collapse over time via mean before MLP.
+            plan_query_mode = plan_query_mt.mean(dim=3)  # (bs, 1, M_total, D)
+            plan_cls = self.plan_cls_branch(plan_query_mode).squeeze(-1)
+        else:
+            plan_cls = self.plan_cls_branch(plan_query).squeeze(-1)
+            plan_reg = self.plan_reg_branch(plan_query).reshape(bs, 1, 3 * self.ego_fut_mode, self.ego_fut_ts, 2)
         planning_status = self.plan_status_branch(ego_feature + ego_anchor_embed)
 
         plan_da = None

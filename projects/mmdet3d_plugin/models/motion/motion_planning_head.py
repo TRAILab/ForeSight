@@ -143,6 +143,11 @@ class MotionPlanningHead(BaseModule):
         roi_size=(30, 60),
         plan_mode_softtgt=False,
         plan_mode_softtgt_tau=1.0,
+        plan_diversity_reg=False,
+        plan_diversity_loss_weight=0.05,
+        plan_diversity_sigma=5.0,
+        mode_no_agg=False,
+        plan_mode_time_queries=False,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -175,6 +180,11 @@ class MotionPlanningHead(BaseModule):
         )
         self.plan_mode_softtgt = plan_mode_softtgt
         self.plan_mode_softtgt_tau = plan_mode_softtgt_tau
+        self.plan_diversity_reg = plan_diversity_reg
+        self.plan_diversity_loss_weight = plan_diversity_loss_weight
+        self.plan_diversity_sigma = plan_diversity_sigma
+        self.mode_no_agg = mode_no_agg
+        self.plan_mode_time_queries = plan_mode_time_queries
         self.deformable_waypoint = deformable_waypoint
         self.planning_deformable_waypoints = planning_deformable_waypoints
         self.use_alldet_kv = use_alldet_kv
@@ -678,10 +688,17 @@ class MotionPlanningHead(BaseModule):
                 motion_anchor[..., -1, :], hidden_dim=self.embed_dims
             )
         )
-        plan_pos = gen_sineembed_for_position(
-            plan_anchor[..., -1, :], hidden_dim=self.embed_dims
-        )
-        plan_mode_query = self.plan_anchor_encoder(plan_pos)
+        if self.plan_mode_time_queries:
+            # Per-(mode, ts) query, flattened along (mode, ts): (bs, 3*M*T, D).
+            plan_pos = gen_sineembed_for_position(
+                plan_anchor, hidden_dim=self.embed_dims
+            )
+            plan_mode_query = self.plan_anchor_encoder(plan_pos).flatten(1, 2)
+        else:
+            plan_pos = gen_sineembed_for_position(
+                plan_anchor[..., -1, :], hidden_dim=self.embed_dims
+            )
+            plan_mode_query = self.plan_anchor_encoder(plan_pos)
 
         # =========== cat instance and ego ===========
         instance_feature_selected = torch.cat([instance_feature_selected, ego_feature], dim=1)
@@ -848,7 +865,7 @@ class MotionPlanningHead(BaseModule):
                              for m in range(self.fut_mode)],
                             dim=2,
                         )
-                    if self.motion_deformable_multimode_uniform:
+                    if self.motion_deformable_multimode_uniform or self.mode_no_agg:
                         mode_weights = torch.full(
                             (bs, num_anchor, self.fut_mode), 1.0 / self.fut_mode,
                             device=det_anchors.device, dtype=det_anchors.dtype,
@@ -861,6 +878,12 @@ class MotionPlanningHead(BaseModule):
                             device=det_anchors.device, dtype=det_anchors.dtype,
                         )
                     agent_feature = (attended * mode_weights.unsqueeze(-1)).sum(dim=2)
+                    if self.mode_no_agg:
+                        # Bypass softmax aggregation for the mode_query path.
+                        # Additive blend keeps motion_anchor_encoder gradient
+                        # alive while injecting the per-mode attended features
+                        # into refine.
+                        motion_mode_query = motion_mode_query + attended
                 else:
                     motion_anchor_ref = (
                         motion_endpoint_anchor if self.motion_deformable else det_anchors
@@ -875,10 +898,18 @@ class MotionPlanningHead(BaseModule):
                         metas,
                     ))
                 if self.planning_deformable:
-                    plan_anchor_box = self._build_planning_anchor_boxes(
-                        plan_anchor.detach(),
-                        ego_anchor,
-                    )
+                    if self.plan_mode_time_queries:
+                        # Per-(mode, ts) anchor box, flattened along (mode, ts).
+                        T = self.ego_fut_ts
+                        plan_anchor_box_mt = self._build_planning_anchor_boxes_multi(
+                            plan_anchor.detach(), ego_anchor, list(range(T)),
+                        )  # (bs, M_total, T, 11)
+                        plan_anchor_box = plan_anchor_box_mt.flatten(1, 2)  # (bs, M_total*T, 11)
+                    else:
+                        plan_anchor_box = self._build_planning_anchor_boxes(
+                            plan_anchor.detach(),
+                            ego_anchor,
+                        )
                     plan_anchor_embed = anchor_encoder(plan_anchor_box)
                     _use_instfeat = (
                         self.planning_deformable_instfeat and (
@@ -917,8 +948,14 @@ class MotionPlanningHead(BaseModule):
                                 [agent_feature, instance_feature[:, num_anchor:]], dim=1
                             )
                         else:
+                            # Match deformable query shape to anchor box shape:
+                            # ego_feat broadcast to all plan-mode (or mode-time) slots.
+                            num_plan_queries = plan_anchor_box.shape[1]
+                            ego_feat_exp_q = instance_feature[:, num_anchor:num_anchor+1].expand(
+                                -1, num_plan_queries, -1
+                            )
                             attended_plan = self.layers[i](
-                                self._project_deformable_feature(ego_feat_exp),
+                                self._project_deformable_feature(ego_feat_exp_q),
                                 plan_anchor_box,
                                 plan_anchor_embed,
                                 feature_maps,
@@ -926,15 +963,25 @@ class MotionPlanningHead(BaseModule):
                             )
                             attended_plan = self._project_deformable_output(
                                 attended_plan
-                            )  # (bs, num_plan_modes, embed_dims)
-                            if planning_classification:
+                            )  # (bs, num_plan_queries, embed_dims)
+                            if self.mode_no_agg:
+                                # Bypass softmax aggregation: additively blend per-query
+                                # attended features into plan_mode_query (preserves
+                                # plan_anchor_encoder gradient + adds per-mode signal).
+                                # Use uniform mean for ego_new (shape preservation).
+                                plan_weights = torch.full(
+                                    (bs, num_plan_queries), 1.0 / num_plan_queries,
+                                    device=det_anchors.device, dtype=det_anchors.dtype,
+                                )
+                                plan_mode_query = plan_mode_query + attended_plan
+                            elif planning_classification and not self.plan_mode_time_queries:
                                 plan_weights = (
                                     planning_classification[-1].detach()
                                     .squeeze(1).softmax(dim=-1)
                                 )  # (bs, num_plan_modes)
                             else:
                                 plan_weights = torch.full(
-                                    (bs, num_plan_modes), 1.0 / num_plan_modes,
+                                    (bs, num_plan_queries), 1.0 / num_plan_queries,
                                     device=det_anchors.device, dtype=det_anchors.dtype,
                                 )
                             ego_new = (attended_plan * plan_weights.unsqueeze(-1)).sum(
@@ -1041,11 +1088,18 @@ class MotionPlanningHead(BaseModule):
                         motion_classification[-1].detach(),
                     )
                 plan_anchor = plan_anchor_upd
-                plan_mode_query = self.plan_anchor_encoder(
-                    gen_sineembed_for_position(
-                        plan_anchor[..., -1, :], hidden_dim=self.embed_dims
+                if self.plan_mode_time_queries:
+                    plan_mode_query = self.plan_anchor_encoder(
+                        gen_sineembed_for_position(
+                            plan_anchor, hidden_dim=self.embed_dims
+                        )
+                    ).flatten(1, 2)
+                else:
+                    plan_mode_query = self.plan_anchor_encoder(
+                        gen_sineembed_for_position(
+                            plan_anchor[..., -1, :], hidden_dim=self.embed_dims
+                        )
                     )
-                )
         
         cache_motion_feature = (
             self._project_cache_feature(instance_feature[:, :num_anchor])
@@ -1264,6 +1318,27 @@ class MotionPlanningHead(BaseModule):
                     f"planning_loss_status_{decoder_idx}": status_loss,
                 }
             )
+
+            if self.plan_diversity_reg:
+                # Pairwise-similarity penalty across cmd-indexed plan modes.
+                # Encourages spread between mode trajectories at scale set by sigma.
+                bs_d = reg.shape[0]
+                M = self.ego_fut_mode
+                cmd_idx_d = data['gt_ego_fut_cmd'].argmax(dim=-1)
+                bs_idx_d = torch.arange(bs_d, device=reg.device)
+                reg_modes_d = reg.reshape(
+                    bs_d, 3, M, self.ego_fut_ts, 2
+                )[bs_idx_d, cmd_idx_d]
+                reg_cum_d = reg_modes_d.cumsum(dim=-2)
+                flat_d = reg_cum_d.reshape(bs_d, M, -1)
+                pdist = torch.cdist(flat_d, flat_d)
+                eye_mask = 1.0 - torch.eye(M, device=pdist.device).unsqueeze(0)
+                sigma2 = float(self.plan_diversity_sigma) ** 2
+                sim = torch.exp(-pdist ** 2 / (2.0 * sigma2)) * eye_mask
+                div_loss = sim.sum(dim=(1, 2)).mean() / float(M * (M - 1))
+                output[f"planning_loss_div_{decoder_idx}"] = (
+                    div_loss * self.plan_diversity_loss_weight
+                )
 
             if decoder_idx < len(da_logits_list):
                 da_loss = self._loss_planning_da(
