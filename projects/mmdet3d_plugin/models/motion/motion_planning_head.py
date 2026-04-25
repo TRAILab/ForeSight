@@ -128,6 +128,9 @@ class MotionPlanningHead(BaseModule):
         num_dn_plan_groups=0,
         dn_plan_noise_scale=0.5,
         dn_plan_loss_weight=1.0,
+        use_alldet_kv=False,
+        bidir_planning=False,
+        rev_graph_model=None,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -154,6 +157,8 @@ class MotionPlanningHead(BaseModule):
         self.motion_deformable_modeproj = motion_deformable_modeproj and motion_deformable_multimode
         self.deformable_waypoint = deformable_waypoint
         self.planning_deformable_waypoints = planning_deformable_waypoints
+        self.use_alldet_kv = use_alldet_kv
+        self.bidir_planning = bidir_planning
 
         # =========== build modules ===========
         def build(cfg, registry):
@@ -170,6 +175,7 @@ class MotionPlanningHead(BaseModule):
             "temp_gnn": [temp_graph_model, ATTENTION],
             "gnn": [graph_model, ATTENTION],
             "cross_gnn": [cross_graph_model, ATTENTION],
+            "rev_gnn": [rev_graph_model, ATTENTION],
             "deformable": [deformable_model, ATTENTION],
             "norm": [norm_layer, NORM_LAYERS],
             "ffn": [ffn, FEEDFORWARD_NETWORK],
@@ -736,13 +742,39 @@ class MotionPlanningHead(BaseModule):
                 else:
                     instance_feature = normal_feat
             elif op == "gnn":
+                if self.use_alldet_kv:
+                    # Skip top-k bottleneck: planning queries cross-attend to
+                    # all detection tokens (real agents + ego, no DN).
+                    kv_inst = instance_feature[:, :num_anchor + 1]
+                    kv_anchor = anchor_embed[:, :num_anchor + 1]
+                else:
+                    kv_inst = instance_feature_selected
+                    kv_anchor = anchor_embed_selected
                 instance_feature = self.graph_model(
                     i,
                     instance_feature,
-                    instance_feature_selected,
-                    instance_feature_selected,
+                    kv_inst,
+                    kv_inst,
                     query_pos=anchor_embed,
-                    key_pos=anchor_embed_selected,
+                    key_pos=kv_anchor,
+                )
+            elif op == "rev_gnn":
+                # Reverse cross-attention: detection (agent) features attend
+                # to current planning query state, allowing planning to
+                # reshape detection features within the same forward pass.
+                agent_feat = instance_feature[:, :num_anchor]
+                plan_state_kv = (
+                    plan_mode_query
+                    + instance_feature[:, num_anchor:num_anchor + 1]
+                    + anchor_embed[:, num_anchor:num_anchor + 1]
+                )
+                agent_feat = self.layers[i](
+                    agent_feat,
+                    key=plan_state_kv,
+                    query_pos=anchor_embed[:, :num_anchor],
+                )
+                instance_feature = torch.cat(
+                    [agent_feat, instance_feature[:, num_anchor:]], dim=1
                 )
             elif op == "norm" or op == "ffn":
                 instance_feature = self.layers[i](instance_feature)

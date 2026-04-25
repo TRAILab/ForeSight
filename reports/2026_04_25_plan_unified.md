@@ -4,9 +4,9 @@
 
 ## TODO
 
-- Implement all-det cross-attention option in `MotionPlanningHead`
-- Implement bidirectional planning→detection cross-attention
-- Add GT ego future trajectories to stage-1 training pipeline
+- [x] Implement all-det cross-attention option in `MotionPlanningHead`
+- [x] Implement bidirectional planning→detection cross-attention
+- Add GT ego future trajectories to stage-1 training pipeline (deferred — Exp 1 not in current scope)
 
 ## Abstract
 
@@ -23,6 +23,8 @@ Questions:
 
 ## Method
 
+Current scope: Experiments 2 (`alldet`) and 3 (`bidir`) on killarney, branch `sd_combined`. Experiments 1 (`stage1_planifls`) and 4 (`egoquery`) are described below for narrative continuity but are deferred to a later batch.
+
 All stage-2 experiments use `ptaux2d_ppdeformmm_planifls` (DGX 3614) as the reference baseline unless a new stage-1 pretrain is being tested.
 
 **Experiment 1 — `stage1_planifls`: planning supervision at stage 1.**
@@ -31,14 +33,14 @@ Enable `with_motion_plan=True` in the stage-1 config with the full `ppdeformmm_p
 This tests whether planning-gradient-aligned backbone initialization outperforms detection-only initialization (`ptaux2d`). Can also be combined with `aux2d` stage-1 supervision to test additivity.
 
 **Experiment 2 — `alldet`: planning attends to all detection tokens.**
-Remove the `topk(det_confidence, self.num_det, ...)` call in `MotionPlanningHead`. Replace with direct cross-attention from planning queries to all 900 detection instance features. The cross-attention mechanism already handles variable-length inputs; this is a one-line change in the forward pass. No new parameters.
+Add a `use_alldet_kv` flag to `MotionPlanningHead`. When set, the `gnn` op's keys/values become the full instance set (`instance_feature[:, :num_anchor + 1]` = 900 detection tokens + ego, no DN tokens) instead of the `topk(det_confidence, num_det=50, ...)` selection. The existing cross-attention mechanism handles the variable length; no new parameters.
 
 This removes the selection bottleneck entirely. If planning performance does not improve, the bottleneck is not selection — it is feature quality or the one-way token flow. If it does improve, confidence-based top-k was actively discarding planning-relevant agents.
 
 Config: `ptaux2d_ppdeformmm_planifls_alldet`.
 
 **Experiment 3 — `bidir`: bidirectional planning–detection coupling.**
-After each planning cross-attention step (planning queries attending to detection features), run a reverse cross-attention: detection instance features attend to the current planning query state and update their representations. This is a lightweight bidirectional coupling — planning state can reshape detection features within the same forward pass. The additional reverse cross-attention layer adds one `AttentionLayer` per planning decoder stage.
+After each planning `gnn` op (planning queries attending to detection features), insert a new `rev_gnn` op: detection instance features attend to the current planning query state (`plan_mode_query + ego instance feature + ego anchor embed`) and update their representations. This is a lightweight bidirectional coupling — planning state can reshape detection features within the same forward pass. The additional reverse cross-attention layer adds one `MultiheadFlashAttention` per planning decoder stage (3 total). `bidir` keeps the standard top-50 detection K/V (does not stack with `alldet`), isolating the reverse-flow effect.
 
 This tests whether the unidirectional flow is the binding constraint. If detection features updated by planning state produce better planning outputs, it confirms that planning needs to write back into perception, motivating the full ego-query integration.
 
@@ -51,22 +53,25 @@ Add ego planning queries (one per mode, `ego_fut_mode=3`) to the instance bank i
 
 Config: `ptaux2d_egoquery_planifls`.
 
-Implementation changes:
+Implementation changes (current scope):
+- `motion_planning_head.py`: add `use_alldet_kv` flag — the `gnn` op uses `instance_feature[:, :num_anchor + 1]` as K/V when enabled (Experiment 2)
+- `motion_planning_head.py`: add `bidir_planning` flag and `rev_gnn` op handler — reverse cross-attention from agent features to planning state (Experiment 3)
+- `motion_planning_head.py`: add `rev_graph_model` cfg slot in `op_config_map` (Experiment 3)
+
+Deferred (Experiments 1, 4):
 - `nuscenes_3d_dataset.py` / stage-1 pipeline: wire `gt_ego_fut_trajs` to stage-1 collected keys (Experiment 1)
 - `sparsedrive_r50_stage1_*`: set `with_motion_plan=True`, add planning head config (Experiment 1)
-- `motion_planning_head.py`: replace `topk()` with full-instance cross-attention (Experiment 2)
-- `motion_planning_head.py`: add reverse cross-attention block after each planning layer (Experiment 3)
 - `instance_bank.py`, `detection3d_head.py`, `sparsedrive_head.py`: add ego query slots and trajectory head (Experiment 4)
 
 ## Results
 
 | Server | Config | Job ID | Status |
 | --- | --- | --- | --- |
-| Apollo | `stage1_8gpu_noflash_planifls` | — | PENDING |
-| DGX | `ptplan1_ppdeformmm_planifls` | — | PENDING |
-| DGX | `ptaux2d_ppdeformmm_planifls_alldet` | — | PENDING |
-| DGX | `ptaux2d_ppdeformmm_planifls_bidir` | — | PENDING |
-| DGX | `ptaux2d_egoquery_planifls` | — | PENDING |
+| Apollo | `stage1_8gpu_noflash_planifls` | — | DEFERRED |
+| DGX | `ptplan1_ppdeformmm_planifls` | — | DEFERRED |
+| Killarney | `ptaux2d_ppdeformmm_planifls_alldet` | — | PENDING |
+| Killarney | `ptaux2d_ppdeformmm_planifls_bidir` | — | PENDING |
+| DGX | `ptaux2d_egoquery_planifls` | — | DEFERRED |
 
 | Config | L2 | obj_box_col | car_ade | ped_ade | car_epa | ped_epa | NDS | mAP |
 |--------|-----|-------------|---------|---------|---------|---------|-----|-----|
