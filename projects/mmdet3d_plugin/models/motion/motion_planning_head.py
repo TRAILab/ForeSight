@@ -148,6 +148,9 @@ class MotionPlanningHead(BaseModule):
         plan_diversity_sigma=5.0,
         mode_no_agg=False,
         plan_mode_time_queries=False,
+        plan_time_attn=False,
+        plan_time_attn_heads=8,
+        plan_time_attn_dropout=0.1,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -185,6 +188,11 @@ class MotionPlanningHead(BaseModule):
         self.plan_diversity_sigma = plan_diversity_sigma
         self.mode_no_agg = mode_no_agg
         self.plan_mode_time_queries = plan_mode_time_queries
+        self.plan_time_attn = plan_time_attn
+        if self.plan_time_attn:
+            assert self.plan_mode_time_queries, (
+                "plan_time_attn=True requires plan_mode_time_queries=True"
+            )
         self.deformable_waypoint = deformable_waypoint
         self.planning_deformable_waypoints = planning_deformable_waypoints
         self.use_alldet_kv = use_alldet_kv
@@ -235,6 +243,29 @@ class MotionPlanningHead(BaseModule):
             self.motion_mode_projs = nn.ModuleList(
                 [nn.Linear(embed_dims, embed_dims) for _ in range(fut_mode)]
             )
+
+        if self.plan_time_attn:
+            # Per-mode time-axis self-attention applied after each planning
+            # deformable stage. Restores intra-mode temporal coupling that
+            # plan_mode_time_queries removes by giving each (mode, ts) query
+            # its own MLP output.
+            self.plan_time_pos_embed = nn.Parameter(
+                torch.zeros(1, ego_fut_ts, embed_dims)
+            )
+            nn.init.trunc_normal_(self.plan_time_pos_embed, std=0.02)
+            self.plan_time_attn_layers = nn.ModuleList([
+                nn.MultiheadAttention(
+                    embed_dims,
+                    num_heads=plan_time_attn_heads,
+                    dropout=plan_time_attn_dropout,
+                    batch_first=True,
+                )
+                for _ in range(self._n_deformable_stages)
+            ])
+            self.plan_time_attn_norms = nn.ModuleList([
+                nn.LayerNorm(embed_dims)
+                for _ in range(self._n_deformable_stages)
+            ])
 
         if self.decouple_attn:
             self.fc_before = nn.Linear(
@@ -1026,6 +1057,29 @@ class MotionPlanningHead(BaseModule):
                                 feature_maps,
                                 metas,
                             ))
+                        if self.plan_time_attn and self.plan_mode_time_queries:
+                            # Per-mode time-axis self-attention to restore
+                            # intra-mode temporal coupling. Reshape
+                            # (bs, M*T, D) -> (bs*M, T, D), add learnable
+                            # time pos embed, MHA self-attn with residual + LN.
+                            M_total = 3 * self.ego_fut_mode
+                            T_q = self.ego_fut_ts
+                            pq_mt = plan_mode_query.reshape(
+                                bs, M_total, T_q, self.embed_dims
+                            )
+                            pq_seq = (pq_mt + self.plan_time_pos_embed).reshape(
+                                bs * M_total, T_q, self.embed_dims
+                            )
+                            ta_idx = _deformable_stage_idx - 1
+                            ta_out, _ = self.plan_time_attn_layers[ta_idx](
+                                pq_seq, pq_seq, pq_seq, need_weights=False
+                            )
+                            pq_seq = self.plan_time_attn_norms[ta_idx](
+                                pq_seq + ta_out
+                            )
+                            plan_mode_query = pq_seq.reshape(
+                                bs, M_total * T_q, self.embed_dims
+                            )
                         instance_feature = torch.cat(
                             [agent_feature, instance_feature[:, num_anchor:]], dim=1
                         )
