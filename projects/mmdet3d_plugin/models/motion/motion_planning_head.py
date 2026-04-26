@@ -151,6 +151,9 @@ class MotionPlanningHead(BaseModule):
         plan_time_attn=False,
         plan_time_attn_heads=8,
         plan_time_attn_dropout=0.1,
+        plan_softcost_collision_enable=False,
+        plan_softcost_collision_weight=0.2,
+        plan_softcost_collision_sigma=2.0,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -186,6 +189,9 @@ class MotionPlanningHead(BaseModule):
         self.plan_diversity_reg = plan_diversity_reg
         self.plan_diversity_loss_weight = plan_diversity_loss_weight
         self.plan_diversity_sigma = plan_diversity_sigma
+        self.plan_softcost_collision_enable = plan_softcost_collision_enable
+        self.plan_softcost_collision_weight = plan_softcost_collision_weight
+        self.plan_softcost_collision_sigma = plan_softcost_collision_sigma
         self.mode_no_agg = mode_no_agg
         self.plan_mode_time_queries = plan_mode_time_queries
         self.plan_time_attn = plan_time_attn
@@ -1412,6 +1418,13 @@ class MotionPlanningHead(BaseModule):
                         conf_loss * self.conflict_loss_weight
                     )
 
+            if self.plan_softcost_collision_enable:
+                softcost_col = self._loss_planning_softcost_collision(reg, data)
+                if softcost_col is not None:
+                    output[f"planning_loss_softcost_col_{decoder_idx}"] = (
+                        softcost_col * self.plan_softcost_collision_weight
+                    )
+
         if 'dn_plan_reg' in model_outs:
             dn_reg = model_outs['dn_plan_reg']          # (bs, num_dn, ego_fut_ts, 2)
             dn_target = model_outs['dn_plan_reg_target'] # (bs, num_dn, ego_fut_ts, 2)
@@ -1537,6 +1550,59 @@ class MotionPlanningHead(BaseModule):
             conf_logits, target, reduction='none', pos_weight=pos_w
         )
         return (loss * weight).sum() / denom
+
+    def _loss_planning_softcost_collision(self, reg, data):
+        """Soft collision cost on plan_reg as a training-loss term.
+
+        reg: (bs, 1, 3*M, ego_fut_ts, 2) delta plan predictions.
+        Builds GT agent positions from gt_bboxes_3d + cumsum(gt_agent_fut_trajs);
+        cost is the mean over (modes, t, agents) of exp(-d^2/sigma^2). Gradient
+        flows through reg into the planning regression head.
+        """
+        gt_boxes = data.get('gt_bboxes_3d')
+        gt_traj = data.get('gt_agent_fut_trajs')
+        gt_traj_mask = data.get('gt_agent_fut_masks')
+        if gt_boxes is None or gt_traj is None:
+            return None
+
+        bs = reg.shape[0]
+        device = reg.device
+        T_ego = reg.shape[-2]
+        sigma2 = float(self.plan_softcost_collision_sigma) ** 2
+
+        ego_pred_xy = reg.squeeze(1).cumsum(dim=-2)  # (bs, M_total, T_ego, 2)
+
+        sample_costs = []
+        for b in range(bs):
+            boxes_b = gt_boxes[b].to(device=device, dtype=ego_pred_xy.dtype)
+            trajs_b = gt_traj[b].to(device=device, dtype=ego_pred_xy.dtype)
+            if trajs_b.shape[0] == 0:
+                continue
+            T = min(trajs_b.shape[1], T_ego)
+            if T == 0:
+                continue
+            agent_xy0 = boxes_b[:, :2]
+            agent_traj = trajs_b[:, :T]
+            agent_pos = agent_xy0.unsqueeze(1) + agent_traj.cumsum(dim=1)
+
+            ego_pos = ego_pred_xy[b, :, :T, :]
+
+            diff = agent_pos.unsqueeze(0) - ego_pos.unsqueeze(1)
+            d2 = (diff ** 2).sum(dim=-1)
+
+            cost_per = torch.exp(-d2 / sigma2)
+            if gt_traj_mask is not None:
+                tmask = gt_traj_mask[b].to(device=device).bool()[:, :T]
+                tmask_e = tmask.unsqueeze(0).expand(d2.shape[0], -1, -1).to(cost_per.dtype)
+                cost_per = cost_per * tmask_e
+                denom = tmask_e.sum().clamp(min=1.0)
+            else:
+                denom = cost_per.new_tensor(float(cost_per.numel())).clamp(min=1.0)
+            sample_costs.append(cost_per.sum() / denom)
+
+        if not sample_costs:
+            return reg.sum() * 0.0
+        return torch.stack(sample_costs).mean()
 
     @force_fp32(apply_to=("model_outs"))
     def post_process(
