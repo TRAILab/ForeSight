@@ -709,7 +709,7 @@ runner = dict(
 # ================== eval ========================
 eval_mode = dict(
     with_det=True,
-    with_tracking=True,
+    with_tracking=False,
     with_map=False,
     with_motion=False,
     with_planning=False,

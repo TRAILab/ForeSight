@@ -717,7 +717,7 @@ runner = dict(
 # eval_mode dict is still required by dataset.evaluate() for offline dist_test.sh runs.
 eval_mode = dict(
     with_det=True,
-    with_tracking=True,
+    with_tracking=False,
     with_map=True,
     with_motion=False,
     with_planning=False,
