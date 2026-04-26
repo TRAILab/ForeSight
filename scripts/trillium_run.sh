@@ -24,6 +24,7 @@ CMD=${@:-bash}
 CONTAINER_CMD="apptainer exec --nv -c -e --pwd /workspace/ForeSight/ \
 --env WANDB_API_KEY=$WANDB_API_KEY \
 --env WANDB_MODE=offline \
+--env WANDB_DIR=/tmp \
 --env TMPDIR=/tmp \
 --bind=$TMP_DIR:/tmp \
 --bind=/home/spapais/ForeSight:/workspace/ForeSight/ \
