@@ -319,7 +319,19 @@ class MotionPlanningHead(BaseModule):
         )
 
         # plan anchor init
-        plan_anchor = np.load(plan_anchor)
+        # plan_anchor may be a single path or a list of paths whose per-cmd
+        # mode tensors are concatenated along the mode axis. Each file holds
+        # an array shaped (3, K_i, ego_fut_ts, 2); the concatenated result is
+        # (3, sum(K_i), ego_fut_ts, 2). All sum(K_i) must equal ego_fut_mode.
+        if isinstance(plan_anchor, (list, tuple)):
+            anchors = [np.load(p) for p in plan_anchor]
+            plan_anchor = np.concatenate(anchors, axis=1)
+        else:
+            plan_anchor = np.load(plan_anchor)
+        assert plan_anchor.shape[1] == ego_fut_mode, (
+            f"plan_anchor mode dim {plan_anchor.shape[1]} != ego_fut_mode "
+            f"{ego_fut_mode}"
+        )
         self.plan_anchor = nn.Parameter(
             torch.tensor(plan_anchor, dtype=torch.float32),
             requires_grad=False,
