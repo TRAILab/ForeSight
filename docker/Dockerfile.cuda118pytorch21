@@ -1,0 +1,57 @@
+FROM pytorch/pytorch:2.1.2-cuda11.8-cudnn8-devel
+
+SHELL ["/bin/bash", "-lc"]
+
+ARG CONDA_ENV=foresight
+
+ENV TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 8.6 8.9 9.0+PTX" \
+    TORCH_NVCC_FLAGS="-Xfatbin -compress-all" \
+    FORCE_CUDA="1" \
+    CUDA_HOME="/usr/local/cuda" \
+    MAX_JOBS="8" \
+    DEBIAN_FRONTEND="noninteractive" \
+    TZ="Etc/UTC"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ffmpeg \
+        git \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender-dev \
+        ninja-build \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && conda create -n ${CONDA_ENV} python=3.8 -y \
+    && conda clean -afy
+
+ENV PATH="/opt/conda/envs/${CONDA_ENV}/bin:/opt/conda/condabin:${PATH}" \
+    CONDA_DEFAULT_ENV="${CONDA_ENV}" \
+    CMAKE_PREFIX_PATH="/opt/conda/envs/${CONDA_ENV}"
+
+WORKDIR /workspace/ForeSight/
+
+COPY requirement.txt .
+COPY projects/ projects/
+
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir \
+        torch==2.1.2 \
+        torchvision==0.16.2 \
+        torchaudio==2.1.2 \
+        --index-url https://download.pytorch.org/whl/cu118 \
+    && git clone https://github.com/open-mmlab/mmcv.git --branch v1.7.2 --depth 1 /tmp/mmcv \
+    && sed -i 's/_get_stream(device)/_get_stream(torch.device("cuda", device) if isinstance(device, int) else device)/g' /tmp/mmcv/mmcv/parallel/_functions.py \
+    && MMCV_WITH_OPS=1 pip install --no-build-isolation --no-cache-dir /tmp/mmcv \
+    && rm -rf /tmp/mmcv \
+    && grep -vE '^(mmcv_full|flash-attn)==' /workspace/ForeSight/requirement.txt > /tmp/requirements.txt \
+    && pip install --no-cache-dir -r /tmp/requirements.txt \
+    && pip install --no-cache-dir packaging psutil ninja einops \
+    && pip install --no-build-isolation --no-cache-dir flash-attn==2.3.2 \
+    && cd projects/mmdet3d_plugin/ops \
+    && python setup.py develop \
+    && git config --global --add safe.directory '*'
+
+WORKDIR /workspace/ForeSight/
