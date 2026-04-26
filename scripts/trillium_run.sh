@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=foresight
-#SBATCH --account=def-swasland-ab
+#SBATCH --account=rrg-swasland
 #SBATCH --ntasks=1
 #SBATCH --time=11:59:00 # 3 hours or 12 hours max recommended
 #SBATCH --output=/scratch/spapais/ForeSight/logs/%x-%j.log
