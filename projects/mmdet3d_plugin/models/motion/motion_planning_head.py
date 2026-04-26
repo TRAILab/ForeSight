@@ -31,6 +31,21 @@ from ..blocks import linear_relu_ln
 from ..instance_bank import topk
 
 
+def _detach_perception_output(output):
+    """Stop-gradient over a head output dict (tensors + per-stage lists)."""
+    if output is None:
+        return None
+    result = {}
+    for k, v in output.items():
+        if isinstance(v, torch.Tensor):
+            result[k] = v.detach()
+        elif isinstance(v, list):
+            result[k] = [x.detach() if isinstance(x, torch.Tensor) else x for x in v]
+        else:
+            result[k] = v
+    return result
+
+
 class _MotionPlanningAdapter(nn.Module):
     """Owns width conversion between perception and planning spaces."""
 
@@ -154,6 +169,7 @@ class MotionPlanningHead(BaseModule):
         plan_softcost_collision_enable=False,
         plan_softcost_collision_weight=0.2,
         plan_softcost_collision_sigma=2.0,
+        detach_perception=False,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -192,6 +208,7 @@ class MotionPlanningHead(BaseModule):
         self.plan_softcost_collision_enable = plan_softcost_collision_enable
         self.plan_softcost_collision_weight = plan_softcost_collision_weight
         self.plan_softcost_collision_sigma = plan_softcost_collision_sigma
+        self.detach_perception = detach_perception
         self.mode_no_agg = mode_no_agg
         self.plan_mode_time_queries = plan_mode_time_queries
         self.plan_time_attn = plan_time_attn
@@ -660,8 +677,11 @@ class MotionPlanningHead(BaseModule):
         anchor_encoder,
         mask,
         anchor_handler,
-    ):   
+    ):
         # =========== det/map feature/anchor ===========
+        if self.detach_perception:
+            det_output = _detach_perception_output(det_output)
+            map_output = _detach_perception_output(map_output)
         raw_instance_feature = det_output["instance_feature"]
         raw_anchor_embed = det_output["anchor_embed"]
         instance_feature = self._project_instance_feature(raw_instance_feature)
