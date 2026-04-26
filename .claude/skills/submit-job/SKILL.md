@@ -24,6 +24,7 @@ If missing, stop and tell the user to push locally and run `git pull` on the rem
 ## Wrapped command
 - Train: `bash ./tools/dist_train.sh <config> <gpus> --deterministic`
 - Test: `bash ./tools/dist_test.sh <config> <ckpt> <gpus> --deterministic --eval bbox`
+- On Trillium, append `--tmpdir /tmp/.dist_test` to the test command (cwd is read-only, default `.dist_test` fails at result collection)
 
 ## Submit
 

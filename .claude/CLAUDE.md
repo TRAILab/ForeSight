@@ -73,6 +73,7 @@ Autonomous driving research codebase built on SparseDrive. Training and evaluati
 - Repo: `/home/spapais/ForeSight`
 - No VPN required
 - Home is read-only on compute nodes; output logs go to `/scratch/spapais/ForeSight/logs/`
+- Eval must pass `--tmpdir /tmp/.dist_test` (the default `.dist_test` resolves under read-only `/workspace/ForeSight` and the rank-0 mkdir crashes after the full forward pass)
 - GPU scheduling uses `--gpus-per-node=N` (not `--gres`); only 1 or 4 GPUs allowed per node
 - Remote submission over SSH (must use GPU login node):
   `ssh trillium_gpu "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/trillium_run.sh <cmd>"`
