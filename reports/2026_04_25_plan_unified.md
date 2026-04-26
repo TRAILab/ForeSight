@@ -108,7 +108,7 @@ To implement (Exp 3, if gated):
 | Killarney | `ptaux2d_ppdeformmm_planifls_bidir` | 3284641 | COMPLETED — regression |
 | Apollo | `stage1_8gpu_noflash_joint_detach` (prior, vanilla head, lr=1.5e-4) | — | COMPLETED 2026-03-23 — never used as stage-2 init |
 | Killarney | `ptjointdetach_planpredtrajdeformmm` | 3301176 | SUBMITTED — Arm A stage 2 (uses prior joint_detach ckpt) |
-| Apollo | `stage1_8gpu_noflash_joint` (modern recipe) | tmux:armb_s1 | RUNNING — Arm B stage 1 (detached tmux, log: logs/armb_s1.log) |
+| Apollo | `stage1_8gpu_noflash_joint` (modern recipe, bs=48, lr=3e-4) | tmux:armb_s1 | RUNNING — Arm B stage 1 (peak ~21GB/GPU; ETA ~38h) |
 | Killarney | `ptjoint_planpredtrajdeformmm` | — | PLANNED — Arm B stage 2 (after Arm B stage 1) |
 | TBD | `ptaux2d_ppdeformmm_planifls_planinstfeat_laststage_mappromote` | — | PLANNED — Exp 2 |
 | TBD | `ptaux2d_egoquery_planifls` | — | GATED on Exp 1/2 |
