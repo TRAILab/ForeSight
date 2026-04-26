@@ -100,6 +100,10 @@ def custom_train_detector(
             find_unused_parameters=find_unused_parameters,
             static_graph=static_graph,
         )
+        # mmcv's _run_ddp_forward references this PyTorch 2.1+ attribute but
+        # doesn't initialize it; set it so eval hooks work on all clusters.
+        if not hasattr(model, '_use_replicated_tensor_module'):
+            model._use_replicated_tensor_module = False
 
     else:
         model = MMDataParallel(

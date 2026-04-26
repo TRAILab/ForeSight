@@ -276,6 +276,8 @@ def main():
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False,
         )
+        if not hasattr(model, '_use_replicated_tensor_module'):
+            model._use_replicated_tensor_module = False
         outputs = custom_multi_gpu_test(
             model, data_loader, args.tmpdir, args.gpu_collect
         )
