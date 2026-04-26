@@ -21,7 +21,6 @@ CMD=${@:-bash}
 [[ -f ~/.bashrc ]] && source ~/.bashrc
 
 # Command
-NCCL_LIB=/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v4/CUDA/gcccore/cuda12.6/nccl/2.22.3/lib
 CONTAINER_CMD="apptainer exec --nv -c -e --pwd /workspace/ForeSight/ \
 --env WANDB_API_KEY=$WANDB_API_KEY \
 --env WANDB_MODE=offline \
@@ -30,9 +29,8 @@ CONTAINER_CMD="apptainer exec --nv -c -e --pwd /workspace/ForeSight/ \
 --bind=/home/spapais/ForeSight:/workspace/ForeSight/ \
 --bind=$TMP_DATA_DIR:/workspace/ForeSight/data/nuscenes \
 --bind=$WORK_DIR:/workspace/ForeSight/work_dirs \
---bind=/cvmfs:/cvmfs \
-docker/foresight_cuda118.sif"
-CONTAINER_CMD="$CONTAINER_CMD bash -c 'export LD_LIBRARY_PATH=$NCCL_LIB:/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:\$LD_LIBRARY_PATH && $CMD'"
+docker/foresight_cuda118pytorch21.sif"
+CONTAINER_CMD="$CONTAINER_CMD bash -c 'export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:\$LD_LIBRARY_PATH && $CMD'"
 
 
 # Extract dataset
