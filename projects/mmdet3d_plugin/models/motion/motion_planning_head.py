@@ -267,6 +267,12 @@ class MotionPlanningHead(BaseModule):
                 for op in self.operation_order
             ]
         )
+        if self.skip_perception_kv:
+            # Null the gnn/cross_gnn MHA modules so DDP doesn't see their
+            # params as unused; forward already skips None layers.
+            for i, op in enumerate(self.operation_order):
+                if op in ("gnn", "cross_gnn"):
+                    self.layers[i] = None
         self.embed_dims = embed_dims
         self.adapter = _MotionPlanningAdapter(
             input_embed_dims=self.input_embed_dims,
@@ -1003,8 +1009,6 @@ class MotionPlanningHead(BaseModule):
                 else:
                     instance_feature = normal_feat
             elif op == "gnn":
-                if self.skip_perception_kv:
-                    continue
                 if self.use_alldet_kv:
                     # Skip top-k bottleneck: planning queries cross-attend to
                     # all detection tokens (real agents + ego, no DN).
@@ -1042,7 +1046,7 @@ class MotionPlanningHead(BaseModule):
             elif op == "norm" or op == "ffn":
                 instance_feature = self.layers[i](instance_feature)
             elif op == "cross_gnn":
-                if map_output is None or self.skip_perception_kv:
+                if map_output is None:
                     continue
                 instance_feature = self.layers[i](
                     instance_feature,

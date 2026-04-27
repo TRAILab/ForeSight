@@ -101,7 +101,7 @@ model = dict(
         frozen_stages=-1,
         norm_eval=False,
         style="pytorch",
-        with_cp=False,  # with_cp + find_unused_parameters=True conflicts via reentrant backward; A100 has enough memory
+        with_cp=True,
         out_indices=(0, 1, 2, 3),
         norm_cfg=dict(type="BN", requires_grad=True),
         pretrained="ckpt/resnet50-19c8e357.pth",
@@ -755,6 +755,3 @@ evaluation = dict(
 )
 # ================== pretrained model ========================
 load_from = 'ckpt/sparsedrive_stage1_aux2d.pth'
-
-# DDP: skipped gnn/cross_gnn ops leave their MHA params unused
-find_unused_parameters = True
