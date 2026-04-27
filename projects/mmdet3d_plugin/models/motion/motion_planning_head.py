@@ -172,6 +172,10 @@ class MotionPlanningHead(BaseModule):
         plan_softcost_geometry='gaussian',
         plan_softcost_collision_tau=0.5,
         detach_perception=False,
+        relevance_selection=False,
+        relevance_corridor=2.0,
+        relevance_horizon=6,
+        skip_perception_kv=False,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -213,6 +217,10 @@ class MotionPlanningHead(BaseModule):
         self.plan_softcost_geometry = plan_softcost_geometry
         self.plan_softcost_collision_tau = plan_softcost_collision_tau
         self.detach_perception = detach_perception
+        self.relevance_selection = relevance_selection
+        self.relevance_corridor = float(relevance_corridor)
+        self.relevance_horizon = int(relevance_horizon)
+        self.skip_perception_kv = skip_perception_kv
         self.mode_no_agg = mode_no_agg
         self.plan_mode_time_queries = plan_mode_time_queries
         self.plan_time_attn = plan_time_attn
@@ -605,6 +613,111 @@ class MotionPlanningHead(BaseModule):
 
         return dn_ego_feat, dn_ego_anchor_embed, dn_plan_mode_query, dn_reg_target, dn_valid
 
+    def _compute_det_corridor_score(self, metas, det_anchors, det_confidence):
+        """Per-anchor planning-relevance score for K/V selection.
+
+        Score = 1e3 * relevant + det_confidence (confidence is the tiebreaker).
+        An anchor is relevant if its nearest GT agent (by BEV centre at t=0)
+        comes within ``relevance_corridor`` metres of the GT ego BEV path under
+        cross-time min: ``min_{t1,t2} dist(ego(t1), agent(t2))`` over the first
+        ``relevance_horizon`` planning steps.
+
+        Falls back to ``det_confidence`` when GT keys are missing.
+        """
+        gt_ego = metas.get('gt_ego_fut_trajs')
+        gt_agent = metas.get('gt_agent_fut_trajs')
+        gt_boxes = metas.get('gt_bboxes_3d')
+        if gt_ego is None or gt_agent is None or gt_boxes is None:
+            return det_confidence
+
+        gt_ego_mask = metas.get('gt_ego_fut_masks')
+        gt_agent_mask = metas.get('gt_agent_fut_masks')
+
+        bs, num_anchor = det_anchors.shape[:2]
+        device = det_anchors.device
+        H = self.relevance_horizon
+        thr2 = self.relevance_corridor ** 2
+        score = det_confidence.clone()
+
+        for b in range(bs):
+            ego_b = gt_ego[b]
+            if not torch.is_tensor(ego_b):
+                continue
+            ego_b = ego_b.to(device).float()
+            if ego_b.numel() == 0:
+                continue
+            T_ego = min(ego_b.shape[0], H)
+            ego_abs = ego_b[:T_ego].cumsum(dim=0)
+            if gt_ego_mask is not None:
+                em = gt_ego_mask[b].to(device)[:T_ego].bool()
+            else:
+                em = torch.ones(T_ego, dtype=torch.bool, device=device)
+
+            agents_b = gt_agent[b].to(device).float()
+            boxes_b = gt_boxes[b].to(device).float()
+            if agents_b.shape[0] == 0:
+                continue
+            Nb, agent_fut_ts = agents_b.shape[:2]
+            T_agt = min(agent_fut_ts, H)
+            if T_agt == 0 or T_ego == 0:
+                continue
+            agents_abs = boxes_b[:, :2].unsqueeze(1) + agents_b[:, :T_agt].cumsum(dim=1)
+
+            diff = ego_abs.view(1, T_ego, 1, 2) - agents_abs.view(Nb, 1, T_agt, 2)
+            d2 = (diff ** 2).sum(dim=-1)  # (Nb, T_ego, T_agt)
+
+            valid = em.view(1, T_ego, 1).expand(Nb, T_ego, T_agt)
+            if gt_agent_mask is not None:
+                am = gt_agent_mask[b].to(device)[:, :T_agt].bool()
+                valid = valid & am.view(Nb, 1, T_agt).expand(-1, T_ego, -1)
+            d2 = torch.where(valid, d2, d2.new_full((), float('inf')))
+            min_d2_per_agent = d2.flatten(1).min(dim=-1).values  # (Nb,)
+            relevant_per_agent = (min_d2_per_agent < thr2).to(score.dtype)
+
+            det_xy = det_anchors[b, :, :2]
+            gt_xy = boxes_b[:, :2]
+            d_match = ((det_xy.unsqueeze(1) - gt_xy.unsqueeze(0)) ** 2).sum(dim=-1)
+            nearest_gt = d_match.argmin(dim=-1)
+            anchor_relevance = relevant_per_agent[nearest_gt]
+
+            score[b] = anchor_relevance * 1e3 + det_confidence[b]
+
+        return score
+
+    def _compute_map_corridor_score(self, metas, map_anchors, map_confidence):
+        """Per-map-anchor planning-relevance score for K/V selection.
+
+        Score = -min_{t,p} dist(ego_gt(t), map_pt[m, p])^2 (closer is higher).
+        Falls back to ``map_confidence`` when GT ego trajectory is missing.
+        """
+        gt_ego = metas.get('gt_ego_fut_trajs')
+        if gt_ego is None:
+            return map_confidence
+
+        bs, num_map_anchor = map_anchors.shape[:2]
+        device = map_anchors.device
+        H = self.relevance_horizon
+        map_pts = map_anchors.view(bs, num_map_anchor, -1, 2)
+        score = map_confidence.clone()
+
+        for b in range(bs):
+            ego_b = gt_ego[b]
+            if not torch.is_tensor(ego_b):
+                continue
+            ego_b = ego_b.to(device).float()
+            if ego_b.numel() == 0:
+                continue
+            T_ego = min(ego_b.shape[0], H)
+            ego_abs = ego_b[:T_ego].cumsum(dim=0)
+
+            diff = map_pts[b].unsqueeze(2) - ego_abs.view(1, 1, T_ego, 2)
+            d2 = (diff ** 2).sum(dim=-1)  # (M, P, T)
+            min_d2_per_map = d2.flatten(1).min(dim=-1).values  # (M,)
+
+            score[b] = -min_d2_per_map
+
+        return score
+
     def init_weights(self):
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
@@ -705,9 +818,24 @@ class MotionPlanningHead(BaseModule):
         det_classification = det_output["classification"][-1].sigmoid()
         det_anchors = det_output["prediction"][-1]
         det_confidence = det_classification.max(dim=-1).values
-        _, (instance_feature_selected, anchor_embed_selected) = topk(
-            det_confidence, self.num_det, instance_feature, anchor_embed
-        )
+        bs_d = instance_feature.shape[0]
+        if self.num_det <= 0:
+            instance_feature_selected = instance_feature.new_zeros(
+                bs_d, 0, instance_feature.shape[-1]
+            )
+            anchor_embed_selected = anchor_embed.new_zeros(
+                bs_d, 0, anchor_embed.shape[-1]
+            )
+        else:
+            if self.relevance_selection:
+                det_select_score = self._compute_det_corridor_score(
+                    metas, det_anchors, det_confidence
+                )
+            else:
+                det_select_score = det_confidence
+            _, (instance_feature_selected, anchor_embed_selected) = topk(
+                det_select_score, self.num_det, instance_feature, anchor_embed
+            )
 
         if map_output is not None:
             map_instance_feature = self._project_instance_feature(
@@ -719,9 +847,23 @@ class MotionPlanningHead(BaseModule):
             map_classification = map_output["classification"][-1].sigmoid()
             map_anchors = map_output["prediction"][-1]
             map_confidence = map_classification.max(dim=-1).values
-            _, (map_instance_feature_selected, map_anchor_embed_selected) = topk(
-                map_confidence, self.num_map, map_instance_feature, map_anchor_embed
-            )
+            if self.num_map <= 0:
+                map_instance_feature_selected = map_instance_feature.new_zeros(
+                    bs_d, 0, map_instance_feature.shape[-1]
+                )
+                map_anchor_embed_selected = map_anchor_embed.new_zeros(
+                    bs_d, 0, map_anchor_embed.shape[-1]
+                )
+            else:
+                if self.relevance_selection:
+                    map_select_score = self._compute_map_corridor_score(
+                        metas, map_anchors, map_confidence
+                    )
+                else:
+                    map_select_score = map_confidence
+                _, (map_instance_feature_selected, map_anchor_embed_selected) = topk(
+                    map_select_score, self.num_map, map_instance_feature, map_anchor_embed
+                )
 
         # =========== get ego/temporal feature/anchor ===========
         bs, num_anchor, _ = instance_feature.shape
@@ -861,6 +1003,8 @@ class MotionPlanningHead(BaseModule):
                 else:
                     instance_feature = normal_feat
             elif op == "gnn":
+                if self.skip_perception_kv:
+                    continue
                 if self.use_alldet_kv:
                     # Skip top-k bottleneck: planning queries cross-attend to
                     # all detection tokens (real agents + ego, no DN).
@@ -898,7 +1042,7 @@ class MotionPlanningHead(BaseModule):
             elif op == "norm" or op == "ffn":
                 instance_feature = self.layers[i](instance_feature)
             elif op == "cross_gnn":
-                if map_output is None:
+                if map_output is None or self.skip_perception_kv:
                     continue
                 instance_feature = self.layers[i](
                     instance_feature,
