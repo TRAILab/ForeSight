@@ -107,7 +107,7 @@ To implement (Exp 3, if gated):
 | Killarney | `ptaux2d_ppdeformmm_planifls_alldet` | 3284640 | COMPLETED — null |
 | Killarney | `ptaux2d_ppdeformmm_planifls_bidir` | 3284641 | COMPLETED — regression |
 | Apollo | `stage1_8gpu_noflash_joint_detach` (prior, vanilla head, lr=1.5e-4) | — | COMPLETED 2026-03-23 — never used as stage-2 init |
-| Killarney | `ptjointdetach_planpredtrajdeformmm` | 3301176 | SUBMITTED — Arm A stage 2 (uses prior joint_detach ckpt) |
+| Killarney | `ptjointdetach_planpredtrajdeformmm` | 3301176 | COMPLETED — planning regression (Arm A) |
 | Apollo | `stage1_8gpu_noflash_joint` (modern recipe, bs=48, lr=3e-4) | tmux:armb_s1 | RUNNING — Arm B stage 1 (peak ~21GB/GPU; ETA ~38h) |
 | Killarney | `ptjoint_planpredtrajdeformmm` | — | PLANNED — Arm B stage 2 (after Arm B stage 1) |
 | TBD | `ptaux2d_ppdeformmm_planifls_planinstfeat_laststage_mappromote` | — | PLANNED — Exp 2 |
@@ -120,7 +120,7 @@ To implement (Exp 3, if gated):
 | `ptaux2d_ppdeformmm_planifls_alldet` (Killarney 3284640) | 0.5018 | 0.084% | 0.6031 | 0.7119 | 0.5090 | 0.4270 | 0.5477 | 0.4404 |
 | `ptaux2d_ppdeformmm_planifls_bidir` (Killarney 3284641) | 0.5378 | 0.057% | 0.6069 | 0.7227 | 0.5134 | 0.4280 | 0.5442 | 0.4386 |
 | `stage1_8gpu_noflash_joint_detach` (stage-1 eval only) | 0.6825 | 0.142% | — | — | 0.4950 | 0.4019 | 0.5216 | 0.4038 |
-| `ptjointdetach_planpredtrajdeformmm` (Arm A) | — | — | — | — | — | — | — | — |
+| `ptjointdetach_planpredtrajdeformmm` (Killarney 3301176, Arm A) | 0.6669 | 0.089% | 0.6336 | 0.7322 | 0.4938 | 0.4029 | 0.5261 | 0.4092 |
 | `ptjoint_planpredtrajdeformmm` (Arm B) | — | — | — | — | — | — | — | — |
 | `ptaux2d_ppdeformmm_planifls_planinstfeat_laststage_mappromote` | — | — | — | — | — | — | — | — |
 
@@ -133,6 +133,8 @@ Both completed experiments compared against the **server-matched** Killarney bas
 **`bidir`: planning regresses.** L2 0.4987 → 0.5378 (clearly outside noise); `obj_box_col` improves marginally; detection metrics flat. Hypothesis: writing planning information into agent token slots destabilizes the detection-side refine targets the same tokens are still supervised against. The agent representation has to serve both detection regression/classification and a planning-conditioned write, and the joint objective drifts.
 
 **Combined reading.** Both interventions targeted the *coupling layer* between detection and planning at decoder stage 2 (more access via `alldet`, two-way flow via `bidir`) and neither improved planning. Together with the prior `numdemapx2` null and `detrel` regression in `plan_relevance`, this is a strong signal that the binding constraint is not the planning ↔ detection interface or perception-side reshape with planning-uninformed supervision. The remaining mechanism-distinct directions are *upstream* (stage-1 backbone alignment with planning gradients) or *laterally extending the existing shared self-attention* to additional populations (map promotion, egoquery).
+
+**Arm A: planning regressed.** Stage-2 from the existing `joint_detach` ckpt landed at L2=0.6669 / obj_box_col=0.089%, vs the `planpredtrajdeformmm` comparison anchor at L2=0.5420 / ~0.047% — +0.125 L2 (~+23% relative) and ~2× collision rate. NDS=0.5261, mAP=0.4092 are flat-to-slightly-weaker, mirroring the ~1 pt NDS / ~0.7 pt mAP_normal stage-1 deficit the joint_detach ckpt already had vs plain noflash. Two confounders pin this regression on *this specific ckpt*, not the joint-stage-1 idea: (1) joint_detach used the **legacy** planning head (no deformable, no per-stage refine, no cumulative refinement) so the backbone wasn't shaped by the modern deformmm coupling stage 2 needs; (2) joint_detach's perception baseline was already weaker. Arm B (modernized stage-1 with the same deformmm head as stage 2) is the cleaner test.
 
 ## Plan and Future Work
 
