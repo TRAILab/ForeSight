@@ -49,12 +49,12 @@ def parse_args() -> argparse.Namespace:
         "--window",
         type=int,
         default=7,
-        help="rolling window in days (default: 7)",
+        help="display window in days for plot/CSV (default: 7)",
     )
     parser.add_argument(
         "--all",
         action="store_true",
-        help="print the full rolling-average series instead of only the latest value",
+        help="print the full daily-median series instead of only the latest value",
     )
     parser.add_argument(
         "--start-time",
@@ -222,14 +222,6 @@ def query_all_clusters(args: argparse.Namespace) -> tuple[list[dict[str, object]
     return rows, failures
 
 
-def history_stats(values: list[int]) -> tuple[int, float | None, float | None]:
-    if not values:
-        return 0, None, None
-    mean = sum(values) / len(values)
-    variance = sum((value - mean) ** 2 for value in values) / len(values)
-    return len(values), mean, math.sqrt(variance)
-
-
 def percentile(values: list[int], pct: float) -> float | None:
     if not values:
         return None
@@ -249,42 +241,6 @@ def latest_epoch(rows: list[dict[str, object]]) -> int | None:
     if not rows:
         return None
     return max(int(row["submit_epoch"]) for row in rows)
-
-
-def print_summary(rows: list[dict[str, object]], window_days: int) -> None:
-    latest = latest_epoch(rows)
-    cutoff = None if latest is None else latest - window_days * SECONDS_PER_DAY
-    rows_by_cluster: dict[str, list[dict[str, object]]] = defaultdict(list)
-    for row in rows:
-        rows_by_cluster[str(row["cluster"])].append(row)
-
-    label = f"{window_days}day"
-    print("Queue time summary")
-    print(
-        f"{'cluster':<11} {label + '_mean':>12}  "
-        f"{label + '_std_dev':>14}  "
-        f"{'latest_queue':>13}  "
-        f"{label + '_samples':>14}  {'total_samples':>13}"
-    )
-    for cluster in DEFAULT_CLUSTERS:
-        cluster_rows = sorted(
-            rows_by_cluster.get(cluster, []), key=lambda row: int(row["submit_epoch"])
-        )
-        in_window = [
-            row
-            for row in cluster_rows
-            if cutoff is not None and int(row["submit_epoch"]) >= cutoff
-        ]
-        samples, mean, std_dev = history_stats(
-            [int(row["queue_seconds"]) for row in in_window]
-        )
-        latest_queue = int(cluster_rows[-1]["queue_seconds"]) if cluster_rows else None
-        print(
-            f"{cluster:<11} {format_seconds(mean):>12}  "
-            f"{format_seconds(std_dev):>14}  "
-            f"{format_seconds(latest_queue):>13}  "
-            f"{samples:>14}  {len(cluster_rows):>13}"
-        )
 
 
 def day_start(epoch: int) -> int:
@@ -320,20 +276,13 @@ def build_daily_series(
         day = plot_start_day
         while day <= max_day:
             day_values = per_day.get(day, [])
-            _, daily_mean, _ = history_stats(day_values)
-            rolling_values: list[int] = []
-            scan_day = day - (window_days - 1) * SECONDS_PER_DAY
-            while scan_day <= day:
-                rolling_values.extend(per_day.get(scan_day, []))
-                scan_day += SECONDS_PER_DAY
             cluster_series.append(
                 {
                     "day": day,
-                    "daily_mean": daily_mean,
-                    "rolling_median": percentile(rolling_values, 50.0),
-                    "rolling_low": percentile(rolling_values, PERCENTILE_LOW),
-                    "rolling_high": percentile(rolling_values, PERCENTILE_HIGH),
-                    "rolling_samples": len(rolling_values),
+                    "daily_median": percentile(day_values, 50.0),
+                    "daily_low": percentile(day_values, PERCENTILE_LOW),
+                    "daily_high": percentile(day_values, PERCENTILE_HIGH),
+                    "samples": len(day_values),
                 }
             )
             day += SECONDS_PER_DAY
@@ -342,13 +291,9 @@ def build_daily_series(
 
 
 def print_all(series: dict[str, list[dict[str, object]]], window_days: int) -> None:
-    label = f"{window_days}day"
-    low_label = f"{label}_p{int(PERCENTILE_LOW)}_seconds"
-    high_label = f"{label}_p{int(PERCENTILE_HIGH)}_seconds"
-    print(
-        f"cluster,day,{label}_median_seconds,daily_mean_seconds,"
-        f"{low_label},{high_label},{label}_samples"
-    )
+    low_label = f"daily_p{int(PERCENTILE_LOW)}_seconds"
+    high_label = f"daily_p{int(PERCENTILE_HIGH)}_seconds"
+    print(f"cluster,day,daily_median_seconds,{low_label},{high_label},samples")
 
     def fmt(value: object) -> str:
         return "" if value is None else str(int(round(float(value))))
@@ -357,9 +302,9 @@ def print_all(series: dict[str, list[dict[str, object]]], window_days: int) -> N
         for row in series.get(cluster, []):
             print(
                 f"{cluster},{day_label(int(row['day'])).date()},"
-                f"{fmt(row['rolling_median'])},{fmt(row['daily_mean'])},"
-                f"{fmt(row['rolling_low'])},{fmt(row['rolling_high'])},"
-                f"{row['rolling_samples']}"
+                f"{fmt(row['daily_median'])},"
+                f"{fmt(row['daily_low'])},{fmt(row['daily_high'])},"
+                f"{row['samples']}"
             )
 
 
@@ -386,6 +331,7 @@ def _hours_label(time_limit: str) -> str:
 
 def plot_series(
     series: dict[str, list[dict[str, object]]],
+    rows: list[dict[str, object]],
     plot_path: Path,
     window_days: int,
     time_limit: str,
@@ -398,6 +344,7 @@ def plot_series(
     import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
     import matplotlib.ticker as mticker
+    import numpy as np
 
     colors = {
         "narval": "#1f77b4",
@@ -410,79 +357,139 @@ def plot_series(
         "killarney": f"Killarney {gpus}xL40S",
     }
     plot_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(13, 7))
-
-    max_high = max(
-        (
-            float(row["rolling_high"])
-            for cluster_series in series.values()
-            for row in cluster_series
-            if row["rolling_high"] is not None
-        ),
-        default=0.0,
+    fig, (ax_trend, ax_dist) = plt.subplots(
+        1,
+        2,
+        figsize=(18, 7),
+        sharey=True,
+        gridspec_kw={"width_ratios": [3, 1]},
     )
-    max_hours = math.ceil(max_high / 3600) if max_high > 0 else 1
+
+    latest = latest_epoch(rows)
+    cutoff = None if latest is None else latest - window_days * SECONDS_PER_DAY
+    cluster_window_values: dict[str, list[int]] = {}
+    for cluster in DEFAULT_CLUSTERS:
+        cluster_window_values[cluster] = [
+            int(row["queue_seconds"])
+            for row in rows
+            if str(row["cluster"]) == cluster
+            and (cutoff is None or int(row["submit_epoch"]) >= cutoff)
+        ]
+
+    cap_hours = 5
+    cap = cap_hours * 3600
 
     for cluster in DEFAULT_CLUSTERS:
         cluster_series = series.get(cluster, [])
         if not cluster_series:
             continue
         days = [day_label(int(row["day"])) for row in cluster_series]
-        rolling_median = _to_floats([row["rolling_median"] for row in cluster_series])
-        rolling_low = _to_floats([row["rolling_low"] for row in cluster_series])
-        rolling_high = _to_floats([row["rolling_high"] for row in cluster_series])
+        daily_median = _to_floats([row["daily_median"] for row in cluster_series])
+        daily_low = _to_floats([row["daily_low"] for row in cluster_series])
+        daily_high = _to_floats([row["daily_high"] for row in cluster_series])
         color = colors[cluster]
         display_name = cluster_labels[cluster]
         short_name = display_name.split()[0]
 
-        ax.fill_between(
+        ax_trend.fill_between(
             days,
-            rolling_low,
-            rolling_high,
+            daily_low,
+            daily_high,
             color=color,
             alpha=0.18,
             linewidth=0,
-            label=f"{short_name} P{int(PERCENTILE_LOW)}-P{int(PERCENTILE_HIGH)}",
+            label=f"{short_name} IQR",
         )
-        ax.plot(
+        ax_trend.plot(
             days,
-            rolling_low,
+            daily_low,
             color=color,
             linewidth=1.0,
             linestyle="--",
             alpha=0.85,
         )
-        ax.plot(
+        ax_trend.plot(
             days,
-            rolling_high,
+            daily_high,
             color=color,
             linewidth=1.0,
             linestyle="--",
             alpha=0.85,
         )
-        ax.plot(
+        ax_trend.plot(
             days,
-            rolling_median,
+            daily_median,
             color=color,
             linewidth=2.0,
+            marker="o",
+            markersize=4,
             label=display_name,
         )
 
-    ax.set_title(
-        f"{window_days}-Day Rolling Median Queue Times - "
+    ax_trend.set_title(
+        f"Daily Median Queue Times - "
         f"{_hours_label(time_limit)} Time Limit, {gpus} GPUs",
-        fontsize=15,
+        fontsize=17,
     )
-    ax.set_xlabel("Day", fontsize=13)
-    ax.set_ylabel("Queue time (hours)", fontsize=13)
-    ax.set_ylim(0, max_hours * 3600)
-    ax.yaxis.set_major_locator(mticker.MultipleLocator(3600))
-    ax.yaxis.set_major_formatter(lambda value, _: f"{int(round(value / 3600))}")
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ax.xaxis.get_major_locator()))
-    ax.tick_params(axis="both", labelsize=12)
-    ax.grid(True, linewidth=0.5, alpha=0.35)
-    ax.legend(ncol=3, fontsize=11, loc="upper right")
+    ax_trend.set_xlabel("Day", fontsize=15)
+    ax_trend.set_ylabel("Queue time (hours)", fontsize=15)
+    ax_trend.set_ylim(0, cap)
+    ax_trend.yaxis.set_major_locator(mticker.MultipleLocator(3600))
+    ax_trend.yaxis.set_major_formatter(lambda value, _: f"{int(round(value / 3600))}")
+    ax_trend.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax_trend.xaxis.set_major_formatter(
+        mdates.ConciseDateFormatter(ax_trend.xaxis.get_major_locator())
+    )
+    ax_trend.tick_params(axis="both", labelsize=14)
+    ax_trend.grid(True, linewidth=0.5, alpha=0.35)
+    handles, labels = ax_trend.get_legend_handles_labels()
+    handle_for_label = dict(zip(labels, handles))
+    ordered: list[tuple[object, str]] = []
+    for cluster in DEFAULT_CLUSTERS:
+        line_label = cluster_labels[cluster]
+        band_label = f"{line_label.split()[0]} IQR"
+        if line_label in handle_for_label:
+            ordered.append((handle_for_label[line_label], line_label))
+        if band_label in handle_for_label:
+            ordered.append((handle_for_label[band_label], band_label))
+    ax_trend.legend(
+        [h for h, _ in ordered],
+        [l for _, l in ordered],
+        ncol=3,
+        fontsize=13,
+        loc="upper right",
+    )
+
+    bin_edges = np.linspace(0, cap, 21)
+    for cluster in DEFAULT_CLUSTERS:
+        values = cluster_window_values.get(cluster, [])
+        if not values:
+            continue
+        over = sum(1 for v in values if v > cap)
+        color = colors[cluster]
+        display_name = cluster_labels[cluster]
+        label = display_name
+        if over:
+            label += f" (>{cap_hours}h: {over})"
+        ax_dist.hist(
+            values,
+            bins=bin_edges,
+            orientation="horizontal",
+            color=color,
+            alpha=0.35,
+            edgecolor=color,
+            linewidth=1.5,
+            density=True,
+            histtype="stepfilled",
+            label=label,
+        )
+
+    ax_dist.set_title(f"{window_days}-Day Distribution", fontsize=17)
+    ax_dist.set_xlabel("Density", fontsize=15)
+    ax_dist.tick_params(axis="both", labelsize=14)
+    ax_dist.grid(True, linewidth=0.5, alpha=0.35)
+    ax_dist.legend(fontsize=12, loc="upper right")
+
     fig.tight_layout()
     fig.savefig(plot_path, dpi=160)
     plt.close(fig)
@@ -500,11 +507,9 @@ def main() -> int:
     series = build_daily_series(rows, args.window)
     if args.all:
         print_all(series, args.window)
-    else:
-        print_summary(rows, args.window)
     if not args.no_plot:
-        plot_series(series, args.plot, args.window, args.time_limit, args.gpus)
-        print(f"\nPlot written to {args.plot}")
+        plot_series(series, rows, args.plot, args.window, args.time_limit, args.gpus)
+        print(f"Plot written to {args.plot}")
     return 1 if failures else 0
 
 
