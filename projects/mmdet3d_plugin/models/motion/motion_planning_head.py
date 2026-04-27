@@ -169,6 +169,8 @@ class MotionPlanningHead(BaseModule):
         plan_softcost_collision_enable=False,
         plan_softcost_collision_weight=0.2,
         plan_softcost_collision_sigma=2.0,
+        plan_softcost_geometry='gaussian',
+        plan_softcost_collision_tau=0.5,
         detach_perception=False,
     ):
         super(MotionPlanningHead, self).__init__()
@@ -208,6 +210,8 @@ class MotionPlanningHead(BaseModule):
         self.plan_softcost_collision_enable = plan_softcost_collision_enable
         self.plan_softcost_collision_weight = plan_softcost_collision_weight
         self.plan_softcost_collision_sigma = plan_softcost_collision_sigma
+        self.plan_softcost_geometry = plan_softcost_geometry
+        self.plan_softcost_collision_tau = plan_softcost_collision_tau
         self.detach_perception = detach_perception
         self.mode_no_agg = mode_no_agg
         self.plan_mode_time_queries = plan_mode_time_queries
@@ -1586,11 +1590,14 @@ class MotionPlanningHead(BaseModule):
     def _loss_planning_softcost_collision(self, reg, data):
         """Soft collision cost on plan_reg as a training-loss term.
 
-        reg: (bs, 1, 3*M, ego_fut_ts, 2) delta plan predictions.
-        Builds GT agent positions from gt_bboxes_3d + cumsum(gt_agent_fut_trajs);
-        cost is the mean over (modes, t, agents) of exp(-d^2/sigma^2). Gradient
-        flows through reg into the planning regression head.
+        Dispatches to one of two geometries:
+          - 'gaussian': v1 — center-to-center exp(-d²/σ²), mean over agents.
+          - 'sdf_corners': v2 — min-of-4-ego-corners SDF to agent oriented bbox,
+            softplus(-min_sdf/τ), closest-agent-only per (mode, t), mean over (M, T).
         """
+        if self.plan_softcost_geometry == 'sdf_corners':
+            return self._loss_planning_softcost_collision_sdf(reg, data)
+
         gt_boxes = data.get('gt_bboxes_3d')
         gt_traj = data.get('gt_agent_fut_trajs')
         gt_traj_mask = data.get('gt_agent_fut_masks')
@@ -1631,6 +1638,147 @@ class MotionPlanningHead(BaseModule):
             else:
                 denom = cost_per.new_tensor(float(cost_per.numel())).clamp(min=1.0)
             sample_costs.append(cost_per.sum() / denom)
+
+        if not sample_costs:
+            return reg.sum() * 0.0
+        return torch.stack(sample_costs).mean()
+
+    def _loss_planning_softcost_collision_sdf(self, reg, data):
+        """Geometry-aware soft collision cost via 4-ego-corner SDF.
+
+        Per (mode, t):
+          - Ego footprint matches HierarchicalPlanningDecoder.rescore() constants
+            (4.08 × 1.73 × 1.1 with +0.5 m forward offset along heading).
+          - Ego heading from trajectory tangent (atan2 central diff on cumxy).
+          - For each of 4 ego corners, compute SDF to each agent's oriented bbox
+            (rotate corner into agent local frame, axis-aligned-rect SDF).
+          - min over 4 corners → per-agent SDF.
+          - Closest-agent-only: min over agents → per-(mode, t) min SDF.
+          - Penalty = softplus(-min_sdf / τ); mean over (M_total, T_ego).
+        Mean across batch.
+        """
+        gt_boxes = data.get('gt_bboxes_3d')
+        gt_traj = data.get('gt_agent_fut_trajs')
+        gt_traj_mask = data.get('gt_agent_fut_masks')
+        if gt_boxes is None or gt_traj is None:
+            return None
+
+        bs = reg.shape[0]
+        device = reg.device
+        dtype = reg.dtype
+        T_ego = reg.shape[-2]
+        tau = float(self.plan_softcost_collision_tau)
+
+        # Ego footprint matches rescore() constants (length × width × dim_scale).
+        # Box-frame index 3 ('W') is along-heading; index 4 ('L') is lateral.
+        ego_W = 4.08 * 1.1
+        ego_L = 1.73 * 1.1
+        ego_offset = 0.5
+        half_W_e = ego_W * 0.5
+        half_L_e = ego_L * 0.5
+
+        # ego_pred_xy: (bs, M_total, T_ego, 2). reg is (bs, 1, M_total, T_ego, 2).
+        ego_pred_xy = reg.squeeze(1).cumsum(dim=-2)
+        bs_, M, T, _ = ego_pred_xy.shape
+
+        # Ego heading from trajectory tangent (central diff on extended cumxy).
+        zeros = ego_pred_xy.new_zeros(bs_, M, 1, 2)
+        cum_ext = torch.cat([zeros, ego_pred_xy], dim=-2)  # (bs, M, T+1, 2)
+        if T >= 2:
+            central = cum_ext[..., 2:T + 1, :] - cum_ext[..., 0:T - 1, :]  # (bs, M, T-1, 2)
+            last_diff = cum_ext[..., T:T + 1, :] - cum_ext[..., T - 1:T, :]  # (bs, M, 1, 2)
+            diffs = torch.cat([central, last_diff], dim=-2)  # (bs, M, T, 2)
+        else:
+            diffs = cum_ext[..., 1:, :] - cum_ext[..., :-1, :]
+        yaw = torch.atan2(diffs[..., 1], diffs[..., 0])  # (bs, M, T)
+
+        # Static guard mirroring rescore.get_yaw: when total displacement is small,
+        # heading is unstable; pin to lidar +y (np.pi/2).
+        total_disp = torch.linalg.norm(
+            ego_pred_xy[..., -1, :] - ego_pred_xy[..., 0, :], dim=-1, keepdim=True
+        )
+        static_mask = total_disp < 0.5  # (bs, M, 1)
+        yaw = torch.where(
+            static_mask.expand_as(yaw),
+            torch.full_like(yaw, float(np.pi / 2)),
+            yaw,
+        )
+        cos_y = torch.cos(yaw)  # (bs, M, T)
+        sin_y = torch.sin(yaw)
+
+        # Apply forward offset along heading to ego center.
+        ego_cx = ego_pred_xy[..., 0] + ego_offset * cos_y
+        ego_cy = ego_pred_xy[..., 1] + ego_offset * sin_y
+
+        # 4 ego corners in box-local frame: (±half_W_e, ±half_L_e).
+        sign_w = ego_pred_xy.new_tensor([1.0, 1.0, -1.0, -1.0])
+        sign_l = ego_pred_xy.new_tensor([1.0, -1.0, -1.0, 1.0])
+        cx_local = (sign_w * half_W_e).reshape(1, 1, 1, 4)
+        cy_local = (sign_l * half_L_e).reshape(1, 1, 1, 4)
+        cos_y_b = cos_y.unsqueeze(-1)  # (bs, M, T, 1)
+        sin_y_b = sin_y.unsqueeze(-1)
+        corners_world_x = cx_local * cos_y_b - cy_local * sin_y_b + ego_cx.unsqueeze(-1)
+        corners_world_y = cx_local * sin_y_b + cy_local * cos_y_b + ego_cy.unsqueeze(-1)
+
+        sample_costs = []
+        for b in range(bs):
+            boxes_b = gt_boxes[b].to(device=device, dtype=dtype)
+            trajs_b = gt_traj[b].to(device=device, dtype=dtype)
+            if trajs_b.shape[0] == 0:
+                continue
+            T_b = min(trajs_b.shape[1], T_ego)
+            if T_b == 0:
+                continue
+            n_a = boxes_b.shape[0]
+            agent_xy0 = boxes_b[:, :2]
+            agent_traj = trajs_b[:, :T_b]
+            agent_pos = agent_xy0.unsqueeze(1) + agent_traj.cumsum(dim=1)  # (n_a, T_b, 2)
+            agent_yaw = boxes_b[:, 6]  # (n_a,)
+            agent_W = boxes_b[:, 3]
+            agent_L = boxes_b[:, 4]
+
+            ex = corners_world_x[b, :, :T_b, :]  # (M, T_b, 4)
+            ey = corners_world_y[b, :, :T_b, :]
+            agent_pos_x = agent_pos[..., 0].reshape(n_a, 1, T_b, 1)
+            agent_pos_y = agent_pos[..., 1].reshape(n_a, 1, T_b, 1)
+            rel_x = ex.unsqueeze(0) - agent_pos_x  # (n_a, M, T_b, 4)
+            rel_y = ey.unsqueeze(0) - agent_pos_y
+
+            cos_a = torch.cos(agent_yaw).reshape(n_a, 1, 1, 1)
+            sin_a = torch.sin(agent_yaw).reshape(n_a, 1, 1, 1)
+            # Rotate by -agent_yaw into agent-local frame.
+            local_x = rel_x * cos_a + rel_y * sin_a
+            local_y = -rel_x * sin_a + rel_y * cos_a
+
+            half_w_a = (agent_W * 0.5).reshape(n_a, 1, 1, 1)
+            half_l_a = (agent_L * 0.5).reshape(n_a, 1, 1, 1)
+            qx = local_x.abs() - half_w_a
+            qy = local_y.abs() - half_l_a
+            outside = torch.sqrt(
+                torch.clamp(qx, min=0) ** 2 + torch.clamp(qy, min=0) ** 2 + 1e-12
+            )
+            inside = torch.clamp(torch.maximum(qx, qy), max=0)
+            sdf = outside + inside  # (n_a, M, T_b, 4)
+            min_sdf_corners = sdf.min(dim=-1).values  # (n_a, M, T_b)
+
+            if gt_traj_mask is not None:
+                tmask = gt_traj_mask[b].to(device=device).bool()[:, :T_b]  # (n_a, T_b)
+                min_sdf_corners = torch.where(
+                    tmask.unsqueeze(1).expand(-1, M, -1),
+                    min_sdf_corners,
+                    min_sdf_corners.new_full((), float('inf')),
+                )
+
+            min_sdf_agent = min_sdf_corners.min(dim=0).values  # (M, T_b)
+            finite = torch.isfinite(min_sdf_agent)
+            if not finite.any():
+                continue
+            penalty = F.softplus(
+                -torch.where(finite, min_sdf_agent, min_sdf_agent.new_zeros(())) / tau
+            )
+            penalty = torch.where(finite, penalty, penalty.new_zeros(()))
+            denom = finite.to(penalty.dtype).sum().clamp(min=1.0)
+            sample_costs.append(penalty.sum() / denom)
 
         if not sample_costs:
             return reg.sum() * 0.0

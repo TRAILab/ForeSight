@@ -114,11 +114,17 @@ class HierarchicalPlanningDecoder(object):
         ego_fut_ts,
         ego_fut_mode,
         use_rescore=False,
+        use_rescore_soft=False,
+        rescore_soft_w_col=10.0,
+        rescore_soft_sigma=2.0,
     ):
         super(HierarchicalPlanningDecoder, self).__init__()
         self.ego_fut_ts = ego_fut_ts
         self.ego_fut_mode = ego_fut_mode
         self.use_rescore = use_rescore
+        self.use_rescore_soft = use_rescore_soft
+        self.rescore_soft_w_col = rescore_soft_w_col
+        self.rescore_soft_sigma = rescore_soft_sigma
     
     def decode(
         self, 
@@ -176,9 +182,18 @@ class HierarchicalPlanningDecoder(object):
         if self.use_rescore:
             plan_cls = self.rescore(
                 plan_cls,
-                plan_reg, 
+                plan_reg,
                 motion_cls,
-                motion_reg, 
+                motion_reg,
+                det_anchors,
+                det_confidence,
+            )
+        elif self.use_rescore_soft:
+            plan_cls = self.rescore_soft(
+                plan_cls,
+                plan_reg,
+                motion_cls,
+                motion_reg,
                 det_anchors,
                 det_confidence,
             )
@@ -274,6 +289,147 @@ class HierarchicalPlanningDecoder(object):
         all_col = col.all(dim=-1)
         col[all_col] = False # for case that all modes collide, no need to rescore
         score_offset = col.float() * -999
+        plan_cls = plan_cls + score_offset
+        return plan_cls
+
+    def rescore_soft(
+        self,
+        plan_cls,
+        plan_reg,
+        motion_cls,
+        motion_reg,
+        det_anchors,
+        det_confidence,
+        score_thresh=0.5,
+        static_dis_thresh=0.5,
+        dim_scale=1.1,
+        num_motion_mode=1,
+        offset=0.5,
+    ):
+        """Soft variant of rescore.
+
+        Replaces the hard `-999` mask with a continuous score offset
+        `−w_col · sum_t exp(-clamp(min_sdf, 0)² / σ²)`, where `min_sdf` is the
+        SDF from the closest of 4 ego corners to the closest agent's oriented
+        bbox at each waypoint. Reuses the same ego/motion box construction as
+        `rescore`. No fallback for "all-collide" — soft costs stay bounded so
+        relative differences still discriminate modes.
+        """
+
+        def cat_with_zero(traj):
+            zeros = traj.new_zeros(traj.shape[:-2] + (1, 2))
+            return torch.cat([zeros, traj], dim=-2)
+
+        def get_yaw(traj, start_yaw=np.pi / 2):
+            yaw = traj.new_zeros(traj.shape[:-1])
+            yaw[..., 1:-1] = torch.atan2(
+                traj[..., 2:, 1] - traj[..., :-2, 1],
+                traj[..., 2:, 0] - traj[..., :-2, 0],
+            )
+            yaw[..., -1] = torch.atan2(
+                traj[..., -1, 1] - traj[..., -2, 1],
+                traj[..., -1, 0] - traj[..., -2, 0],
+            )
+            yaw[..., 0] = start_yaw
+            start = traj[..., 0, :]
+            end = traj[..., -1, :]
+            dist = torch.linalg.norm(end - start, dim=-1)
+            mask = dist < static_dis_thresh
+            sy = yaw[..., 0].unsqueeze(-1)
+            yaw = torch.where(mask.unsqueeze(-1), sy, yaw)
+            return yaw.unsqueeze(-1)
+
+        bs = plan_reg.shape[0]
+        plan_reg_cat = cat_with_zero(plan_reg)
+        ego_box = det_anchors.new_zeros(
+            bs, self.ego_fut_mode, self.ego_fut_ts + 1, 7
+        )
+        ego_box[..., [X, Y]] = plan_reg_cat
+        ego_box[..., [W, L, H]] = ego_box.new_tensor([4.08, 1.73, 1.56]) * dim_scale
+        ego_box[..., [YAW]] = get_yaw(plan_reg_cat)
+
+        motion_reg_t = motion_reg[..., :self.ego_fut_ts, :].cumsum(-2)
+        motion_reg_t = cat_with_zero(motion_reg_t) + det_anchors[:, :, None, None, :2]
+        _, motion_mode_idx = torch.topk(motion_cls, num_motion_mode, dim=-1)
+        motion_mode_idx = motion_mode_idx[..., None, None].repeat(
+            1, 1, 1, self.ego_fut_ts + 1, 2
+        )
+        motion_reg_t = torch.gather(motion_reg_t, 2, motion_mode_idx)
+
+        motion_box = motion_reg_t.new_zeros(motion_reg_t.shape[:-1] + (7,))
+        motion_box[..., [X, Y]] = motion_reg_t
+        motion_box[..., [W, L, H]] = det_anchors[..., None, None, [W, L, H]].exp()
+        box_yaw = torch.atan2(
+            det_anchors[..., SIN_YAW],
+            det_anchors[..., COS_YAW],
+        )
+        motion_box[..., [YAW]] = get_yaw(motion_reg_t, box_yaw.unsqueeze(-1))
+
+        # Drop t=0 (anchor frame, no displacement yet) to align with ego.
+        ego_box = ego_box[..., 1:, :]
+        motion_box = motion_box[..., 1:, :]
+
+        # Apply forward offset to ego center along heading.
+        ego_box = ego_box.clone()
+        ego_yaw = ego_box[..., 6]
+        ego_box[..., 0] = ego_box[..., 0] + offset * torch.cos(ego_yaw)
+        ego_box[..., 1] = ego_box[..., 1] + offset * torch.sin(ego_yaw)
+
+        bs_, num_ego_mode, ts, _ = ego_box.shape
+        _, num_anchor, n_mm, _, _ = motion_box.shape
+
+        # Build 4 ego corners in world frame: (..., 4, 2).
+        half_W_e = ego_box[..., 3:4] * 0.5  # (bs, M_ego, ts, 1)
+        half_L_e = ego_box[..., 4:5] * 0.5
+        sign_w = ego_box.new_tensor([1.0, 1.0, -1.0, -1.0]).reshape(1, 1, 1, 4)
+        sign_l = ego_box.new_tensor([1.0, -1.0, -1.0, 1.0]).reshape(1, 1, 1, 4)
+        cx_local = sign_w * half_W_e
+        cy_local = sign_l * half_L_e
+        cos_e = torch.cos(ego_yaw).unsqueeze(-1)
+        sin_e = torch.sin(ego_yaw).unsqueeze(-1)
+        ego_corners_x = cx_local * cos_e - cy_local * sin_e + ego_box[..., 0:1]
+        ego_corners_y = cx_local * sin_e + cy_local * cos_e + ego_box[..., 1:2]
+
+        # Broadcast: ego (bs, 1, 1, M_ego, ts, 4); motion (bs, A, MM, 1, ts, 1)
+        ex = ego_corners_x[:, None, None, :, :, :]  # (bs, 1, 1, M_ego, ts, 4)
+        ey = ego_corners_y[:, None, None, :, :, :]
+        m_cx = motion_box[..., 0:1].unsqueeze(3)  # (bs, A, MM, 1, ts, 1)
+        m_cy = motion_box[..., 1:2].unsqueeze(3)
+        m_yaw = motion_box[..., 6:7].unsqueeze(3)  # (bs, A, MM, 1, ts, 1)
+        half_w_a = (motion_box[..., 3:4] * 0.5).unsqueeze(3)
+        half_l_a = (motion_box[..., 4:5] * 0.5).unsqueeze(3)
+
+        rel_x = ex - m_cx  # (bs, A, MM, M_ego, ts, 4)
+        rel_y = ey - m_cy
+        cos_a = torch.cos(m_yaw)
+        sin_a = torch.sin(m_yaw)
+        local_x = rel_x * cos_a + rel_y * sin_a
+        local_y = -rel_x * sin_a + rel_y * cos_a
+        qx = local_x.abs() - half_w_a
+        qy = local_y.abs() - half_l_a
+        outside = torch.sqrt(
+            torch.clamp(qx, min=0) ** 2 + torch.clamp(qy, min=0) ** 2 + 1e-12
+        )
+        inside = torch.clamp(torch.maximum(qx, qy), max=0)
+        sdf = outside + inside  # (bs, A, MM, M_ego, ts, 4)
+        min_sdf_corners = sdf.min(dim=-1).values  # (bs, A, MM, M_ego, ts)
+
+        # Filter low-conf agents: push their SDF to large positive (negligible cost).
+        filter_mask = (det_confidence < score_thresh)  # (bs, A)
+        if filter_mask.any():
+            big = min_sdf_corners.new_tensor(1e6)
+            fm = filter_mask[:, :, None, None, None].expand_as(min_sdf_corners)
+            min_sdf_corners = torch.where(fm, big.expand_as(min_sdf_corners), min_sdf_corners)
+
+        # Closest agent (and motion mode) per (ego_mode, t): min over (A, MM).
+        min_sdf_per_t = min_sdf_corners.amin(dim=(1, 2))  # (bs, M_ego, ts)
+        # Saturating Gaussian on positive distance: 1 inside the box, decays outside.
+        sigma2 = float(self.rescore_soft_sigma) ** 2
+        pos_dist = torch.clamp(min_sdf_per_t, min=0)
+        c_col_t = torch.exp(-(pos_dist ** 2) / sigma2)  # (bs, M_ego, ts)
+        c_col = c_col_t.sum(dim=-1)  # (bs, M_ego)
+
+        score_offset = -float(self.rescore_soft_w_col) * c_col
         plan_cls = plan_cls + score_offset
         return plan_cls
 
