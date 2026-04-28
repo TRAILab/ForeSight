@@ -54,16 +54,19 @@ echo "Starting wandb sync loop (interval: ${SLEEP_INTERVAL}s)"
 
 while :; do
     date
-    if compgen -G "$WANDB_DIR/offline-*" > /dev/null; then
-        echo "Syncing offline runs in $WANDB_DIR"
+    FOUND=0
+    for RUN_DIR in "$WANDB_DIR"/offline-run-*/; do
+        [[ -d "$RUN_DIR" ]] || continue
+        FOUND=1
+        RUN_NAME=$(basename "$RUN_DIR")
+        echo "Syncing $RUN_NAME"
         "$APPTAINER" --silent exec -c -e \
             --env "WANDB_API_KEY=$WANDB_API_KEY" \
             --bind="$WANDB_DIR":/wandb_sync \
             "$SING_IMG" \
-            wandb sync --sync-all /wandb_sync
-    else
-        echo "No offline wandb runs in $WANDB_DIR"
-    fi
+            wandb sync "/wandb_sync/$RUN_NAME"
+    done
+    [[ $FOUND -eq 0 ]] && echo "No offline wandb runs in $WANDB_DIR"
     echo "Done — sleeping ${SLEEP_INTERVAL}s"
     sleep "$SLEEP_INTERVAL"
 done
