@@ -17,6 +17,7 @@ TMP_DATA_DIR=$SLURM_TMPDIR/data
 # TMP_DATA_DIR=/home/spapais/scratch/temp_data # Temporary data directory alternative
 DATA_DIR=/home/spapais/projects/aip-swasland/datasets/nuscenes/
 WORK_DIR=/scratch/spapais/ForeSight/work_dirs
+WANDB_PERSIST_DIR=/scratch/spapais/ForeSight/wandb
 CMD=${@:-bash}
 
 # Load env if needed (e.g. when submitted via non-interactive SSH)
@@ -29,8 +30,10 @@ APPTAINER=/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/Core/ap
 CONTAINER_CMD="$APPTAINER exec --nv -c -e --pwd /workspace/ForeSight/ \
 --env WANDB_API_KEY=$WANDB_API_KEY \
 --env WANDB_MODE=offline \
+--env WANDB_DIR=/wandb \
 --env TMPDIR=/tmp \
 --bind=$TMP_DIR:/tmp \
+--bind=$WANDB_PERSIST_DIR:/wandb \
 --bind=/home/spapais/ForeSight:/workspace/ForeSight/ \
 --bind=$TMP_DATA_DIR:/workspace/ForeSight/data/nuscenes \
 --bind=$WORK_DIR:/workspace/ForeSight/work_dirs \
@@ -40,7 +43,7 @@ CONTAINER_CMD="$CONTAINER_CMD bash -c 'export LD_LIBRARY_PATH=/usr/lib/x86_64-li
 # Extract dataset
 SECONDS=0
 echo "Extracting data"
-mkdir -p $TMP_DATA_DIR $TMP_DIR $WORK_DIR
+mkdir -p $TMP_DATA_DIR $TMP_DIR $WORK_DIR $WANDB_PERSIST_DIR
 for file in $DATA_DIR/*.zip; do
     [[ "$file" == *sweeps* ]] && echo "Skipping $file (not needed for camera-only model)" && continue
     duration=$SECONDS
