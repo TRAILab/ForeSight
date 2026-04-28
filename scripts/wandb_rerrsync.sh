@@ -6,15 +6,19 @@
 # Usage (run inside tmux on a login node):
 #   bash scripts/wandb_rerrsync.sh <jobid> [<jobid>...]
 #
-# Overrides via env: DEST, INTERVAL, SRC_TEMPLATE.
-# SRC_TEMPLATE uses {jid} and {user} placeholders. Default matches Trillium
-# (SLURM_TMPDIR is RAM-backed at /dev/shm/slurm.<user>.<jid>/tmp).
+# Overrides via env: DEST, INTERVAL.
+# Source path is hardcoded for Trillium (SLURM_TMPDIR is RAM-backed at
+# /dev/shm/slurm.<user>.<jid>/tmp). Edit src_for_job() for other clusters.
 
 set -u
 
 DEST=${DEST:-/scratch/spapais/ForeSight/wandb}
 INTERVAL=${INTERVAL:-600}
-SRC_TEMPLATE=${SRC_TEMPLATE:-/dev/shm/slurm.{user}.{jid}/tmp/wandb}
+
+src_for_job() {
+    local jid=$1
+    echo "/dev/shm/slurm.${USER}.${jid}/tmp/wandb"
+}
 
 if [[ $# -eq 0 ]]; then
     echo "Usage: $0 <jobid> [<jobid>...]" >&2
@@ -33,8 +37,7 @@ while :; do
         STATE=$(squeue -j "$JID" -h -o %T 2>/dev/null)
         if [[ "$STATE" == "RUNNING" ]]; then
             ANY_RUNNING=1
-            SRC=${SRC_TEMPLATE//\{user\}/$USER}
-            SRC=${SRC//\{jid\}/$JID}
+            SRC=$(src_for_job "$JID")
             echo "$(date) [job $JID] rsync from $SRC"
             srun --jobid="$JID" --overlap rsync -a "$SRC/" "$DEST/" 2>&1 | tail -3
         else
