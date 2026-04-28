@@ -25,6 +25,7 @@ except:
 __all__ = [
     "DeformableFeatureAggregation",
     "DenseDepthNet",
+    "DenseSegHead",
     "AsymmetricFFN",
 ]
 
@@ -318,6 +319,83 @@ class DenseDepthNet(BaseModule):
                     / max(1.0, len(gt) * len(depth_preds))
                     * self.loss_weight
                 )
+            loss = loss + _loss
+        return loss
+
+
+@PLUGIN_LAYERS.register_module()
+class DenseSegHead(BaseModule):
+    """Per-pixel multi-label binary segmentation on FPN features.
+
+    Mirrors DenseDepthNet: one 1x1 conv per FPN level producing N-channel
+    logits, with per-pixel per-channel BCE loss against multi-label masks.
+
+    Output channels are configured by ``class_names``; GT is read from
+    ``gt_dense_seg`` produced by the GenerateDenseSegMask pipeline transform.
+    Heads are dropped at inference (training-time aux only).
+    """
+
+    def __init__(
+        self,
+        embed_dims=256,
+        num_layers=3,
+        class_names=("ped_crossing", "divider", "boundary",
+                     "drivable_area", "car", "pedestrian", "cyclist"),
+        loss_weight=1.0,
+        ignore_index=255,
+    ):
+        super().__init__()
+        self.embed_dims = embed_dims
+        self.num_layers = num_layers
+        self.class_names = list(class_names)
+        self.num_classes = len(self.class_names)
+        self.loss_weight = loss_weight
+        self.ignore_index = ignore_index
+
+        self.heads = nn.ModuleList()
+        for _ in range(num_layers):
+            self.heads.append(
+                nn.Conv2d(embed_dims, self.num_classes, kernel_size=1)
+            )
+
+    def forward(self, feature_maps, gt_seg=None):
+        """Predict per-pixel class logits at each FPN level.
+
+        Args:
+            feature_maps: list of FPN tensors, each (B, num_cams, C, H, W).
+            gt_seg: optional list per FPN level of (B, num_cams, num_classes,
+                H, W) uint8 multi-label masks. ``ignore_index`` (255) marks
+                invalid pixels (out of camera FOV after augmentation).
+
+        Returns:
+            If training and gt_seg is provided: scalar BCE loss.
+            Else: list of (B*num_cams, num_classes, H, W) per-FPN-level logits.
+        """
+        logits_per_level = []
+        for i, feat in enumerate(feature_maps[: self.num_layers]):
+            logit = self.heads[i](feat.flatten(end_dim=1).float())
+            logits_per_level.append(logit)
+        if gt_seg is not None and self.training:
+            return self.loss(logits_per_level, gt_seg)
+        return logits_per_level
+
+    def loss(self, logits_per_level, gt_seg):
+        loss = 0.0
+        for logit, gt in zip(logits_per_level, gt_seg):
+            # logit: (B*num_cams, num_classes, h, w), float32
+            # gt: (B, num_cams, num_classes, h, w) uint8 / float (0, 1, or
+            #     ignore_index for invalid pixels)
+            B = gt.shape[0]
+            gt = gt.reshape(B * gt.shape[1], *gt.shape[2:]).float()
+            valid = gt != self.ignore_index
+            gt = torch.where(valid, gt, torch.zeros_like(gt))
+            with autocast(enabled=False):
+                bce = nn.functional.binary_cross_entropy_with_logits(
+                    logit, gt, reduction="none"
+                )
+                bce = bce * valid.float()
+                denom = valid.float().sum().clamp(min=1.0)
+                _loss = bce.sum() / denom * self.loss_weight
             loss = loss + _loss
         return loss
 

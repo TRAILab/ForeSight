@@ -5,6 +5,7 @@ from .transform import (
     NuScenesSparse4DAdaptor,
     MultiScaleDepthMapGenerator,
     GenerateProjected2DTargets,
+    GenerateDenseSegMask,
 )
 from .augment import (
     ResizeCropFlipImage,
@@ -21,6 +22,7 @@ __all__ = [
     "CircleObjectRangeFilter",
     "MultiScaleDepthMapGenerator",
     "GenerateProjected2DTargets",
+    "GenerateDenseSegMask",
     "NormalizeMultiviewImage",
     "PhotoMetricDistortionMultiViewImage",
     "NuScenesSparse4DAdaptor",

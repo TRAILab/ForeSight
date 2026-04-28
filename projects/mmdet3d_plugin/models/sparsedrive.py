@@ -38,6 +38,7 @@ class SparseDrive(BaseDetector):
         use_deformable_func=False,
         depth_branch=None,
         aux_2d_head=None,
+        dense_seg_branch=None,
     ):
         super(SparseDrive, self).__init__(init_cfg=init_cfg)
         if pretrained is not None:
@@ -58,6 +59,12 @@ class SparseDrive(BaseDetector):
             self.aux_2d_head = build_head(aux_2d_head)
         else:
             self.aux_2d_head = None
+        if dense_seg_branch is not None:
+            self.dense_seg_branch = build_from_cfg(
+                dense_seg_branch, PLUGIN_LAYERS
+            )
+        else:
+            self.dense_seg_branch = None
         if use_grid_mask:
             self.grid_mask = GridMask(
                 True, True, rotate=1, offset=False, ratio=0.5, mode=1, prob=0.7
@@ -125,6 +132,11 @@ class SparseDrive(BaseDetector):
                 aux_outs,
             )
             output.update({f"aux2d_{k}": v for k, v in aux_losses.items()})
+        if self.dense_seg_branch is not None and "gt_dense_seg" in data:
+            seg_logits = self.dense_seg_branch(raw_feature_maps)
+            output["loss_dense_seg"] = self.dense_seg_branch.loss(
+                seg_logits, data["gt_dense_seg"]
+            )
         return output
 
     def forward_test(self, img, **data):

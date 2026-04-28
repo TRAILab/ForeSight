@@ -1,4 +1,5 @@
 import numpy as np
+import cv2
 import mmcv
 from mmcv.parallel import DataContainer as DC
 from mmdet.datasets.builder import PIPELINES
@@ -189,6 +190,230 @@ class GenerateProjected2DTargets(object):
         input_dict["gt_labels"] = gt_labels
         input_dict["centers2d"] = centers2d
         input_dict["depths"] = depths
+        return input_dict
+
+
+@PIPELINES.register_module()
+class GenerateDenseSegMask(object):
+    """Per-camera per-pixel multi-label binary segmentation GT.
+
+    For each FPN level (downsample factor) and each camera, builds an
+    ``(num_classes, H_level, W_level)`` uint8 mask where each channel is
+    a binary mask for one class. Output is a list of per-level
+    ``(num_cams, num_classes, H, W)`` arrays in ``gt_dense_seg``.
+
+    Class sources:
+        - ``map_polyline`` classes (e.g. ped_crossing, divider, boundary)
+          read ``input_dict['map_geoms'][layer]`` (a list of LineString
+          objects in the lidar frame, z=0). Each line is sampled and
+          drawn at the configured pixel thickness, separately per FPN
+          level (thickness scales down with FPN stride).
+        - ``agent_box`` classes filter ``gt_bboxes_3d`` by the configured
+          nuScenes class names, project the 3D corners via ``lidar2img``,
+          and fill the convex hull of the projected 2D footprint per
+          camera per FPN level.
+    """
+
+    def __init__(
+        self,
+        downsample=(4, 8, 16),
+        class_specs=None,
+        polyline_thickness_px=2,
+        polyline_sample_dist_m=0.5,
+        min_depth=0.1,
+        agent_class_names=(
+            "car", "truck", "construction_vehicle", "bus",
+            "trailer", "barrier", "motorcycle", "bicycle",
+            "pedestrian", "traffic_cone",
+        ),
+    ):
+        if not isinstance(downsample, (list, tuple)):
+            downsample = [downsample]
+        self.downsample = list(downsample)
+        # Default class specs: 3 polyline + 3 agent classes.
+        if class_specs is None:
+            class_specs = [
+                dict(name="ped_crossing", source="map_polyline", layer="ped_crossing"),
+                dict(name="divider",      source="map_polyline", layer="divider"),
+                dict(name="boundary",     source="map_polyline", layer="boundary"),
+                dict(name="car",          source="agent_box",    classes=("car",)),
+                dict(name="pedestrian",   source="agent_box",    classes=("pedestrian",)),
+                dict(name="cyclist",      source="agent_box",    classes=("bicycle", "motorcycle")),
+            ]
+        self.class_specs = class_specs
+        self.num_classes = len(class_specs)
+        self.polyline_thickness_px = int(polyline_thickness_px)
+        self.polyline_sample_dist_m = float(polyline_sample_dist_m)
+        self.min_depth = float(min_depth)
+        self.agent_class_names = list(agent_class_names)
+        self._agent_label_lookup = {
+            name: i for i, name in enumerate(self.agent_class_names)
+        }
+
+    def _project_pts(self, pts_lidar, lidar2img):
+        """Project (N, 3) lidar XYZ points to (N, 2) image pixel coords.
+
+        Returns (uv, valid_mask). valid_mask = True for points with depth
+        >= min_depth (in front of camera).
+        """
+        ones = np.ones((pts_lidar.shape[0], 1), dtype=np.float32)
+        pts_h = np.concatenate([pts_lidar.astype(np.float32), ones], axis=-1)
+        proj = pts_h @ lidar2img.T  # (N, 4)
+        depth = proj[:, 2]
+        valid = depth >= self.min_depth
+        # Clamp depth before division to avoid div-by-zero for invalid pts.
+        d = np.clip(depth, a_min=self.min_depth, a_max=None)
+        uv = proj[:, :2] / d[:, None]
+        return uv, valid
+
+    def _draw_polyline(self, mask, pts_uv, valid, thickness):
+        """Draw a polyline on a single-channel mask, splitting into
+        contiguous valid runs so segments crossing the camera horizon
+        don't draw across the whole image.
+        """
+        # Find runs of consecutive valid points.
+        n = len(valid)
+        i = 0
+        while i < n:
+            while i < n and not valid[i]:
+                i += 1
+            j = i
+            while j < n and valid[j]:
+                j += 1
+            if j - i >= 2:
+                segment = np.round(pts_uv[i:j]).astype(np.int32)
+                cv2.polylines(
+                    mask, [segment], isClosed=False,
+                    color=1, thickness=int(thickness),
+                )
+            i = j
+
+    def _draw_agent(self, mask, corners_uv, valid):
+        """Draw a filled convex hull of an agent's projected 2D corners
+        on a single-channel mask. Skips agents with too few visible
+        corners.
+        """
+        if int(valid.sum()) < 3:
+            return
+        pts = corners_uv[valid]
+        # Shapely is overkill; cv2.convexHull works on raw points.
+        hull = cv2.convexHull(np.round(pts).astype(np.int32))
+        cv2.fillConvexPoly(mask, hull, color=1)
+
+    def __call__(self, input_dict):
+        if "lidar2img" not in input_dict or "img_shape" not in input_dict:
+            return input_dict
+        num_cams = len(input_dict["lidar2img"])
+
+        # Pre-sample polylines once per layer (in lidar frame). Each row is
+        # a list of arrays: one (M, 3) array per LineString.
+        sampled_lines_per_class = []
+        for spec in self.class_specs:
+            if spec["source"] != "map_polyline":
+                sampled_lines_per_class.append(None)
+                continue
+            layer = spec["layer"]
+            geoms = input_dict.get("map_geoms", {}).get(layer, [])
+            sampled = []
+            for ls in geoms:
+                if ls.length < 1e-3:
+                    continue
+                num_pts = max(2, int(np.ceil(ls.length / self.polyline_sample_dist_m)))
+                ts = np.linspace(0, ls.length, num_pts)
+                coords = np.array(
+                    [list(ls.interpolate(t).coords)[0] for t in ts],
+                    dtype=np.float32,
+                )
+                if coords.shape[1] == 2:
+                    coords = np.concatenate(
+                        [coords, np.zeros((coords.shape[0], 1), dtype=np.float32)],
+                        axis=-1,
+                    )
+                sampled.append(coords)
+            sampled_lines_per_class.append(sampled)
+
+        # Pre-project agent corners once per camera (saves work across classes).
+        gt_bboxes_3d = input_dict.get("gt_bboxes_3d")
+        gt_labels_3d = input_dict.get("gt_labels_3d")
+        agent_corners_per_cam = [None] * num_cams
+        agent_corner_valid_per_cam = [None] * num_cams
+        if (
+            gt_bboxes_3d is not None and gt_labels_3d is not None
+            and len(gt_bboxes_3d) > 0
+        ):
+            corners_3d = box3d_to_corners(gt_bboxes_3d)  # (N, 8, 3)
+            corners_4d = np.concatenate(
+                [corners_3d.astype(np.float32),
+                 np.ones((*corners_3d.shape[:2], 1), dtype=np.float32)],
+                axis=-1,
+            )
+            for cam_idx in range(num_cams):
+                lidar2img = input_dict["lidar2img"][cam_idx]
+                proj = corners_4d @ lidar2img.T  # (N, 8, 4)
+                depth = proj[..., 2]
+                d = np.clip(depth, a_min=self.min_depth, a_max=None)
+                uv = proj[..., :2] / d[..., None]
+                valid = depth >= self.min_depth
+                agent_corners_per_cam[cam_idx] = uv
+                agent_corner_valid_per_cam[cam_idx] = valid
+
+        # Build per-FPN-level masks.
+        gt_dense_seg = []
+        for ds_idx, ds in enumerate(self.downsample):
+            level_masks = []
+            # thickness scales with stride; never below 1.
+            thickness = max(1, int(round(self.polyline_thickness_px)))
+            if ds > 1:
+                thickness = max(1, int(round(self.polyline_thickness_px / ds)))
+            for cam_idx in range(num_cams):
+                H, W = input_dict["img_shape"][cam_idx][:2]
+                h = max(1, int(H / ds))
+                w = max(1, int(W / ds))
+                mask = np.zeros((self.num_classes, h, w), dtype=np.uint8)
+                lidar2img = input_dict["lidar2img"][cam_idx]
+
+                for cls_idx, spec in enumerate(self.class_specs):
+                    if spec["source"] == "map_polyline":
+                        for line_xyz in sampled_lines_per_class[cls_idx] or []:
+                            uv, valid = self._project_pts(line_xyz, lidar2img)
+                            uv_ds = uv / ds
+                            inside = np.logical_and.reduce([
+                                uv_ds[:, 0] >= -1, uv_ds[:, 0] < w + 1,
+                                uv_ds[:, 1] >= -1, uv_ds[:, 1] < h + 1,
+                            ])
+                            valid = valid & inside
+                            if valid.sum() < 2:
+                                continue
+                            self._draw_polyline(
+                                mask[cls_idx], uv_ds, valid, thickness,
+                            )
+                    elif spec["source"] == "agent_box":
+                        if agent_corners_per_cam[cam_idx] is None:
+                            continue
+                        wanted_labels = set()
+                        for cls_name in spec["classes"]:
+                            if cls_name in self._agent_label_lookup:
+                                wanted_labels.add(
+                                    self._agent_label_lookup[cls_name]
+                                )
+                        if not wanted_labels:
+                            continue
+                        for obj_idx in range(len(gt_labels_3d)):
+                            if int(gt_labels_3d[obj_idx]) not in wanted_labels:
+                                continue
+                            corners_uv = (
+                                agent_corners_per_cam[cam_idx][obj_idx] / ds
+                            )
+                            valid = agent_corner_valid_per_cam[cam_idx][obj_idx]
+                            inside = np.logical_and.reduce([
+                                corners_uv[:, 0] >= -1, corners_uv[:, 0] < w + 1,
+                                corners_uv[:, 1] >= -1, corners_uv[:, 1] < h + 1,
+                            ])
+                            valid = valid & inside
+                            self._draw_agent(mask[cls_idx], corners_uv, valid)
+                level_masks.append(mask)
+            gt_dense_seg.append(np.stack(level_masks, axis=0))
+        input_dict["gt_dense_seg"] = gt_dense_seg
         return input_dict
 
 

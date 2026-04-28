@@ -4,6 +4,7 @@ from .gt_sparse_drive_head import GTSparseDriveHead
 from .blocks import (
     DeformableFeatureAggregation,
     DenseDepthNet,
+    DenseSegHead,
     AsymmetricFFN,
 )
 from .instance_bank import InstanceBank
@@ -25,6 +26,7 @@ __all__ = [
     "GTSparseDriveHead",
     "DeformableFeatureAggregation",
     "DenseDepthNet",
+    "DenseSegHead",
     "AsymmetricFFN",
     "InstanceBank",
     "SparseDriveAux2DHead",
