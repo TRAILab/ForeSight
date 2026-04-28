@@ -20,16 +20,10 @@ PROJECT = "ForeSight"
 
 # Maps wandb run ID -> config stem (work_dir name)
 RUN_CONFIG_MAP = {
-    "3faiervu": "sparsedrive_r50_stage1_8gpu_noflash",
-    "yon4jxk0": "sparsedrive_r50_stage1_8gpu_noflash_nomap_rotaug",
-    "blyqjlzb": "sparsedrive_r50_stage1_8gpu_noflash_nomap_dn",
-    "2m90s9og": "sparsedrive_r50_stage1_8gpu_noflash_nomap",
-    "96qabhaj": "sparsedrive_r50_stage1_8gpu_noflash_nomap_dn_rotaug",
-    "fk002y9f": "sparsedrive_r50_stage1_8gpu_noflash_dn",
-    "rz6whzul": "sparsedrive_r50_stage1_8gpu_noflash_gtdetmap",
-    "219nia3s": "sparsedrive_r50_stage1_8gpu_noflash_occptraineval",
-    "dflsx129": "sparsedrive_r50_stage1_8gpu_noflash_joint_detach",
-    "8d50wjr6": "sparsedrive_r50_stage1_8gpu_noflash_joint_gtoracle",
+    "xcy3j16r": "sparsedrive_r50_stage1_8gpu_noflash_aux2d",
+    "mm9iirk4": "sparsedrive_r50_stage1_8gpu_noflash_aux2p5d",
+    "ft2v6y1e": "sparsedrive_r50_stage1_8gpu_noflash_dn_rot3d_aux2p5d",
+    "aug7dy1d": "sparsedrive_r50_stage1_8gpu_noflash_joint",
 }
 
 
