@@ -123,6 +123,8 @@ class HierarchicalPlanningDecoder(object):
         use_rescore_learned_hard=False,
         rescore_learned_hard_score_thresh=0.5,
         rescore_learned_hard_prob_thresh=0.5,
+        rescore_confidence_source='det',
+        rescore_score_thresh=0.5,
     ):
         super(HierarchicalPlanningDecoder, self).__init__()
         self.ego_fut_ts = ego_fut_ts
@@ -137,6 +139,13 @@ class HierarchicalPlanningDecoder(object):
         self.use_rescore_learned_hard = use_rescore_learned_hard
         self.rescore_learned_hard_score_thresh = rescore_learned_hard_score_thresh
         self.rescore_learned_hard_prob_thresh = rescore_learned_hard_prob_thresh
+        # `rescore_confidence_source`: which per-agent score gates the
+        # rescore.filter_mask. 'det' (default) uses det_confidence (max class
+        # prob from Sparse4DHead). 'motion' uses motion top-mode probability
+        # (max over fut_mode of softmax(motion_cls)). Diagnostic for whether
+        # rescore needs det specifically vs any agent-confidence channel.
+        self.rescore_confidence_source = rescore_confidence_source
+        self.rescore_score_thresh = rescore_score_thresh
     
     def decode(
         self, 
@@ -193,6 +202,15 @@ class HierarchicalPlanningDecoder(object):
         plan_cls = plan_cls[bs_indices, cmd]
         plan_reg = plan_reg[bs_indices, cmd]
 
+        # rescore filter score: 'det' (default) uses Sparse4DHead's max class
+        # prob; 'motion' uses motion's top-mode probability per agent. Same
+        # tensor shape (bs, num_anchor); the threshold semantics stay
+        # consistent with the original rescore signature.
+        if self.rescore_confidence_source == 'motion':
+            filter_score = motion_cls.max(dim=-1).values
+        else:
+            filter_score = det_confidence
+
         # rescore
         if self.use_rescore:
             plan_cls = self.rescore(
@@ -201,7 +219,8 @@ class HierarchicalPlanningDecoder(object):
                 motion_cls,
                 motion_reg,
                 det_anchors,
-                det_confidence,
+                filter_score,
+                score_thresh=self.rescore_score_thresh,
             )
         elif self.use_rescore_soft:
             plan_cls = self.rescore_soft(

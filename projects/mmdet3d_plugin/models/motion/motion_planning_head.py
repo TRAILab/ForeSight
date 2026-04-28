@@ -394,10 +394,14 @@ class MotionPlanningHead(BaseModule):
             ]
         )
         if self.skip_perception_kv:
-            # Null the gnn/cross_gnn MHA modules so DDP doesn't see their
-            # params as unused; forward already skips None layers.
+            # `skip_perception_kv` accepts True/'both' (null both gnn+cross_gnn),
+            # 'det' (null only gnn — det K/V), or 'map' (null only cross_gnn —
+            # map K/V). Layers are set to None so DDP doesn't see their params
+            # as unused; forward already skips None layers.
+            skip_det = self.skip_perception_kv in (True, 'both', 'det')
+            skip_map = self.skip_perception_kv in (True, 'both', 'map')
             for i, op in enumerate(self.operation_order):
-                if op in ("gnn", "cross_gnn"):
+                if (op == "gnn" and skip_det) or (op == "cross_gnn" and skip_map):
                     self.layers[i] = None
         self.embed_dims = embed_dims
         self.adapter = _MotionPlanningAdapter(
