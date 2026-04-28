@@ -26,6 +26,10 @@ If missing, stop and tell the user to push locally and run `git pull` on the rem
 - Test: `bash ./tools/dist_test.sh <config> <ckpt> <gpus> --deterministic --eval bbox`
 - On Trillium, append `--tmpdir /tmp/.dist_test` to the test command (cwd is read-only, default `.dist_test` fails at result collection)
 
+## Time limit
+- Training: leave the script default (typically 11:59:00 / 12h).
+- Evaluation / inference (`--test`): pass `--time=2:59:00` to `sbatch` to override the script default. A 3h cap queues materially faster on shared SLURM clusters than the 12h default since it fits more backfill windows. A full trainval-val eval on 4 GPUs typically finishes in ~1h, so 3h is comfortable. Skip on Apollo (no SLURM).
+
 ## Submit
 
 ### DGX
