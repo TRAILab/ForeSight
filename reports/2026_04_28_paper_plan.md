@@ -8,7 +8,8 @@
 - [ ] Lock the minimal end-to-end Stage 2 architecture (no perception K/V; rescore handled by either small motion head or learned cost)
 - [ ] Run #1 DINO-init stage-1 on Trillium (4-GPU bs24) to test "stronger image backbone init" lever
 - [ ] Run #7 stage-1-nomap_dn_rotaug + stage-2-with-map on Killarney to resolve the backbone-shaping vs inference-path confound in prior nomap evidence
-- [ ] Run additive planner-aware aux experiments (drivable-area BEV, occupancy BEV) on top of det+map+aux2d
+- [x] Implement DenseSegHead + GenerateDenseSegMask (v1: 6 channels — 3 polylines + 3 agents); submitted aux2d_dseg on Trillium (472563)
+- [ ] v2: extend dense seg with drivable_area / walkway / stop_line (requires map_annos extension or BEV-derivation)
 - [ ] Run all-waypoint planning deformable variant (T2.5)
 - [ ] Run temporal image-feature stacking variant (T2.6)
 - [ ] Wait for Arm B s1 → s2 to finalize the joint-stage-1 negative result that anchors the "perception loss isn't the right stage-1 signal" claim
