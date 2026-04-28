@@ -117,6 +117,9 @@ class HierarchicalPlanningDecoder(object):
         use_rescore_soft=False,
         rescore_soft_w_col=10.0,
         rescore_soft_sigma=2.0,
+        use_rescore_learned=False,
+        rescore_learned_w_col=10.0,
+        rescore_learned_score_thresh=0.5,
     ):
         super(HierarchicalPlanningDecoder, self).__init__()
         self.ego_fut_ts = ego_fut_ts
@@ -125,6 +128,9 @@ class HierarchicalPlanningDecoder(object):
         self.use_rescore_soft = use_rescore_soft
         self.rescore_soft_w_col = rescore_soft_w_col
         self.rescore_soft_sigma = rescore_soft_sigma
+        self.use_rescore_learned = use_rescore_learned
+        self.rescore_learned_w_col = rescore_learned_w_col
+        self.rescore_learned_score_thresh = rescore_learned_score_thresh
     
     def decode(
         self, 
@@ -138,7 +144,9 @@ class HierarchicalPlanningDecoder(object):
         bs = classification.shape[0]
         classification = classification.reshape(bs, 3, self.ego_fut_mode)
         prediction = prediction.reshape(bs, 3, self.ego_fut_mode, self.ego_fut_ts, 2).cumsum(dim=-2)
-        classification, final_planning = self.select(det_output, motion_output, classification, prediction, data)
+        classification, final_planning = self.select(
+            det_output, motion_output, classification, prediction, data, planning_output
+        )
         anchor_queue = planning_output["anchor_queue"]
         anchor_queue = torch.stack(anchor_queue, dim=2)
         period = planning_output["period"]
@@ -163,13 +171,14 @@ class HierarchicalPlanningDecoder(object):
         plan_cls,
         plan_reg,
         data,
+        planning_output=None,
     ):
         det_classification = det_output["classification"][-1].sigmoid()
         det_anchors = det_output["prediction"][-1]
         det_confidence = det_classification.max(dim=-1).values
         motion_cls = motion_output["classification"][-1].sigmoid()
         motion_reg = motion_output["prediction"][-1]
-        
+
         # cmd select
         bs = motion_cls.shape[0]
         bs_indices = torch.arange(bs, device=motion_cls.device)
@@ -196,6 +205,13 @@ class HierarchicalPlanningDecoder(object):
                 motion_reg,
                 det_anchors,
                 det_confidence,
+            )
+        elif self.use_rescore_learned:
+            plan_cls = self.rescore_learned(
+                plan_cls,
+                planning_output,
+                det_confidence,
+                cmd,
             )
         plan_cls_full[bs_indices, cmd] = plan_cls
         mode_idx = plan_cls.argmax(dim=-1)
@@ -432,6 +448,56 @@ class HierarchicalPlanningDecoder(object):
         score_offset = -float(self.rescore_soft_w_col) * c_col
         plan_cls = plan_cls + score_offset
         return plan_cls
+
+
+    def rescore_learned(
+        self,
+        plan_cls,
+        planning_output,
+        det_confidence,
+        cmd,
+    ):
+        """Inference selector backed by a trained per-(anchor, mode) collision
+        classifier head (`conflict_logits`).
+
+        For each ego mode, aggregate sigmoid(conflict_logit) across confidence-
+        thresholded detection anchors via `max` (closest predicted-collision
+        agent). Apply `plan_cls -= w_col · max_agg` per cmd-indexed mode.
+
+        Requires `planning_output['conflict_logits']` to be populated by the
+        motion-planning head; falls back to a no-op if absent.
+        """
+        if planning_output is None:
+            return plan_cls
+        conflict_logits = planning_output.get("conflict_logits")
+        if not conflict_logits:
+            return plan_cls
+
+        logits = conflict_logits[-1]  # (bs, num_anchor, M_total = 3 * ego_fut_mode)
+        bs, num_anchor, M_total = logits.shape
+        M_per_cmd = self.ego_fut_mode
+        # Reshape to (bs, A, num_cmd, M_per_cmd) and select cmd-conditional slice.
+        logits = logits.reshape(bs, num_anchor, -1, M_per_cmd)
+        bs_indices = torch.arange(bs, device=logits.device)
+        logits_cmd = logits[bs_indices, :, cmd, :]  # (bs, A, M_per_cmd)
+
+        # Drop low-confidence anchors by setting their logits to a very negative
+        # value so sigmoid → 0 and max-aggregation skips them.
+        thr = float(self.rescore_learned_score_thresh)
+        det_mask = (det_confidence < thr)  # (bs, A)
+        if det_mask.any():
+            very_neg = logits_cmd.new_tensor(-1e6)
+            logits_cmd = torch.where(
+                det_mask.unsqueeze(-1).expand_as(logits_cmd),
+                very_neg.expand_as(logits_cmd),
+                logits_cmd,
+            )
+
+        # max over agents per (bs, M_per_cmd), then sigmoid → bounded penalty.
+        max_logit_per_mode = logits_cmd.max(dim=1).values  # (bs, M_per_cmd)
+        score = torch.sigmoid(max_logit_per_mode)
+        offset = -float(self.rescore_learned_w_col) * score
+        return plan_cls + offset
 
 
 def check_collision(boxes1, boxes2):

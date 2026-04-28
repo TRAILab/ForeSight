@@ -171,6 +171,7 @@ class MotionPlanningHead(BaseModule):
         plan_softcost_collision_sigma=2.0,
         plan_softcost_geometry='gaussian',
         plan_softcost_collision_tau=0.5,
+        conflict_label_source='predicted',
         detach_perception=False,
         relevance_selection=False,
         relevance_corridor=2.0,
@@ -216,6 +217,7 @@ class MotionPlanningHead(BaseModule):
         self.plan_softcost_collision_sigma = plan_softcost_collision_sigma
         self.plan_softcost_geometry = plan_softcost_geometry
         self.plan_softcost_collision_tau = plan_softcost_collision_tau
+        self.conflict_label_source = conflict_label_source
         self.detach_perception = detach_perception
         self.relevance_selection = relevance_selection
         self.relevance_corridor = float(relevance_corridor)
@@ -1594,13 +1596,23 @@ class MotionPlanningHead(BaseModule):
                     )
 
             if decoder_idx < len(conf_logits_list):
-                conf_loss = self._loss_planning_conflict(
+                conf_ret = self._loss_planning_conflict(
                     conf_logits_list[decoder_idx], reg, data, motion_loss_cache
                 )
-                if conf_loss is not None:
-                    output[f"planning_loss_conf_{decoder_idx}"] = (
-                        conf_loss * self.conflict_loss_weight
-                    )
+                if conf_ret is not None:
+                    conf_loss, conf_diag = conf_ret
+                    if conf_loss is not None:
+                        output[f"planning_loss_conf_{decoder_idx}"] = (
+                            conf_loss * self.conflict_loss_weight
+                        )
+                    # Log classifier diagnostics from the last decoder stage only,
+                    # to keep the log compact.
+                    if (
+                        conf_diag is not None
+                        and decoder_idx == len(conf_logits_list) - 1
+                    ):
+                        for k, v in conf_diag.items():
+                            output[f"plan_conf_{k}"] = v
 
             if self.plan_softcost_collision_enable:
                 softcost_col = self._loss_planning_softcost_collision(reg, data)
@@ -1672,20 +1684,41 @@ class MotionPlanningHead(BaseModule):
         conf_logits: (bs, num_anchor, M) raw logits.
         reg: (bs, 1, M, ego_fut_ts, 2) delta plan predictions.
         Hungarian indices from motion_loss_cache pair pred_idx <-> GT idx.
+
+        Label source is selected by `self.conflict_label_source`:
+          - 'predicted' (v1): label = min_t ||cumsum(reg) − agent_pos|| < thr.
+            Self-referential — head is supervised on its own current trajectory.
+          - 'anchor' (v2): label = min_t ||cumsum(plan_anchor) − agent_pos|| < thr.
+            Stationary, exogenous to the planner's current iteration.
+
+        Returns (loss, diag) where diag is a dict with `pos_logit_mean`,
+        `neg_logit_mean`, `acc_05`, `pos_rate` over the labelled (anchor, mode)
+        entries, or None if no valid samples in the batch.
         """
         if motion_loss_cache is None:
-            return None
+            return None, None
         gt_boxes = data.get('gt_bboxes_3d')
         gt_traj = data.get('gt_agent_fut_trajs')
         gt_traj_mask = data.get('gt_agent_fut_masks')
         if gt_boxes is None or gt_traj is None:
-            return None
+            return None, None
 
         bs, num_anchor, M = conf_logits.shape
         device = conf_logits.device
         T_ego = reg.shape[-2]
 
-        ego_pred_xy = reg.detach().squeeze(1).cumsum(dim=-2)  # (bs, M, T_ego, 2)
+        if self.conflict_label_source == 'anchor':
+            # plan_anchor: (num_cmd, ego_fut_mode, ego_fut_ts, 2) cumulative XY
+            # in lidar frame. Flatten cmd × mode → M (=18) and broadcast to bs.
+            anchor_xy = self.plan_anchor.detach()  # (num_cmd, M_per_cmd, T, 2)
+            anchor_xy = anchor_xy.reshape(M, anchor_xy.shape[-2], 2)
+            T_anchor = anchor_xy.shape[-2]
+            ego_xy_full = anchor_xy.unsqueeze(0).expand(bs, M, T_anchor, 2)
+            ego_xy_full = ego_xy_full.to(device=device, dtype=conf_logits.dtype)
+            T_ego_eff = min(T_anchor, T_ego)
+        else:
+            ego_xy_full = reg.detach().squeeze(1).cumsum(dim=-2)  # (bs, M, T_ego, 2)
+            T_ego_eff = T_ego
 
         target = conf_logits.new_zeros(bs, num_anchor, M)
         weight = conf_logits.new_zeros(bs, num_anchor, M)
@@ -1699,14 +1732,14 @@ class MotionPlanningHead(BaseModule):
             trajs_b = gt_traj[b].to(device)
             if trajs_b.shape[0] == 0:
                 continue
-            T = min(trajs_b.shape[1], T_ego)
+            T = min(trajs_b.shape[1], T_ego_eff)
             if T == 0:
                 continue
             agent_xy0 = boxes_b[target_idx, :2]  # (n_pos, 2)
             agent_traj = trajs_b[target_idx, :T]  # (n_pos, T, 2)
             agent_pos = agent_xy0.unsqueeze(1) + agent_traj.cumsum(dim=1)  # (n_pos, T, 2)
 
-            ego_pos = ego_pred_xy[b, :, :T, :]  # (M, T, 2)
+            ego_pos = ego_xy_full[b, :, :T, :]  # (M, T, 2)
 
             diff = agent_pos.unsqueeze(1) - ego_pos.unsqueeze(0)  # (n_pos, M, T, 2)
             d2 = (diff ** 2).sum(dim=-1)  # (n_pos, M, T)
@@ -1730,10 +1763,33 @@ class MotionPlanningHead(BaseModule):
 
         denom = weight.sum().clamp(min=1.0)
         pos_w = conf_logits.new_tensor([float(self.conflict_pos_weight)])
-        loss = F.binary_cross_entropy_with_logits(
+        loss_per = F.binary_cross_entropy_with_logits(
             conf_logits, target, reduction='none', pos_weight=pos_w
         )
-        return (loss * weight).sum() / denom
+        loss = (loss_per * weight).sum() / denom
+
+        # Diagnostics over labelled entries only.
+        with torch.no_grad():
+            mask = weight.bool()
+            if mask.any():
+                probs = torch.sigmoid(conf_logits[mask].float())
+                tgt = target[mask].float()
+                pos_n = tgt.sum().clamp(min=1.0)
+                neg_n = (1.0 - tgt).sum().clamp(min=1.0)
+                pos_logit_mean = (probs * tgt).sum() / pos_n
+                neg_logit_mean = (probs * (1.0 - tgt)).sum() / neg_n
+                pred_pos = (probs > 0.5).float()
+                acc_05 = (pred_pos == tgt).float().mean()
+                pos_rate = tgt.mean()
+                diag = {
+                    'pos_logit_mean': pos_logit_mean.detach(),
+                    'neg_logit_mean': neg_logit_mean.detach(),
+                    'acc_05': acc_05.detach(),
+                    'pos_rate': pos_rate.detach(),
+                }
+            else:
+                diag = None
+        return loss, diag
 
     def _loss_planning_softcost_collision(self, reg, data):
         """Soft collision cost on plan_reg as a training-loss term.

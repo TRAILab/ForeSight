@@ -4,12 +4,13 @@
 
 ## TODO
 
-- [x] Run cheap diagnostic: disable rescore on current best, eval — bounds inference-time headroom (Killarney 3296430, `ptaux2d_ppdeformmm_planifls_norescore`)
-- [ ] Implement soft collision loss as training-loss term — **highest expected impact deployment** (in progress: collision-only first cut on `planpredtrajdeformmm` baseline)
-- [ ] If first cut lands: extend cost to drivable / comfort / progress and λ sweep
-- [ ] If diagnostic shows headroom: extend rescore from hard binary → soft multi-cost selection
-- [ ] If both deployments help individually: train + select with the same cost (joint A+B) for compounding
-- [ ] Defer learned scorer / value head and iterative refinement until first analytic results land
+- [x] Run cheap diagnostic: disable rescore on current best, eval — bounds inference-time headroom (Killarney 3302063, `ptaux2d_ppdeformmm_planifls_norescore`: L2=0.5008, CR=0.106% vs 0.4988/0.063% with rescore → +0.043pp CR headroom)
+- [x] Implement soft collision loss as training-loss term — first cut NULL (Killarney 3296906, `planpredtrajdeformmm_softcostcol`: L2=0.5515, CR=0.050% vs 0.542/0.047% plain baseline avg)
+- [x] Exp 2 (inference selector, 3-point `w_col` sweep at σ=2m on Killarney ckpt synced to narval) — NULL: catastrophic L2 regression at every `w_col` (0.6667 / 0.7205 / 0.7492 vs 0.4988 baseline), CR never reaches hard rescore's 0.063%. Saturating-Gaussian-on-SDF kernel is "always on" and dominates plan_cls (Narval 59920744/45/46).
+- [x] Exp 1 retry (`softcostcol_v2`, training, geometry-aware SDF, λ=0.05, τ=0.5m) — NULL: L2=0.5481, CR=0.059% (Narval 59920383). Geometry + normalization fixes did not lift result out of v1's regime; both v1 and v2 mildly regress vs plain `planpredtrajdeformmm` baseline.
+- [ ] Joint A+B (Exp 3) — DROPPED; both legs failed independently.
+- [ ] **Next: learned scorer with stationary label** — a per-(mode) BCE-supervised collision-feasibility head where the label is computed against a fixed reference (plan-anchor template *or* GT ego trajectory), not against `cumsum(plan_reg)`. Decouples supervision from the planner's own current iteration, recovers sharpness via the binary label. Existing `planaux_conf` infrastructure can be reused for the head wiring; the change is in label construction (and using the head's logits at inference, not just as aux loss). See "Plan and Future Work" for the design sketch.
+- [ ] Defer iterative refinement at inference / hybrid analytic-prior + learned-residual until the learned scorer lands.
 
 ## Abstract
 
@@ -129,27 +130,63 @@ To implement (Exp 3 — joint):
 | Server | Config | Job ID | Status |
 | --- | --- | --- | --- |
 | Killarney | `ptaux2d_ppdeformmm_planifls_planinstfeat_laststage` (baseline, with `use_rescore=True`) | TBD | RECORDED — best |
-| TBD | `..._planinstfeat_laststage` re-eval with `use_rescore=False` | — | PLANNED — Exp 0 diagnostic |
-| TBD | `..._planinstfeat_laststage_softcost` (training loss) | — | PLANNED — Exp 1 |
-| TBD | `..._planinstfeat_laststage` with soft-cost rescore (no retrain) | — | CONDITIONAL — Exp 2 |
-| TBD | `..._planinstfeat_laststage_softcost` with soft-cost rescore (joint) | — | CONDITIONAL — Exp 3 |
+| Killarney | `ptaux2d_ppdeformmm_planifls_norescore` re-eval (Exp 0, attempt 1) | 3296430 | FAILED — config missing at job start (manual scp lost across git operations) |
+| Killarney | `ptaux2d_ppdeformmm_planifls_norescore` re-eval (Exp 0, attempt 2, 12h limit) | 3301041 | CANCELLED — superseded by 3302063 |
+| Killarney | `ptaux2d_ppdeformmm_planifls_norescore` re-eval (Exp 0, attempt 3, 3h limit) | 3302063 | COMPLETED — Exp 0 |
+| Killarney | `planpredtrajdeformmm_softcostcol` (training loss, collision-only) | 3296906 | COMPLETED — Exp 1 |
+| Narval | `planpredtrajdeformmm_softcostcol_v2` (Exp 1 retry, geometry-aware SDF) | 59920383 | COMPLETED — Exp 1 retry |
+| Narval | `ptaux2d_ppdeformmm_planifls_softrescore_w3_s2` (Exp 2a, attempt 1) | 59920405 | FAILED — ckpt path unreachable in container (used `/home/spapais/scratch/...` which is not bind-mounted; only `/scratch/spapais/ForeSight/work_dirs` is mapped to `/workspace/ForeSight/work_dirs`) |
+| Narval | `ptaux2d_ppdeformmm_planifls_softrescore_w10_s2` (Exp 2b, attempt 1) | 59920406 | FAILED — same ckpt path issue |
+| Narval | `ptaux2d_ppdeformmm_planifls_softrescore_w30_s2` (Exp 2c, attempt 1) | 59920407 | CANCELLED — caught early, would have failed for same reason |
+| Narval | `ptaux2d_ppdeformmm_planifls_softrescore_w3_s2` (Exp 2a, attempt 2) | 59920744 | COMPLETED — Exp 2a |
+| Narval | `ptaux2d_ppdeformmm_planifls_softrescore_w10_s2` (Exp 2b, attempt 2) | 59920745 | COMPLETED — Exp 2b |
+| Narval | `ptaux2d_ppdeformmm_planifls_softrescore_w30_s2` (Exp 2c, attempt 2) | 59920746 | COMPLETED — Exp 2c |
+| TBD | `..._planinstfeat_laststage_softcost` with soft-cost rescore (joint) | — | DEPRIORITIZED — Exp 1 v1 didn't land |
 
 | Config | L2 | obj_box_col | car_ade | ped_ade | car_epa | ped_epa | NDS | mAP | Notes |
 |--------|-----|-------------|---------|---------|---------|---------|-----|-----|-------|
-| `ptaux2d_ppdeformmm_planifls_planinstfeat_laststage` (current best, with rescore) | 0.522 | 0.047% | 0.633 | — | — | — | 0.524 | 0.415 | reference |
-| Same checkpoint, `use_rescore=False` | — | — | — | — | — | — | — | — | Exp 0 diagnostic |
-| `..._softcost` (training loss) | — | — | — | — | — | — | — | — | Exp 1 |
-| Best checkpoint + soft-cost rescore | — | — | — | — | — | — | — | — | Exp 2 |
-| `..._softcost` + soft-cost rescore | — | — | — | — | — | — | — | — | Exp 3 |
+| `ptaux2d_ppdeformmm_planifls_planinstfeat_laststage` (cross-server best, with rescore) | 0.522 | 0.047% | 0.633 | — | — | — | 0.524 | 0.415 | reference (DGX/Narval avg from `2026_04_02_plan_refine.md`) |
+| `ptaux2d_ppdeformmm_planifls` Killarney baseline (with rescore) | 0.4988 | 0.063% | — | — | — | — | — | — | same-server reference for Exp 0 (recorded in `0000_00_00_research_findings.md`) |
+| `planpredtrajdeformmm` (cross-server avg, plain baseline for Exp 1) | 0.542 | 0.047% | 0.626 | — | — | — | 0.526 | 0.414 | from `2026_04_02_plan_refine.md`; no Killarney run |
+| `ptaux2d_ppdeformmm_planifls_norescore` (same checkpoint, `use_rescore=False`) | **0.5008** | **0.106%** | 0.6231 | 0.7196 | 0.5068 | 0.4297 | 0.5453 | 0.4399 | Exp 0 — Killarney 3302063; mAP_normal=0.5633 |
+| `planpredtrajdeformmm_softcostcol` (training loss, collision-only) | **0.5515** | **0.050%** | 0.6271 | 0.7344 | 0.4935 | 0.4111 | 0.5257 | 0.4142 | Exp 1 v1 — Killarney 3296906; mAP_normal=0.5537 |
+| `planpredtrajdeformmm_softcostcol_v2` (training, SDF-corners, λ=0.05, τ=0.5m) | **0.5481** | **0.059%** | 0.6359 | 0.7326 | 0.4880 | 0.4133 | 0.5266 | 0.4176 | Exp 1 retry — Narval 59920383; mAP_normal=0.5566 |
+| `ptaux2d_ppdeformmm_planifls_softrescore_w3_s2` (Killarney ckpt, σ=2m) | **0.6667** | **0.067%** | — | — | — | — | — | — | Exp 2a — Narval 59920744; planning-only eval |
+| `ptaux2d_ppdeformmm_planifls_softrescore_w10_s2` (Killarney ckpt, σ=2m) | **0.7205** | **0.072%** | — | — | — | — | — | — | Exp 2b — Narval 59920745 |
+| `ptaux2d_ppdeformmm_planifls_softrescore_w30_s2` (Killarney ckpt, σ=2m) | **0.7492** | **0.079%** | — | — | — | — | — | — | Exp 2c — Narval 59920746 |
+| `..._softcost` + soft-cost rescore | — | — | — | — | — | — | — | — | Exp 3 (deprioritized) |
 
 ## Discussion
 
-Pending experiments. Key interpretation questions to answer:
+**Exp 0 (`norescore`, Killarney 3302063): rescore is doing real work; Exp 2 cleared.** Re-evaluating the Killarney `ptaux2d_ppdeformmm_planifls` checkpoint with `use_rescore=False` gave `L2=0.5008 / obj_box_col=0.106%`. Versus the same-server with-rescore baseline (`L2=0.4988 / obj_box_col=0.063%`), L2 is essentially unchanged (+0.002, noise) but CR jumps `+0.043pp` (~+68% relative). Detection metrics (`NDS=0.5453`, `mAP=0.4399`) match what the with-rescore checkpoint would produce — rescore touches the planning decoder selector only. By the plan's outcome rule (CR delta > 0.08% absolute reading: `0.063% → 0.106%` is well past that), the existing hard-binary primitive is suppressing real collisions, so a richer inference-time selector (Exp 2) has plausible additional headroom.
 
-- **Exp 0 diagnostic**: how much of the current 0.047% CR is from the existing hard-binary primitive vs. from the model's mode classification?
-- **Exp 1 (training loss)**: does the soft cost shape trajectory generation in a way `planaux_*` classification heads couldn't?
-- **Exp 2 (inference scoring)**: does cost-based selection beat hard-binary feasibility filtering, conditional on the existing primitive leaving headroom?
-- **Exp 3 (joint A+B)**: do the two deployments compound, or do they overlap (one captures most of the available signal)?
+**Exp 1 (`softcostcol`, Killarney 3296906): NULL / mild regression.** Adding a soft Gaussian collision cost on `plan_reg` as a training-loss term (λ=0.2, σ=2.0m, GT-derived agent positions, all 18 plan modes per decoder stage) gave `L2=0.5515 / obj_box_col=0.050%` from a `planpredtrajdeformmm` base. Reference plain `planpredtrajdeformmm` (cross-server avg from `2026_04_02_plan_refine.md`) is `L2=0.542 / 0.047%`. So softcost is L2 +0.010 (~+1.8% relative) and CR essentially flat. Detection unchanged (`NDS=0.5257`, `mAP=0.4142` — within noise of every other plan-head perturbation). The cost is NOT lifting feasibility geometry above what imitation already captures, and is mildly hurting L2 — most likely because the cost gradient pushes ego trajectories away from agents the human did not need to dodge, weakening imitation alignment.
+
+Caveat on Exp 1: cross-server comparison. We do not have a same-server Killarney baseline for plain `planpredtrajdeformmm`. The cross-server delta is small enough that single-seed noise could absorb it; but the lack of any positive movement on either L2 or CR is strong enough evidence to deprioritize the training-loss deployment.
+
+Joint reading: the inference-side scorer is doing real work, but adding the same cost as a training signal didn't help. This is consistent with the broader pattern in `0000_00_00_research_findings.md` — every architectural perturbation to the planner head has regressed planning. Inference-side scoring is the only direction in this report that's still "live" given current evidence.
+
+Open questions still pending:
+- **Exp 2 (inference scoring)**: does soft multi-cost selection improve on the hard-binary feasibility filter at the same checkpoint, given the 0.043pp headroom Exp 0 just demonstrated?
+- **Exp 3 (joint A+B)**: now unlikely to be informative since the training-side leg did not land independently.
+
+**Exp 1 retry (`softcostcol_v2`, Narval 59920383): NULL.** Geometry-aware retry with min-of-4-ego-corner SDF to agent oriented bbox, closest-agent-only per (mode, t), softplus(−min_sdf/τ=0.5m), λ_col=0.05, ego heading from atan2 trajectory tangent (matching `rescore.get_yaw`). Reached `L2=0.5481, obj_box_col=0.059%` from a `planpredtrajdeformmm` base; v1 was `L2=0.5515 / 0.050%`; plain `planpredtrajdeformmm` cross-server avg is `L2=0.542 / 0.047%`. So v2 vs v1 is L2 −0.003 (noise) traded for CR +0.009pp (noise). v2 vs plain is L2 +0.006 / CR +0.012pp — same regression direction as v1, smaller magnitude. Detection unchanged (`NDS=0.5266, mAP=0.4176, mAP_normal=0.5566`). Caveat: cross-server comparison vs plain (no narval `planpredtrajdeformmm` baseline). The geometry + normalization fixes did not lift the result out of v1's regime. Combined with the Exp 2 sweep, both training-time and inference-time deployments of an analytic collision cost have failed independently.
+
+**Exp 2 (inference selector sweep, Narval 59920744/45/46): catastrophic L2 regression.** Three-way sweep `w_col ∈ {3, 10, 30}` at `σ=2m` on the same Killarney `iter_11720.pth` ckpt that Exp 0 disabled rescore on. Results monotone in `w_col`:
+
+| | L2 | obj_box_col |
+|---|---|---|
+| hard rescore (existing) | 0.4988 | 0.063% |
+| no rescore (Exp 0) | 0.5008 | 0.106% |
+| soft `w_col=3`  (Exp 2a) | **0.6667** | 0.067% |
+| soft `w_col=10` (Exp 2b) | **0.7205** | 0.072% |
+| soft `w_col=30` (Exp 2c) | **0.7492** | 0.079% |
+
+L2 increases ~33–50% relative for every `w_col`; CR is between hard and norescore but never reaches hard's `0.063%`, even at large `w_col`. Detection irrelevant (rescore touches selector only).
+
+Diagnosis: the saturating Gaussian `exp(−clamp(min_sdf, 0)² / σ²)` is *always on* — every mode gets nonzero penalty proportional to closest-agent SDF, regardless of whether it actually collides. With σ=2m, sdf=2m still gives 0.37 penalty per timestep × 6 = 2.2 total, times `w_col` swamps the plan_cls logits (roughly [−3, +3] range). Selection collapses to "mode farthest from agents," which often deviates from the imitation target — humans routinely drive close to parked cars or follow lead vehicles. Hard rescore only fires on binary corner-in-box, so >95 % of modes are untouched and `plan_cls` drives selection — that's why hard works. The CR-versus-`w_col` U-shape (best at `w_col=3`) suggests the cost still helps a little when its weight is low enough not to dominate plan_cls; but the kernel never thresholds, so even very large `w_col` doesn't recover hard's CR (modes that *would* be hard-masked also see neighbouring-mode penalties, distorting the relative ordering).
+
+Joint reading after both legs: analytic collision costs in their tested forms (Gaussian on point distance, Gaussian-on-SDF, softplus-on-SDF) do not improve planning at either training or inference time. The cost shape itself is the binding constraint — neither tested kernel is sharp enough to mimic the binary corner-in-box semantic of the metric while remaining differentiable / continuous. The remaining live direction is the **learned scorer / value head** (deferred earlier in this report) with a *stationary* label decoupled from the planner's own predictions — sharpness comes from BCE supervision, not from kernel hand-design.
 
 ## Plan and Future Work
 
@@ -166,10 +203,34 @@ Deferred until at least one of Exp 1 / Exp 2 shows signal:
 - Iterative refinement at inference
 - Two-stage scoring (hard feasibility filter + soft ranking among feasible)
 
-If Exp 1 lands and Exp 2 doesn't: the contribution is "training-time scoring as supervision" — a clean direct-loss alternative to the failed `planaux_*` aux-head approach.
+**Update after Exp 0 + Exp 1 (2026-04-26):** Exp 0 cleared the headroom bar; Exp 1 first cut was null but the implementation has known fidelity issues. Run Exp 2 and a fixed Exp 1 retry **in parallel** rather than sequentially — they share no resources and disconfirm or confirm independent hypotheses.
 
-If Exp 2 lands and Exp 1 doesn't: the contribution is narrower — a richer inference-time selector that improves on the existing primitive without changing how the planner is trained.
+**Exp 2 (inference selector) — anchor to Exp 0's checkpoint.**
+- Base: `sparsedrive_r50_stage2_4gpu_bs24_ptaux2d_ppdeformmm_planifls.py` (the same checkpoint Exp 0 disabled rescore on; gives a clean three-way same-checkpoint comparison: hard rescore = 0.4988/0.063%, no rescore = 0.5008/0.106%, soft rescore = ?).
+- Implementation in `projects/mmdet3d_plugin/models/motion/decoder.py` `HierarchicalPlanningDecoder.rescore()`: replace `-9999` mask of colliding modes with a continuous score offset `−w_col · C_col(mode)`, where `C_col` is a soft Gaussian on the existing oriented-bbox-corner geometry (per-mode summed over agents/timesteps; min over agents per waypoint to avoid the dilution problem from Exp 1). Selection becomes argmax over `cls_logits + (−w_col · C_col)`. No retraining required.
+- σ ≈ 2m, w_col swept over a few values offline if needed; eval only on the trainval val set.
 
-If both land and compound: the full dual-deployment story (one cost function, two consumers, additive) is the contribution.
+**Exp 1 retry (training loss) — fix the implementation issues the first cut exposed.**
+- Base: same as first cut (`sparsedrive_r50_stage2_4gpu_bs24_planpredtrajdeformmm.py`).
+- Geometry: **min-of-4-ego-corners signed-distance** to each agent's oriented bbox. Build agent box from `gt_bboxes_3d` (`x, y, w, l, sin_yaw, cos_yaw`); rotate ego corner into agent's local frame; SDF = `sqrt(max(qx,0)² + max(qy,0)²) + min(max(qx,qy), 0)`. Per (mode, agent, t), take `min` over the 4 ego corners → matches the corner-in-box semantic of `obj_box_col`. Penalty per pair = `softplus(−min_corner_sdf / τ)`, τ ≈ 0.5 m. Single-point-SDF (ego center only) is a strictly weaker signal — discarded.
+- Ego heading at each waypoint comes from the trajectory tangent: `heading[t] = atan2(cumxy[t+1] − cumxy[t−1])` central difference, forward/backward diff at endpoints. Differentiable; reflects the planner's own predicted motion direction.
+- Ego footprint `(L_ego, W_ego)` matches the constants the existing `HierarchicalPlanningDecoder.rescore()` uses so the loss and the inference geometry agree exactly.
+- Aggregation: closest-agent-only per (mode, t) — `min_a softplus(−sdf/τ)` — then mean over `(M_total, T_ego)`. Drops the per-scene-agent-count dilution from the first cut.
+- Scope: keep all 18 modes for a first attempt (isolate "geometry + normalization fixes" from "scope change"); cmd-indexed-only is a follow-up if this is still flat.
+- λ_col=0.05 (down from 0.2) since the larger weight visibly hurt L2 last time.
 
-If neither lands: the binding constraint is not at the scoring layer; redirect to the unified architectures direction (`plan_unified`) and the closed-loop alignment direction (`plan_closedloop` to be created).
+If neither Exp 2 nor the fixed Exp 1 lands, redirect to the unified-architecture (`plan_unified`) and closed-loop alignment (`plan_closedloop` to be created) directions; the binding constraint isn't at the scoring layer.
+
+**Implementation + submission (2026-04-27).**
+
+Code (committed `966adee`):
+- `projects/mmdet3d_plugin/models/motion/decoder.py` — `HierarchicalPlanningDecoder` gains `use_rescore_soft / rescore_soft_w_col / rescore_soft_sigma`. New `rescore_soft()` method reuses the same ego/motion 7-d box construction as `rescore`, then takes `min` over (4 ego corners, agents, motion modes) per (ego_mode, t), saturating Gaussian `exp(-clamp(min_sdf, 0)² / σ²)`, sums over t, applies `−w_col · C_col` offset to `plan_cls`. Low-conf agents (`det_confidence < 0.5`) are pushed to SDF=1e6 to drop them from the min. The forward 0.5m offset is applied with correct `[..., 0]/[..., 1]` indexing; the long-standing `[0]/[1]` row-indexing oddity in the hard variant is left alone to preserve baseline behaviour.
+- `projects/mmdet3d_plugin/models/motion/motion_planning_head.py` — `_loss_planning_softcost_collision` dispatches to a new `_loss_planning_softcost_collision_sdf` when `plan_softcost_geometry='sdf_corners'`. The new path computes ego heading from the trajectory tangent (atan2 central diff with the same static-distance guard as `rescore.get_yaw`), applies a +0.5 m forward offset, builds 4 ego corners with the rescore footprint, computes SDF to each GT agent's oriented bbox, takes `min` over the 4 corners and then over agents (closest-agent-only) per (mode, t), and penalises with `softplus(−min_sdf / τ)` averaged over `(M=18, T=6)`.
+
+Sweep choice for Exp 2 (eval-only): a 3-point `w_col ∈ {3, 10, 30}` sweep at fixed `σ=2 m` on a single shared checkpoint. The soft selector behaviour scales with `w_col` — at very large values it converges to the hard rescore (CR ≤ 0.063 %), at very small values it converges to no rescore (CR → 0.106 %); the curve localises the operating point.
+
+Configs (4 new):
+- `..._planpredtrajdeformmm_softcostcol_v2.py` — Exp 1 retry train. `plan_softcost_geometry='sdf_corners'`, `plan_softcost_collision_weight=0.05`, `plan_softcost_collision_tau=0.5`, σ kept at 2 m for symmetry with the inference selector but unused on the SDF path.
+- `..._planifls_softrescore_w{3,10,30}_s2.py` — Exp 2 evals. Hard rescore off, soft rescore on, `rescore_soft_sigma=2.0`, `rescore_soft_w_col` swept. `eval_mode = {with_planning=True}` only — det/track/map/motion metric computation skipped (forward pass still runs since rescore_soft consumes `det_output` + `motion_output`). Saves ~10–20 min of post-processing per run.
+
+Workflow note: Exp 2 evals reuse the *Killarney* `iter_11720.pth` ckpt for a strict same-checkpoint comparison against Exp 0's `0.5008 / 0.106%` and the Killarney baseline's `0.4988 / 0.063%`. Ckpt scp'd Killarney → local → narval to `work_dirs/sparsedrive_r50_stage2_4gpu_bs24_ptaux2d_ppdeformmm_planifls_killarney/iter_11720.pth` so it does not clobber narval's separately-trained planifls ckpt at the canonical work_dir.
