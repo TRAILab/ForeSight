@@ -9,8 +9,10 @@
 - [x] Exp 2 (inference selector, 3-point `w_col` sweep at σ=2m on Killarney ckpt synced to narval) — NULL: catastrophic L2 regression at every `w_col` (0.6667 / 0.7205 / 0.7492 vs 0.4988 baseline), CR never reaches hard rescore's 0.063%. Saturating-Gaussian-on-SDF kernel is "always on" and dominates plan_cls (Narval 59920744/45/46).
 - [x] Exp 1 retry (`softcostcol_v2`, training, geometry-aware SDF, λ=0.05, τ=0.5m) — NULL: L2=0.5481, CR=0.059% (Narval 59920383). Geometry + normalization fixes did not lift result out of v1's regime; both v1 and v2 mildly regress vs plain `planpredtrajdeformmm` baseline.
 - [ ] Joint A+B (Exp 3) — DROPPED; both legs failed independently.
-- [ ] **Next: learned scorer with stationary label** — a per-(mode) BCE-supervised collision-feasibility head where the label is computed against a fixed reference (plan-anchor template *or* GT ego trajectory), not against `cumsum(plan_reg)`. Decouples supervision from the planner's own current iteration, recovers sharpness via the binary label. Existing `planaux_conf` infrastructure can be reused for the head wiring; the change is in label construction (and using the head's logits at inference, not just as aux loss). See "Plan and Future Work" for the design sketch.
-- [ ] Defer iterative refinement at inference / hybrid analytic-prior + learned-residual until the learned scorer lands.
+- [x] First swing at learned scorer (`planaux_conf_anchorlabel`, Trillium 472465) — **catastrophic regression** (L2=0.7692, CR=1.028%). Diagnosed in "Discussion" below: head trained well (acc=0.977) but inference selector swamped `plan_cls`, and the label was a 2m proximity proxy on plan-anchor trajectories rather than the actual collision metric.
+- [ ] **Cancel DGX 3659** — duplicate of Trillium 472465, no informational value from confirming a known-bad regression.
+- [ ] **Next: `planaux_conf_evalmatch` (Exp 4) — eval-aligned learned rescore.** Re-do the learned scorer with three structural fixes: (1) BCE label = exact replication of `planning_eval.py`'s `obj_box_col` per-(mode, anchor) computation against GT agent futures, (2) inference selector mirrors hard rescore (`-999` mask + all-collide fallback) instead of soft penalty, (3) head is trained decoupled from inference (no rescore active during training). See "Exp 4 design" below.
+- [ ] Defer iterative refinement at inference / hybrid analytic-prior + learned-residual until Exp 4 lands.
 
 ## Abstract
 
@@ -141,6 +143,8 @@ To implement (Exp 3 — joint):
 | Narval | `ptaux2d_ppdeformmm_planifls_softrescore_w3_s2` (Exp 2a, attempt 2) | 59920744 | COMPLETED — Exp 2a |
 | Narval | `ptaux2d_ppdeformmm_planifls_softrescore_w10_s2` (Exp 2b, attempt 2) | 59920745 | COMPLETED — Exp 2b |
 | Narval | `ptaux2d_ppdeformmm_planifls_softrescore_w30_s2` (Exp 2c, attempt 2) | 59920746 | COMPLETED — Exp 2c |
+| DGX | `ptaux2d_ppdeformmm_planifls_planaux_conf_anchorlabel` (learned scorer, anchor label, λ=0.05) | 3659 | SUBMITTED |
+| Trillium | `ptaux2d_ppdeformmm_planifls_planaux_conf_anchorlabel` (replicate of DGX 3659) | 472465 | COMPLETED — Exp learned-scorer |
 | TBD | `..._planinstfeat_laststage_softcost` with soft-cost rescore (joint) | — | DEPRIORITIZED — Exp 1 v1 didn't land |
 
 | Config | L2 | obj_box_col | car_ade | ped_ade | car_epa | ped_epa | NDS | mAP | Notes |
@@ -155,6 +159,7 @@ To implement (Exp 3 — joint):
 | `ptaux2d_ppdeformmm_planifls_softrescore_w10_s2` (Killarney ckpt, σ=2m) | **0.7205** | **0.072%** | — | — | — | — | — | — | Exp 2b — Narval 59920745 |
 | `ptaux2d_ppdeformmm_planifls_softrescore_w30_s2` (Killarney ckpt, σ=2m) | **0.7492** | **0.079%** | — | — | — | — | — | — | Exp 2c — Narval 59920746 |
 | `..._softcost` + soft-cost rescore | — | — | — | — | — | — | — | — | Exp 3 (deprioritized) |
+| `ptaux2d_ppdeformmm_planifls_planaux_conf_anchorlabel` (learned scorer, anchor label, λ=0.05) | **0.7692** | **1.028%** | 0.6003 | 0.7256 | 0.5169 | 0.4269 | 0.5433 | 0.4404 | Trillium 472465; mAP_normal=0.5607 — large planning regression (L2 +0.27, CR +0.98pp vs `_planifls_laststage` reference) |
 
 ## Discussion
 
@@ -187,6 +192,54 @@ L2 increases ~33–50% relative for every `w_col`; CR is between hard and noresc
 Diagnosis: the saturating Gaussian `exp(−clamp(min_sdf, 0)² / σ²)` is *always on* — every mode gets nonzero penalty proportional to closest-agent SDF, regardless of whether it actually collides. With σ=2m, sdf=2m still gives 0.37 penalty per timestep × 6 = 2.2 total, times `w_col` swamps the plan_cls logits (roughly [−3, +3] range). Selection collapses to "mode farthest from agents," which often deviates from the imitation target — humans routinely drive close to parked cars or follow lead vehicles. Hard rescore only fires on binary corner-in-box, so >95 % of modes are untouched and `plan_cls` drives selection — that's why hard works. The CR-versus-`w_col` U-shape (best at `w_col=3`) suggests the cost still helps a little when its weight is low enough not to dominate plan_cls; but the kernel never thresholds, so even very large `w_col` doesn't recover hard's CR (modes that *would* be hard-masked also see neighbouring-mode penalties, distorting the relative ordering).
 
 Joint reading after both legs: analytic collision costs in their tested forms (Gaussian on point distance, Gaussian-on-SDF, softplus-on-SDF) do not improve planning at either training or inference time. The cost shape itself is the binding constraint — neither tested kernel is sharp enough to mimic the binary corner-in-box semantic of the metric while remaining differentiable / continuous. The remaining live direction is the **learned scorer / value head** (deferred earlier in this report) with a *stationary* label decoupled from the planner's own predictions — sharpness comes from BCE supervision, not from kernel hand-design.
+
+**Learned scorer v1 (`planaux_conf_anchorlabel`, Trillium 472465): catastrophic regression.** First swing at the deferred learned-scorer direction. Auxiliary BCE head over plan modes with stationary label = "anchor-trajectory passes within 2m of GT agent's GT-future trajectory at any (t_a, t_e) pair", λ_planaux=0.05, used in inference selector with `w_col=10.0` additive penalty on `plan_cls`. Result: `L2=0.7692 / obj_box_col=1.028%` from a `ptaux2d_ppdeformmm_planifls` base — `+0.27 L2 / +0.98pp CR` versus the `_planinstfeat_laststage` reference (0.522 / 0.047%) and far worse than the same Killarney `ptaux2d_ppdeformmm_planifls` baseline with hard rescore (`0.4988 / 0.063%`). Detection metrics (`NDS=0.5433, mAP=0.4404`) are within noise of the perception-only baseline — the regression is entirely on the planner.
+
+**Diagnosis (from training-time diagnostics in the run log):** the head trained well — by end of training, `acc_05=0.977`, `pos_logit_mean=0.59`, `neg_logit_mean=0.035`, BCE loss converged 0.020 → 0.005. Supervision worked as designed. Failure is on two simultaneous defects:
+
+1. **Inference selector swamped `plan_cls`.** `rescore_learned()` (decoder.py:460–500) does `max` over high-confidence det anchors → `sigmoid` → `-w_col · score`. With `w_col=10`, trained positives produce `−5.9` per-mode penalty; `plan_cls` natural range is `[−3, +3]`. The penalty is 2× the signal it's supposed to bias, so selection collapses to "minimum max-over-agents conflict score along the *fixed anchor path*" — which throws away every mode-preference the planner learned. This is the same failure shape as Exp 2's soft analytic rescore (`L2=0.67–0.75`).
+2. **Label was a 2m point-proximity proxy on the *anchor* trajectory, not the eval's collision criterion on the *predicted* trajectory.** The label used `min_t1,t2 ||GT_agent_pos[t1] − plan_anchor_pos[t2]||² < 4m²` — non-time-aligned, point-to-point, computed against fixed k-means anchor centroids. The `_planinstfeat_laststage` architecture deliberately moves the prediction *away* from the anchor at the final stage, so the head learned about a function that's only loosely correlated with what gets evaluated. The actual eval (`planning_eval.py:13–33`) is **time-aligned, polygon-on-polygon, on the *predicted* ego trajectory**. Different primitive entirely.
+
+The `acc_05=0.977` was real but on the wrong target.
+
+### Exp 4 design (`planaux_conf_evalmatch`)
+
+Goal: replace heuristic `rescore` with a learned approximator of the **eval metric** itself. The learned scorer is the only inference-side direction left after analytic costs (Exp 2) and proxy-label learning (Exp v1) both failed; it's also the only architectural lever that can in principle exceed `rescore`'s ceiling, because the head sees richer features (image-attended `instance_feature[anchor]`, plan-attended `plan_query[mode]`) than the geometric check ever has access to.
+
+**Architecture.** Reuse the existing `plan_conflict_branch` (`motion_blocks.py:84–90`) — it's already pairwise: `MLP([agent_feature_j, plan_query_m]) → conflict logit per (anchor, mode)`. Output shape `(bs, num_anchor, M_total=18)` per decoder stage. **No architectural change needed**; the failure was purely on label semantics and inference selector.
+
+**Label = exact replication of `planning_eval.py`'s `obj_box_col` computation, restricted to the t=0-detected agent set.** New `conflict_label_source='evalmatch'` mode in `_loss_planning_conflict`:
+- Build predicted ego box per `(m, t)` with `H=4.084, W=1.85, h=1.56`, `0.5m` forward offset along `get_yaw(plan_reg.cumsum(-2))`. Mirrors `planning_eval.py:76–89` verbatim.
+- Build GT ego box per `t` from `gt_ego_fut_trajs.cumsum(-2)` with the same geometry (the eval's `gt_box_coll` is what gets subtracted from `box_coll`).
+- Build GT agent box per `(a, t)` for each Hungarian-matched detected anchor: `xy = gt_bboxes_3d[gt_idx, :2] + gt_agent_fut_trajs[gt_idx].cumsum(-2)[t]`, GT WLH from `gt_bboxes_3d`, `yaw_t` from trajectory tangent with `gt_bboxes_3d[gt_idx, YAW]` as start_yaw.
+- Polygon-polygon intersection per `(m, a, t)` via vectorized PyTorch SAT (Shapely is too slow for label-gen at training time; SAT is numerically equivalent for these convex rectangles).
+- Apply `gt_agent_fut_masks` to skip invisible-future timesteps.
+- Reduce: `label[m, a] = any_t(pred_coll[m, a, t] AND NOT gt_coll[a, t])` — the eval's `box_coll AND NOT gt_box_coll` rule (planning_eval.py:103) ports verbatim.
+- `pos_weight` calibrated from first 200 iters of training (likely 50–200 given expected `pos_rate ≪ 1%`).
+- Loss applied **per decoder stage**, using each stage's own `plan_reg` and `motion_reg` to avoid future-information leakage from final stage to early stages.
+
+**Caveat (documented but accepted for v1):** `fut_boxes[t]` in the eval includes agents that may not have been present at `t=0` (drove into the scene). The per-anchor label can only cover `t=0`-detected agents. This is the same blind spot `rescore` already has (it also only scores against `t=0`-detected anchors), so we don't lose anything *relative to the function we're replacing*. Worth measuring on the val set: compute `obj_box_col` using only `t=0`-keyed agents and compare to the eval's full number; if the gap is < 0.005pp, ignore. Otherwise add a scene-level head as Exp 5.
+
+**Inference selector (`rescore_learned_hard`, replaces `rescore_learned`).** Mirrors `rescore()` (decoder.py:221–309) byte-for-byte:
+- For each `(ego_mode, anchor)`: `p = sigmoid(conflict_logit)`.
+- Filter low-confidence anchors: `p[det_conf < 0.5] = 0` (matches `rescore`'s `score_thresh=0.5`).
+- Per ego mode: `col[m] = (p[:, :, m] > 0.5).any(dim=anchor)` — same `any(anchor)` reduction as `rescore`.
+- All-collide fallback: `col[col.all(dim=mode)] = False` — graceful degradation (decoder.py:305–306).
+- `plan_cls += col.float() * -999` — same hard mask, no soft swamping.
+
+**Training schedule.** `use_rescore=False, use_rescore_learned=False, use_rescore_learned_hard=False, with_conflict_head=True` during training. The head is supervised by BCE only; `plan_cls` trains as the project-best baseline does, with no rescore active. At eval-time, flip `use_rescore_learned_hard=True`. This decoupling is the third structural fix: in v1, the soft selector was active from iter 0 and `plan_cls` tried to compensate, compounding the regression.
+
+**Validation harness (must run before full 12h training).** Take an existing `ptaux2d_ppdeformmm_planifls` checkpoint; freeze everything except the conflict head; fine-tune for 1 epoch on the new label. Then on val:
+- **Head-vs-eval F1**: per-(mode, anchor) `(sigmoid > 0.5)` against the GT-derived label. Target ≥ 0.9.
+- **Selector-vs-rescore agreement**: how often `rescore_learned_hard()` picks the same mode as `rescore()`. Target ≥ 0.85 (allowed to disagree when head has better info).
+- **Selector chosen-mode collision rate per `obj_box_col` eval**: this is the headline. Compare to rescore's number on the same checkpoint. **If lower → head is using its information advantage and beating the heuristic.**
+
+**Expected outcomes:**
+- Parity (within 0.005 L2 / 0.005pp CR of the rescore baseline `0.4988 / 0.063%`): paper headline is "learned approximator of the collision eval is plug-compatible with the heuristic; opens upgrade path via richer features." Keep going.
+- **Beats** rescore baseline: paper headline is "we can replace the heuristic feasibility filter with a learned head that exceeds it on its own metric." This is the win condition.
+- Regresses by > 0.01 L2 or > 0.02pp CR: the per-anchor formulation is fundamentally limited. Investigate the post-`t=0` agent gap, fall back to the scene-level head (Exp 5).
+
+**Compute.** ~12h on Killarney (single 4×L40S node, full stage-2 training from `sparsedrive_stage1.pth` with `ptaux2d` pretrain). Validation harness ~2h on top of an existing checkpoint. Total: ≤ 14h compute commitment. Cancel DGX 3659 in parallel — it adds zero information.
 
 ## Plan and Future Work
 

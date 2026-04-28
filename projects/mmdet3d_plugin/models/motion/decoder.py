@@ -120,6 +120,9 @@ class HierarchicalPlanningDecoder(object):
         use_rescore_learned=False,
         rescore_learned_w_col=10.0,
         rescore_learned_score_thresh=0.5,
+        use_rescore_learned_hard=False,
+        rescore_learned_hard_score_thresh=0.5,
+        rescore_learned_hard_prob_thresh=0.5,
     ):
         super(HierarchicalPlanningDecoder, self).__init__()
         self.ego_fut_ts = ego_fut_ts
@@ -131,6 +134,9 @@ class HierarchicalPlanningDecoder(object):
         self.use_rescore_learned = use_rescore_learned
         self.rescore_learned_w_col = rescore_learned_w_col
         self.rescore_learned_score_thresh = rescore_learned_score_thresh
+        self.use_rescore_learned_hard = use_rescore_learned_hard
+        self.rescore_learned_hard_score_thresh = rescore_learned_hard_score_thresh
+        self.rescore_learned_hard_prob_thresh = rescore_learned_hard_prob_thresh
     
     def decode(
         self, 
@@ -208,6 +214,13 @@ class HierarchicalPlanningDecoder(object):
             )
         elif self.use_rescore_learned:
             plan_cls = self.rescore_learned(
+                plan_cls,
+                planning_output,
+                det_confidence,
+                cmd,
+            )
+        elif self.use_rescore_learned_hard:
+            plan_cls = self.rescore_learned_hard(
                 plan_cls,
                 planning_output,
                 det_confidence,
@@ -498,6 +511,64 @@ class HierarchicalPlanningDecoder(object):
         score = torch.sigmoid(max_logit_per_mode)
         offset = -float(self.rescore_learned_w_col) * score
         return plan_cls + offset
+
+    def rescore_learned_hard(
+        self,
+        plan_cls,
+        planning_output,
+        det_confidence,
+        cmd,
+    ):
+        """Hard binary rescore backed by the learned conflict head.
+
+        Mirrors ``rescore()`` (line 221) structurally so the learned head can
+        plug in as a drop-in replacement of the heuristic feasibility filter:
+          * filter low-confidence detection anchors (``det_conf < thr``)
+          * threshold sigmoid → per-(anchor, mode) binary collision flag
+          * ``any(anchor)`` reduction → per-mode binary
+          * all-collide fallback: if every cmd-conditional ego mode collides,
+            no rescore is applied (matches rescore line 305-306)
+          * apply ``-999`` mask to colliding modes (matches rescore line 307-308)
+
+        Falls back to a no-op if ``planning_output['conflict_logits']`` is absent.
+        """
+        if planning_output is None:
+            return plan_cls
+        conflict_logits = planning_output.get("conflict_logits")
+        if not conflict_logits:
+            return plan_cls
+
+        logits = conflict_logits[-1]  # (bs, num_anchor, M_total = 3 * ego_fut_mode)
+        bs, num_anchor, M_total = logits.shape
+        M_per_cmd = self.ego_fut_mode
+        # Reshape to (bs, A, num_cmd, M_per_cmd) and select cmd-conditional slice.
+        logits = logits.reshape(bs, num_anchor, -1, M_per_cmd)
+        bs_indices = torch.arange(bs, device=logits.device)
+        logits_cmd = logits[bs_indices, :, cmd, :]  # (bs, A, M_per_cmd)
+
+        # Per-(anchor, mode) collision probability.
+        prob = torch.sigmoid(logits_cmd)
+        # Drop low-confidence anchors: their collision probability is forced
+        # to 0 so they cannot trigger the per-mode `any(anchor)` reduction.
+        det_thr = float(self.rescore_learned_hard_score_thresh)
+        det_mask = (det_confidence < det_thr)  # (bs, A)
+        if det_mask.any():
+            zero = prob.new_tensor(0.0)
+            prob = torch.where(
+                det_mask.unsqueeze(-1).expand_as(prob),
+                zero.expand_as(prob),
+                prob,
+            )
+
+        # Per-mode binary collision: any anchor exceeds prob threshold.
+        prob_thr = float(self.rescore_learned_hard_prob_thresh)
+        col = (prob > prob_thr).any(dim=1)  # (bs, M_per_cmd)
+
+        # All-collide fallback: if every mode collides, no rescore is applied.
+        all_col = col.all(dim=-1)  # (bs,)
+        col[all_col] = False
+
+        return plan_cls + col.float() * -999.0
 
 
 def check_collision(boxes1, boxes2):

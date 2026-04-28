@@ -13,9 +13,9 @@ SLEEP_INTERVAL=${SLEEP_INTERVAL:-600}
 HOST="${1:-}"
 if [[ -z "$HOST" ]]; then
     case "$(hostname -f 2>/dev/null || hostname)" in
-        *narval*)             HOST=narval ;;
-        *trillium*)           HOST=trillium ;;
-        *killarney*|*kln*)    HOST=killarney ;;
+        *narval*)                          HOST=narval ;;
+        *trillium*|tri-*|trig*)            HOST=trillium ;;
+        *killarney*|*paice*|klogin*|kln*)  HOST=killarney ;;
         *) echo "Could not auto-detect host; pass narval|trillium|killarney" >&2; exit 1 ;;
     esac
 fi

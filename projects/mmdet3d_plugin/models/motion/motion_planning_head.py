@@ -31,6 +31,121 @@ from ..blocks import linear_relu_ln
 from ..instance_bank import topk
 
 
+def _eval_get_yaw(traj_abs, start_yaw_default=np.pi / 2, static_dis_thresh=0.5):
+    """Per-timestep yaw via trajectory tangent — verbatim port of
+    ``projects/mmdet3d_plugin/datasets/evaluation/planning/planning_eval.py``
+    ``get_yaw``. ``traj_abs`` is *absolute* XY (post-cumsum), shape ``(*, T, 2)``.
+    Returns ``(*, T)`` per-timestep yaw. Static fallback (total displacement
+    < ``static_dis_thresh``) returns a constant ``start_yaw_default`` over T.
+    """
+    T = traj_abs.shape[-2]
+    start = traj_abs[..., 0, :]
+    end = traj_abs[..., -1, :]
+    dist = torch.linalg.norm(end - start, dim=-1)  # (*,)
+    static_mask = dist < static_dis_thresh
+
+    zeros = traj_abs.new_zeros(traj_abs.shape[:-2] + (1, 2))
+    traj_cat = torch.cat([zeros, traj_abs], dim=-2)  # (*, T+1, 2)
+    yaw_padded = traj_abs.new_zeros(traj_abs.shape[:-2] + (T + 1,))
+    if T >= 2:
+        yaw_padded[..., 1:-1] = torch.atan2(
+            traj_cat[..., 2:, 1] - traj_cat[..., :-2, 1],
+            traj_cat[..., 2:, 0] - traj_cat[..., :-2, 0],
+        )
+    yaw_padded[..., -1] = torch.atan2(
+        traj_cat[..., -1, 1] - traj_cat[..., -2, 1],
+        traj_cat[..., -1, 0] - traj_cat[..., -2, 0],
+    )
+    yaw = yaw_padded[..., 1:]  # (*, T)
+    static_yaw = traj_abs.new_full(yaw.shape, float(start_yaw_default))
+    yaw = torch.where(static_mask.unsqueeze(-1).expand_as(yaw), static_yaw, yaw)
+    return yaw
+
+
+def _agent_get_yaw(traj_abs, start_yaw_t0, static_dis_thresh=0.5):
+    """Per-timestep yaw for agent boxes. Same tangent recipe as ``_eval_get_yaw``
+    but with a per-agent ``start_yaw_t0`` (from ``gt_bboxes_3d[..., YAW]``) used
+    for the static-fallback constant. Shapes broadcast: ``traj_abs`` is
+    ``(*, T, 2)`` and ``start_yaw_t0`` is ``(*,)``.
+    """
+    T = traj_abs.shape[-2]
+    start = traj_abs[..., 0, :]
+    end = traj_abs[..., -1, :]
+    dist = torch.linalg.norm(end - start, dim=-1)
+    static_mask = dist < static_dis_thresh
+
+    zeros = traj_abs.new_zeros(traj_abs.shape[:-2] + (1, 2))
+    traj_cat = torch.cat([zeros, traj_abs], dim=-2)
+    yaw_padded = traj_abs.new_zeros(traj_abs.shape[:-2] + (T + 1,))
+    if T >= 2:
+        yaw_padded[..., 1:-1] = torch.atan2(
+            traj_cat[..., 2:, 1] - traj_cat[..., :-2, 1],
+            traj_cat[..., 2:, 0] - traj_cat[..., :-2, 0],
+        )
+    yaw_padded[..., -1] = torch.atan2(
+        traj_cat[..., -1, 1] - traj_cat[..., -2, 1],
+        traj_cat[..., -1, 0] - traj_cat[..., -2, 0],
+    )
+    yaw = yaw_padded[..., 1:]
+    static_yaw = start_yaw_t0.unsqueeze(-1).expand_as(yaw).to(yaw.dtype)
+    yaw = torch.where(static_mask.unsqueeze(-1).expand_as(yaw), static_yaw, yaw)
+    return yaw
+
+
+def _make_rect_corners_topdown(cx, cy, box_W, box_L, yaw):
+    """Build the 4 base (z=z0) corners of a rotated 3D box in world XY.
+
+    Matches ``box3d_to_corners(box).[..., [0, 3, 7, 4], :2]``: indices
+    ``[0, 3, 7, 4]`` are the bottom-plane corners with local-frame
+    coordinates ``(±W/2, ±L/2)``, ordered (-W/2,-L/2), (-W/2,+L/2),
+    (+W/2,+L/2), (+W/2,-L/2). Rotation is around z by ``yaw``. ``box_W``
+    is the local-x extent (vehicle length, since the dataset assigns
+    length to the W slot), ``box_L`` is the local-y extent (width).
+    All inputs broadcast; outputs ``(*, 4, 2)``.
+    """
+    half_W = box_W * 0.5
+    half_L = box_L * 0.5
+    sign_w = cx.new_tensor([-1.0, -1.0, 1.0, 1.0])
+    sign_l = cx.new_tensor([-1.0, 1.0, 1.0, -1.0])
+    half_W_e = half_W.unsqueeze(-1)
+    half_L_e = half_L.unsqueeze(-1)
+    lx = sign_w * half_W_e  # (*, 4)
+    ly = sign_l * half_L_e
+    cos_y = torch.cos(yaw).unsqueeze(-1)
+    sin_y = torch.sin(yaw).unsqueeze(-1)
+    wx = lx * cos_y - ly * sin_y + cx.unsqueeze(-1)
+    wy = lx * sin_y + ly * cos_y + cy.unsqueeze(-1)
+    return torch.stack([wx, wy], dim=-1)  # (*, 4, 2)
+
+
+def _rect_intersects_sat(corners_a, corners_b):
+    """SAT (Separating Axis Theorem) intersection test for two convex
+    quadrilaterals expressed by their 4 corners in world XY.
+
+    Inputs are ``(*, 4, 2)`` with matching leading dims. Output is ``(*,)``
+    boolean. For convex polygons, two polygons intersect iff their
+    projections overlap on every separating axis candidate; for
+    rectangles only 2 unique axes per polygon are needed.
+    """
+    def edge_normals(corners):
+        # Two edges sharing corner 0: c1-c0 and c3-c0 give the rectangle's
+        # local axes; the perpendiculars are the SAT axes.
+        e1 = corners[..., 1, :] - corners[..., 0, :]  # (*, 2)
+        e2 = corners[..., 3, :] - corners[..., 0, :]
+        n1 = torch.stack([-e1[..., 1], e1[..., 0]], dim=-1)
+        n2 = torch.stack([-e2[..., 1], e2[..., 0]], dim=-1)
+        return torch.stack([n1, n2], dim=-2)  # (*, 2, 2)
+
+    axes = torch.cat([edge_normals(corners_a), edge_normals(corners_b)], dim=-2)  # (*, 4, 2)
+    # Project: corners (*, 4, 2) on axes (*, 4, 2) -> (*, 4_axes, 4_corners).
+    proj_a = (corners_a.unsqueeze(-3) * axes.unsqueeze(-2)).sum(dim=-1)
+    proj_b = (corners_b.unsqueeze(-3) * axes.unsqueeze(-2)).sum(dim=-1)
+    min_a, max_a = proj_a.min(dim=-1).values, proj_a.max(dim=-1).values
+    min_b, max_b = proj_b.min(dim=-1).values, proj_b.max(dim=-1).values
+    overlap = (max_a >= min_b) & (max_b >= min_a)  # (*, 4)
+    return overlap.all(dim=-1)
+
+
 def _detach_perception_output(output):
     """Stop-gradient over a head output dict (tensors + per-stage lists)."""
     if output is None:
@@ -240,6 +355,15 @@ class MotionPlanningHead(BaseModule):
         self.conflict_loss_weight = conflict_loss_weight
         self.conflict_threshold = conflict_threshold
         self.conflict_pos_weight = conflict_pos_weight
+        # Running stats for `conflict_pos_weight='auto'`. After
+        # `_auto_pw_calib_iters` iterations of accumulating (pos, total)
+        # over labelled entries, `_auto_pw_value` is frozen to the
+        # estimator (1 - p) / p; subsequent calls use the frozen value.
+        self._auto_pw_calib_iters = 200
+        self._auto_pw_pos = 0.0
+        self._auto_pw_total = 0.0
+        self._auto_pw_iter = 0
+        self._auto_pw_value = None
         self.roi_size = roi_size
 
         # =========== build modules ===========
@@ -1678,6 +1802,176 @@ class MotionPlanningHead(BaseModule):
         denom = weight.sum().clamp(min=1.0)
         return (loss * weight).sum() / denom
 
+    def _resolve_conflict_pos_weight(self, target, weight):
+        """Resolve pos_weight: 'auto' calibrates from running pos_rate over
+        ``self._auto_pw_calib_iters`` iterations, then freezes. Numeric
+        values pass through unchanged. Called every iter of training; only
+        accumulates while still calibrating.
+        """
+        cfg = self.conflict_pos_weight
+        if not isinstance(cfg, str):
+            return float(cfg)
+        if cfg != 'auto':
+            return float(cfg)
+        if self._auto_pw_value is not None:
+            return self._auto_pw_value
+        with torch.no_grad():
+            mask = weight.bool()
+            if mask.any():
+                t = target[mask].float()
+                self._auto_pw_pos += t.sum().item()
+                self._auto_pw_total += t.numel()
+            self._auto_pw_iter += 1
+            if self._auto_pw_iter >= self._auto_pw_calib_iters and self._auto_pw_total > 0:
+                p = max(self._auto_pw_pos / self._auto_pw_total, 1e-6)
+                self._auto_pw_value = (1.0 - p) / p
+                print(
+                    f"[planaux_conf auto pos_weight] frozen after "
+                    f"{self._auto_pw_iter} iters: pos_rate={p:.6f}, "
+                    f"pos_weight={self._auto_pw_value:.2f}",
+                    flush=True,
+                )
+                return self._auto_pw_value
+        # Default during calibration window: use a moderate prior so loss
+        # doesn't collapse to all-negative in early iters. 50.0 matches the
+        # mid of the expected (1 - p) / p range for p in [1%, 2%].
+        return 50.0
+
+    def _fill_evalmatch_labels(self, target, weight, reg, data, motion_loss_cache):
+        """Replicate ``planning_eval.py``'s ``obj_box_col`` per-(mode, anchor)
+        and write into ``target`` / ``weight`` for the BCE loss.
+
+        Geometry matches the eval verbatim:
+          - ego dims H=4.084, W=1.85, h=1.56 (planning_eval.py:61-62, 81)
+          - 0.5m forward offset along yaw (planning_eval.py:22-23)
+          - yaw via _eval_get_yaw (port of planning_eval.get_yaw)
+          - GT agent box: GT WLH from gt_bboxes_3d, t=0 yaw + tangent fallback
+          - polygon-on-polygon SAT intersection per (m, a, t)
+          - any(t) reduction; box_coll AND NOT gt_box_coll mask (line 103)
+
+        Restricted to the t=0-detected agent set (Hungarian-matched).
+        Post-t=0-appearing agents are inaccessible to per-anchor labels —
+        documented gap, same blind spot as rescore().
+        """
+        gt_boxes = data['gt_bboxes_3d']
+        gt_traj = data['gt_agent_fut_trajs']
+        gt_traj_mask = data.get('gt_agent_fut_masks')
+        gt_ego_traj = data.get('gt_ego_fut_trajs')
+        gt_ego_mask = data.get('gt_ego_fut_masks')
+        if gt_ego_traj is None:
+            return
+
+        bs, num_anchor, M = target.shape
+        device = target.device
+        T_ego = reg.shape[-2]
+
+        # Predicted ego absolute XY per (m, t) — detached to keep label
+        # generation off the gradient graph.
+        ego_xy_full = reg.detach().squeeze(1).cumsum(dim=-2)  # (bs, M, T_ego, 2)
+
+        # Eval ego dims (planning_eval.py:61-62, 81). Eval assigns H to W slot
+        # (length, 4.084) and W to L slot (width, 1.85); the local-x extent of
+        # the box is the vehicle length.
+        ego_box_W = ego_xy_full.new_tensor(4.084)
+        ego_box_L = ego_xy_full.new_tensor(1.85)
+        forward_offset = 0.5
+
+        for b in range(bs):
+            pred_idx, target_idx = motion_loss_cache['indices'][b]
+            if pred_idx is None or len(pred_idx) == 0:
+                continue
+            boxes_b = gt_boxes[b].to(device).float()
+            trajs_b = gt_traj[b].to(device).float()
+            if trajs_b.shape[0] == 0:
+                continue
+
+            ego_traj_b = gt_ego_traj[b].to(device).float()  # (T, 2) deltas
+            T_gt_ego = ego_traj_b.shape[0]
+            T = min(trajs_b.shape[1], T_ego, T_gt_ego)
+            if T == 0:
+                continue
+
+            # === Predicted ego boxes per (m, t) with eval geometry ===
+            pred_ego_xy = ego_xy_full[b, :, :T, :]  # (M, T, 2)
+            pred_ego_yaw = _eval_get_yaw(pred_ego_xy)  # (M, T)
+            # Apply 0.5m forward offset to box CENTER along yaw.
+            offset_x = forward_offset * torch.cos(pred_ego_yaw)
+            offset_y = forward_offset * torch.sin(pred_ego_yaw)
+            pred_cx = pred_ego_xy[..., 0] + offset_x  # (M, T)
+            pred_cy = pred_ego_xy[..., 1] + offset_y
+            pred_corners = _make_rect_corners_topdown(
+                pred_cx, pred_cy,
+                ego_box_W.expand_as(pred_cx),
+                ego_box_L.expand_as(pred_cx),
+                pred_ego_yaw,
+            )  # (M, T, 4, 2)
+
+            # === GT ego boxes per t (for the AND NOT gt_box_coll mask) ===
+            gt_ego_xy = ego_traj_b[:T].cumsum(dim=0)  # (T, 2)
+            gt_ego_yaw = _eval_get_yaw(gt_ego_xy)  # (T,)
+            gt_ego_cx = gt_ego_xy[..., 0] + forward_offset * torch.cos(gt_ego_yaw)
+            gt_ego_cy = gt_ego_xy[..., 1] + forward_offset * torch.sin(gt_ego_yaw)
+            gt_ego_corners = _make_rect_corners_topdown(
+                gt_ego_cx, gt_ego_cy,
+                ego_box_W.expand_as(gt_ego_cx),
+                ego_box_L.expand_as(gt_ego_cx),
+                gt_ego_yaw,
+            )  # (T, 4, 2)
+
+            # === GT agent boxes per (a, t) for matched anchors ===
+            n_pos = len(target_idx)
+            agent_xy0 = boxes_b[target_idx, :2]  # (n_pos, 2)
+            agent_traj = trajs_b[target_idx, :T]  # (n_pos, T, 2)
+            agent_pos = agent_xy0.unsqueeze(1) + agent_traj.cumsum(dim=1)  # (n_pos, T, 2)
+
+            agent_W = boxes_b[target_idx, W]  # (n_pos,) — index W=3
+            agent_L = boxes_b[target_idx, L]  # (n_pos,) — index L=4
+            agent_yaw_t0 = boxes_b[target_idx, YAW]  # (n_pos,) — decoded yaw
+            agent_yaw_t = _agent_get_yaw(
+                agent_pos, agent_yaw_t0
+            )  # (n_pos, T)
+
+            agent_corners = _make_rect_corners_topdown(
+                agent_pos[..., 0], agent_pos[..., 1],
+                agent_W.unsqueeze(-1).expand(-1, T),
+                agent_L.unsqueeze(-1).expand(-1, T),
+                agent_yaw_t,
+            )  # (n_pos, T, 4, 2)
+
+            # === Intersection per (m, a, t) and per (a, t) for GT ego ===
+            # Broadcast: pred_corners (M, 1, T, 4, 2) vs agent_corners (1, n_pos, T, 4, 2)
+            pred_b = pred_corners.unsqueeze(1).expand(M, n_pos, T, 4, 2)
+            agent_b = agent_corners.unsqueeze(0).expand(M, n_pos, T, 4, 2)
+            pred_coll = _rect_intersects_sat(pred_b, agent_b)  # (M, n_pos, T)
+
+            # GT ego vs each agent per t — broadcast (1, n_pos, T, 4, 2)
+            gt_ego_b = gt_ego_corners.unsqueeze(0).expand(n_pos, T, 4, 2)
+            gt_coll = _rect_intersects_sat(gt_ego_b, agent_corners)  # (n_pos, T)
+
+            # Validity mask: agent's GT future visible at t.
+            if gt_traj_mask is not None:
+                tmask = gt_traj_mask[b].to(device)[target_idx, :T].bool()  # (n_pos, T)
+                pred_coll = pred_coll & tmask.unsqueeze(0)
+                gt_coll = gt_coll & tmask
+            # Also gate by ego's GT future validity at t.
+            if gt_ego_mask is not None:
+                em = gt_ego_mask[b].to(device)[:T].bool()  # (T,)
+                pred_coll = pred_coll & em.view(1, 1, T)
+                gt_coll = gt_coll & em.view(1, T)
+
+            # box_coll AND NOT gt_box_coll (planning_eval.py:103).
+            attributable = pred_coll & ~gt_coll.unsqueeze(0)  # (M, n_pos, T)
+            label_per_pair = attributable.any(dim=-1)  # (M, n_pos) per (mode, agent)
+
+            # Write into target/weight at matched anchor indices, per mode.
+            if isinstance(pred_idx, torch.Tensor):
+                pidx = pred_idx.to(device).long()
+            else:
+                pidx = torch.as_tensor(pred_idx, device=device, dtype=torch.long)
+            # target shape (bs, num_anchor, M); transpose label to (n_pos, M)
+            target[b, pidx] = label_per_pair.t().to(target.dtype)
+            weight[b, pidx] = 1.0
+
     def _loss_planning_conflict(self, conf_logits, reg, data, motion_loss_cache):
         """Object-conflict BCE on (matched-anchor, plan-mode) pairs.
 
@@ -1690,6 +1984,13 @@ class MotionPlanningHead(BaseModule):
             Self-referential — head is supervised on its own current trajectory.
           - 'anchor' (v2): label = min_t ||cumsum(plan_anchor) − agent_pos|| < thr.
             Stationary, exogenous to the planner's current iteration.
+          - 'evalmatch' (v3): label is the per-(mode, anchor) collision flag
+            computed by replicating ``planning_eval.py`` geometry — predicted
+            ego rotated bbox (4.084 × 1.85, 0.5m forward offset, yaw via
+            trajectory tangent) vs GT agent rotated bbox (GT WLH, GT t=0 yaw +
+            tangent), polygon-on-polygon SAT intersection per timestep,
+            ``any(t)`` reduction, ``box_coll AND NOT gt_box_coll`` mask.
+            This is the exact eval criterion the head should learn to predict.
 
         Returns (loss, diag) where diag is a dict with `pos_logit_mean`,
         `neg_logit_mean`, `acc_05`, `pos_rate` over the labelled (anchor, mode)
@@ -1707,62 +2008,68 @@ class MotionPlanningHead(BaseModule):
         device = conf_logits.device
         T_ego = reg.shape[-2]
 
-        if self.conflict_label_source == 'anchor':
-            # plan_anchor: (num_cmd, ego_fut_mode, ego_fut_ts, 2) cumulative XY
-            # in lidar frame. Flatten cmd × mode → M (=18) and broadcast to bs.
-            anchor_xy = self.plan_anchor.detach()  # (num_cmd, M_per_cmd, T, 2)
-            anchor_xy = anchor_xy.reshape(M, anchor_xy.shape[-2], 2)
-            T_anchor = anchor_xy.shape[-2]
-            ego_xy_full = anchor_xy.unsqueeze(0).expand(bs, M, T_anchor, 2)
-            ego_xy_full = ego_xy_full.to(device=device, dtype=conf_logits.dtype)
-            T_ego_eff = min(T_anchor, T_ego)
-        else:
-            ego_xy_full = reg.detach().squeeze(1).cumsum(dim=-2)  # (bs, M, T_ego, 2)
-            T_ego_eff = T_ego
-
         target = conf_logits.new_zeros(bs, num_anchor, M)
         weight = conf_logits.new_zeros(bs, num_anchor, M)
 
-        thr2 = float(self.conflict_threshold) ** 2
-        for b in range(bs):
-            pred_idx, target_idx = motion_loss_cache['indices'][b]
-            if pred_idx is None or len(pred_idx) == 0:
-                continue
-            boxes_b = gt_boxes[b].to(device)
-            trajs_b = gt_traj[b].to(device)
-            if trajs_b.shape[0] == 0:
-                continue
-            T = min(trajs_b.shape[1], T_ego_eff)
-            if T == 0:
-                continue
-            agent_xy0 = boxes_b[target_idx, :2]  # (n_pos, 2)
-            agent_traj = trajs_b[target_idx, :T]  # (n_pos, T, 2)
-            agent_pos = agent_xy0.unsqueeze(1) + agent_traj.cumsum(dim=1)  # (n_pos, T, 2)
-
-            ego_pos = ego_xy_full[b, :, :T, :]  # (M, T, 2)
-
-            diff = agent_pos.unsqueeze(1) - ego_pos.unsqueeze(0)  # (n_pos, M, T, 2)
-            d2 = (diff ** 2).sum(dim=-1)  # (n_pos, M, T)
-
-            if gt_traj_mask is not None:
-                tmask = gt_traj_mask[b].to(device)[target_idx, :T].bool()
-                d2 = torch.where(
-                    tmask.unsqueeze(1).expand(-1, M, -1),
-                    d2,
-                    d2.new_full((), float('inf')),
-                )
-            min_d2 = d2.min(dim=-1).values  # (n_pos, M)
-            label = (min_d2 < thr2).to(target.dtype)  # (n_pos, M)
-
-            if isinstance(pred_idx, torch.Tensor):
-                pidx = pred_idx.to(device).long()
+        if self.conflict_label_source == 'evalmatch':
+            self._fill_evalmatch_labels(
+                target, weight, reg, data, motion_loss_cache
+            )
+        else:
+            if self.conflict_label_source == 'anchor':
+                # plan_anchor: (num_cmd, ego_fut_mode, ego_fut_ts, 2)
+                # cumulative XY in lidar frame. Flatten cmd × mode → M.
+                anchor_xy = self.plan_anchor.detach()
+                anchor_xy = anchor_xy.reshape(M, anchor_xy.shape[-2], 2)
+                T_anchor = anchor_xy.shape[-2]
+                ego_xy_full = anchor_xy.unsqueeze(0).expand(bs, M, T_anchor, 2)
+                ego_xy_full = ego_xy_full.to(device=device, dtype=conf_logits.dtype)
+                T_ego_eff = min(T_anchor, T_ego)
             else:
-                pidx = torch.as_tensor(pred_idx, device=device, dtype=torch.long)
-            target[b, pidx] = label
-            weight[b, pidx] = 1.0
+                ego_xy_full = reg.detach().squeeze(1).cumsum(dim=-2)
+                T_ego_eff = T_ego
+
+            thr2 = float(self.conflict_threshold) ** 2
+            for b in range(bs):
+                pred_idx, target_idx = motion_loss_cache['indices'][b]
+                if pred_idx is None or len(pred_idx) == 0:
+                    continue
+                boxes_b = gt_boxes[b].to(device)
+                trajs_b = gt_traj[b].to(device)
+                if trajs_b.shape[0] == 0:
+                    continue
+                T = min(trajs_b.shape[1], T_ego_eff)
+                if T == 0:
+                    continue
+                agent_xy0 = boxes_b[target_idx, :2]
+                agent_traj = trajs_b[target_idx, :T]
+                agent_pos = agent_xy0.unsqueeze(1) + agent_traj.cumsum(dim=1)
+
+                ego_pos = ego_xy_full[b, :, :T, :]
+
+                diff = agent_pos.unsqueeze(1) - ego_pos.unsqueeze(0)
+                d2 = (diff ** 2).sum(dim=-1)
+
+                if gt_traj_mask is not None:
+                    tmask = gt_traj_mask[b].to(device)[target_idx, :T].bool()
+                    d2 = torch.where(
+                        tmask.unsqueeze(1).expand(-1, M, -1),
+                        d2,
+                        d2.new_full((), float('inf')),
+                    )
+                min_d2 = d2.min(dim=-1).values
+                label = (min_d2 < thr2).to(target.dtype)
+
+                if isinstance(pred_idx, torch.Tensor):
+                    pidx = pred_idx.to(device).long()
+                else:
+                    pidx = torch.as_tensor(pred_idx, device=device, dtype=torch.long)
+                target[b, pidx] = label
+                weight[b, pidx] = 1.0
 
         denom = weight.sum().clamp(min=1.0)
-        pos_w = conf_logits.new_tensor([float(self.conflict_pos_weight)])
+        pos_w_val = self._resolve_conflict_pos_weight(target, weight)
+        pos_w = conf_logits.new_tensor([float(pos_w_val)])
         loss_per = F.binary_cross_entropy_with_logits(
             conf_logits, target, reduction='none', pos_weight=pos_w
         )
