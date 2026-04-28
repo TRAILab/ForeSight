@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Query SLURM accounting live and summarize queue times by cluster."""
+"""GPU queue table, plot, and probe submission for Narval/Trillium/Killarney.
+
+Default: refresh the unified cluster table + queue-time plot from live SLURM
+accounting, print a recommendation, then submit 4-GPU no-op probe jobs (fire
+and forget; results show up on the next run via sacct).
+  --report   only refresh the table/plot/recommendation (skip probe submission)
+  --probe    only submit probes (skip table/plot/recommendation)
+"""
 
 from __future__ import annotations
 
@@ -9,6 +16,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -26,15 +34,37 @@ SACCT_FIELDS = (
     "ReqTRES",
     "AllocTRES",
 )
-CLUSTER_QUERIES = (
-    ("narval", "narval", "source ~/.bashrc"),
-    ("trillium", "trillium_gpu", "source ~/.bashrc"),
-    (
-        "killarney",
-        "killarney",
-        "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7",
-    ),
-)
+CLUSTER_INFO: dict[str, dict[str, str]] = {
+    "narval": {
+        "host": "narval",
+        "init": "source ~/.bashrc",
+        "node_type": "4xA100-80GB",
+        "partition": "gpubase_bygpu_b1",
+        "account": "rrg-swasland_gpu",
+        "sbatch_opts": "--account=rrg-swasland --ntasks=1 --cpus-per-task=12 --mem=120gb --time=11:59:00 --gres=gpu:a100:4",
+        "probe_cwd": "",
+    },
+    "trillium": {
+        "host": "trillium_gpu",
+        "init": "source ~/.bashrc",
+        "node_type": "4xH100-80GB",
+        "partition": "compute",
+        "account": "rrg-swasland",
+        "sbatch_opts": "--account=rrg-swasland --ntasks=1 --cpus-per-task=24 --time=11:59:00 --gpus-per-node=4",
+        "probe_cwd": "",
+    },
+    "killarney": {
+        "host": "killarney",
+        "init": "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7",
+        "node_type": "4xL40S-48GB",
+        "partition": "gpubase_l40s_b1",
+        "account": "",
+        "sbatch_opts": "--account=aip-swasland --ntasks=1 --cpus-per-task=16 --mem=120gb --time=11:59:00 --gres=gpu:l40s:4",
+        "probe_cwd": "/scratch",
+    },
+}
+SNAPSHOT_TIMEOUT = 45
+SUBMIT_TIMEOUT = 15
 GPU_TRES_RE = re.compile(r"^gres/gpu(?::[^=,]+)?=(\d+)$")
 PERCENTILE_LOW = 25.0
 PERCENTILE_HIGH = 75.0
@@ -42,7 +72,7 @@ PERCENTILE_HIGH = 75.0
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Query SLURM accounting live and summarize queue times."
+        description="Refresh GPU queue table/plot and submit probe jobs.",
     )
     parser.add_argument(
         "-w",
@@ -98,6 +128,17 @@ def parse_args() -> argparse.Namespace:
         "--no-plot",
         action="store_true",
         help="skip plot generation",
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--report",
+        action="store_true",
+        help="only refresh table/plot/recommendation; skip probe submission",
+    )
+    mode.add_argument(
+        "--probe",
+        action="store_true",
+        help="only submit probes; skip table/plot/recommendation",
     )
     return parser.parse_args()
 
@@ -197,13 +238,13 @@ def query_cluster(
 def query_all_clusters(args: argparse.Namespace) -> tuple[list[dict[str, object]], list[str]]:
     rows: list[dict[str, object]] = []
     failures: list[str] = []
-    with ThreadPoolExecutor(max_workers=len(CLUSTER_QUERIES)) as executor:
+    with ThreadPoolExecutor(max_workers=len(CLUSTER_INFO)) as executor:
         futures = {
             executor.submit(
                 query_cluster,
                 cluster,
-                host,
-                init,
+                info["host"],
+                info["init"],
                 args.start_time,
                 args.end_time,
                 args.slurm_user,
@@ -211,7 +252,7 @@ def query_all_clusters(args: argparse.Namespace) -> tuple[list[dict[str, object]
                 args.gpus,
                 args.query_timeout,
             ): cluster
-            for cluster, host, init in CLUSTER_QUERIES
+            for cluster, info in CLUSTER_INFO.items()
         }
         for future in as_completed(futures):
             try:
@@ -220,6 +261,83 @@ def query_all_clusters(args: argparse.Namespace) -> tuple[list[dict[str, object]
                 failures.append(str(exc))
     rows.sort(key=lambda row: (str(row["cluster"]), int(row["submit_epoch"]), str(row["job_id"])))
     return rows, failures
+
+
+def query_snapshot(cluster: str, info: dict[str, str], timeout: int) -> dict[str, object]:
+    snapshot: dict[str, object] = {
+        "idle": None, "mix": None, "alloc": None, "down": None,
+        "pending": None, "levelfs": None,
+    }
+    partition = shlex.quote(info["partition"])
+    parts = [
+        info["init"],
+        f'sinfo -p {partition} --noheader -o "%n %t" 2>/dev/null | sort -k1,1 -u | '
+        'awk \'{st=$2; gsub(/[^a-z]/,"",st); '
+        'if(st=="idle") i++; else if(st=="mix") m++; else if(st=="alloc") a++; else d++} '
+        'END{printf "STATES %d %d %d %d\\n", i+0, m+0, a+0, d+0}\'',
+        f'echo "PENDING $(squeue -p {partition} -t PENDING --noheader 2>/dev/null | wc -l)"',
+    ]
+    if info["account"]:
+        account = shlex.quote(info["account"])
+        parts.append(
+            f'LFS=$(sshare -l -A {account} --parsable2 --noheader 2>/dev/null | '
+            'awk -F"|" \'$2==""{print $9; exit}\'); '
+            'echo "LEVELFS ${LFS:-N/A}"'
+        )
+    else:
+        parts.append('echo "LEVELFS N/A"')
+    remote_cmd = "; ".join(parts)
+    try:
+        result = subprocess.run(
+            ["ssh", info["host"], remote_cmd],
+            check=False, capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return snapshot
+    if result.returncode != 0:
+        return snapshot
+    for line in result.stdout.splitlines():
+        tokens = line.split()
+        if not tokens:
+            continue
+        if tokens[0] == "STATES" and len(tokens) == 5:
+            try:
+                snapshot["idle"] = int(tokens[1])
+                snapshot["mix"] = int(tokens[2])
+                snapshot["alloc"] = int(tokens[3])
+                snapshot["down"] = int(tokens[4])
+            except ValueError:
+                pass
+        elif tokens[0] == "PENDING" and len(tokens) == 2:
+            try:
+                snapshot["pending"] = int(tokens[1])
+            except ValueError:
+                pass
+        elif tokens[0] == "LEVELFS" and len(tokens) == 2 and tokens[1] != "N/A":
+            try:
+                snapshot["levelfs"] = float(tokens[1])
+            except ValueError:
+                pass
+    return snapshot
+
+
+def query_all_snapshots(timeout: int) -> dict[str, dict[str, object]]:
+    snapshots: dict[str, dict[str, object]] = {}
+    with ThreadPoolExecutor(max_workers=len(CLUSTER_INFO)) as executor:
+        futures = {
+            executor.submit(query_snapshot, cluster, info, timeout): cluster
+            for cluster, info in CLUSTER_INFO.items()
+        }
+        for future in as_completed(futures):
+            cluster = futures[future]
+            try:
+                snapshots[cluster] = future.result()
+            except Exception:
+                snapshots[cluster] = {
+                    "idle": None, "mix": None, "alloc": None, "down": None,
+                    "pending": None, "levelfs": None,
+                }
+    return snapshots
 
 
 def percentile(values: list[int], pct: float) -> float | None:
@@ -288,6 +406,86 @@ def build_daily_series(
             day += SECONDS_PER_DAY
         series[cluster] = cluster_series
     return series
+
+
+def _latest_per_cluster(
+    rows: list[dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    by_cluster: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        by_cluster[str(row["cluster"])].append(row)
+    latest: dict[str, dict[str, object]] = {}
+    for cluster, cluster_rows in by_cluster.items():
+        if cluster_rows:
+            latest[cluster] = max(cluster_rows, key=lambda r: int(r["submit_epoch"]))
+    return latest
+
+
+def print_unified_table(
+    rows: list[dict[str, object]],
+    snapshots: dict[str, dict[str, object]],
+) -> None:
+    now = int(datetime.now().timestamp())
+    latest = _latest_per_cluster(rows)
+    headers = [
+        "Cluster", "Node Type", "Nodes", "Pending",
+        "Jobs/Node", "LevelFS", "Queue Time", "Last Probed",
+    ]
+    widths = [11, 14, 7, 9, 11, 9, 14, 13]
+
+    def fmt_row(cells: list[str]) -> str:
+        return "".join(f"{cell:<{widths[i]}}" for i, cell in enumerate(cells))
+
+    print(fmt_row(headers))
+    for cluster in DEFAULT_CLUSTERS:
+        info = CLUSTER_INFO[cluster]
+        snap = snapshots.get(cluster, {})
+        idle, mix, alloc = snap.get("idle"), snap.get("mix"), snap.get("alloc")
+        if None not in (idle, mix, alloc):
+            active: int | None = int(idle) + int(mix) + int(alloc)  # type: ignore[arg-type]
+            active_str = str(active)
+        else:
+            active = None
+            active_str = "N/A"
+        pending = snap.get("pending")
+        pending_str = "N/A" if pending is None else str(pending)
+        if active is not None and active > 0 and pending is not None:
+            ratio_str = f"{int(pending) / active:.2f}"
+        else:
+            ratio_str = "N/A"
+        lfs = snap.get("levelfs")
+        if lfs is None:
+            lfs_str = "1.000" if cluster == "killarney" else "N/A"
+        else:
+            lfs_str = f"{float(lfs):.3f}"
+        if cluster in latest:
+            row = latest[cluster]
+            queue_str = format_seconds(int(row["queue_seconds"]))
+            hrs_ago = (now - int(row["submit_epoch"])) / 3600
+            probed_str = f"{hrs_ago:.1f}h ago"
+        else:
+            queue_str = "-"
+            probed_str = "-"
+        print(fmt_row([
+            cluster, info["node_type"], active_str, pending_str,
+            ratio_str, lfs_str, queue_str, probed_str,
+        ]))
+
+
+def print_recommendation(rows: list[dict[str, object]]) -> None:
+    latest = _latest_per_cluster(rows)
+    best: str | None = None
+    best_qs: int | None = None
+    for cluster in DEFAULT_CLUSTERS:
+        if cluster not in latest:
+            continue
+        qs = int(latest[cluster]["queue_seconds"])
+        if best_qs is None or qs < best_qs:
+            best, best_qs = cluster, qs
+    if best is None or best_qs is None:
+        print("Recommendation: no probe history yet.")
+    else:
+        print(f"Recommendation: submit to {best} (last queue {format_seconds(best_qs)})")
 
 
 def print_all(series: dict[str, list[dict[str, object]]], window_days: int) -> None:
@@ -495,22 +693,80 @@ def plot_series(
     plt.close(fig)
 
 
-def main() -> int:
-    args = parse_args()
-    if args.window <= 0:
-        raise SystemExit("--window must be positive")
+def submit_probe(cluster: str, info: dict[str, str], timeout: int) -> str:
+    parts = [info["init"]]
+    if info.get("probe_cwd"):
+        parts.append(f"cd {shlex.quote(info['probe_cwd'])}")
+    parts.append(
+        f"sbatch {info['sbatch_opts']} --job-name=queue_probe "
+        "--output=/dev/null --wrap='true'"
+    )
+    remote_cmd = " && ".join(parts)
+    result = subprocess.run(
+        ["ssh", info["host"], remote_cmd],
+        check=False, capture_output=True, text=True, timeout=timeout,
+    )
+    if result.returncode != 0:
+        msg = result.stderr.strip() or result.stdout.strip() or "<no output>"
+        raise RuntimeError(f"submit failed (exit={result.returncode}): {msg}")
+    for line in result.stdout.splitlines():
+        if line.startswith("Submitted batch job"):
+            return line.split()[-1]
+    raise RuntimeError(f"no job ID in output: {result.stdout.strip()}")
 
-    rows, failures = query_all_clusters(args)
+
+def submit_all_probes(timeout: int) -> int:
+    failures = 0
+    with ThreadPoolExecutor(max_workers=len(CLUSTER_INFO)) as pool:
+        futures = {
+            pool.submit(submit_probe, cluster, info, timeout): cluster
+            for cluster, info in CLUSTER_INFO.items()
+        }
+        for future in as_completed(futures):
+            cluster = futures[future]
+            try:
+                job_id = future.result()
+                print(f"[probe:{cluster}] submitted {job_id}")
+            except Exception as exc:
+                failures += 1
+                print(f"[probe:{cluster}] {exc}", file=sys.stderr)
+    print("Probes submitted; queue times will appear on the next run.")
+    return failures
+
+
+def run_report(args: argparse.Namespace) -> int:
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        rows_future = pool.submit(query_all_clusters, args)
+        snapshots_future = pool.submit(query_all_snapshots, SNAPSHOT_TIMEOUT)
+        rows, failures = rows_future.result()
+        snapshots = snapshots_future.result()
     for failure in failures:
         print(failure)
 
     series = build_daily_series(rows, args.window)
+    print_unified_table(rows, snapshots)
+    print_recommendation(rows)
     if args.all:
         print_all(series, args.window)
     if not args.no_plot:
         plot_series(series, rows, args.plot, args.window, args.time_limit, args.gpus)
         print(f"Plot written to {args.plot}")
     return 1 if failures else 0
+
+
+def main() -> int:
+    args = parse_args()
+    if args.window <= 0:
+        raise SystemExit("--window must be positive")
+
+    if args.probe:
+        return 1 if submit_all_probes(SUBMIT_TIMEOUT) else 0
+
+    rc = run_report(args)
+    if not args.report:
+        print()
+        submit_all_probes(SUBMIT_TIMEOUT)
+    return rc
 
 
 if __name__ == "__main__":
