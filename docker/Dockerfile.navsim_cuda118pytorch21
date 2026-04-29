@@ -1,3 +1,6 @@
+# Build with --network=host so apt-get/pip can resolve DNS:
+#   docker build --network=host -f docker/Dockerfile.navsim_cuda118pytorch21 \
+#       -t foresight_navsim:cuda118pytorch21 .
 FROM pytorch/pytorch:2.1.2-cuda11.8-cudnn8-devel
 
 SHELL ["/bin/bash", "-lc"]
@@ -43,7 +46,8 @@ COPY navsim/ navsim/
 # ------------------------------------------------------------------
 # 1. ForeSight stack (mmcv 1.7.2 + flash-attn 2.3.2 on torch 2.1.2)
 # ------------------------------------------------------------------
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+RUN pip install --no-cache-dir --upgrade pip wheel \
+    && pip install --no-cache-dir 'setuptools==65.5.1' \
     && pip install --no-cache-dir \
         torch==2.1.2 \
         torchvision==0.16.2 \

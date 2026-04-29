@@ -147,9 +147,61 @@ Files under `navsim/navsim/agents/sparsedrive/`:
 
 | Server | Config | Job ID | Status |
 | --- | --- | --- | --- |
-| local | smoke test (env build) | n/a | PENDING |
+| local | smoke test (env build + 5 import/build checks) | n/a | COMPLETED |
 | killarney | sparsedrive navmini smoke | n/a | PENDING |
 | killarney | sparsedrive navtrain | n/a | PENDING |
+
+### Smoke test (2026-04-29, local, no GPU needed)
+
+`docker run ... foresight_navsim:cuda118pytorch21 python scripts/navsim_smoke_test.py`
+
+```
+[OK] import navsim base
+[OK] import sparsedrive agent
+[OK] import foresight plugin (registers mmcv heads)
+[OK] build sparsedrive head from navsim variant config (model class: SparseDrive)
+[OK] feature builder on synthetic AgentInput
+       img shape: (6, 3, 256, 704)
+       projection_mat shape: (6, 4, 4)
+       ego_status shape: (8,)
+All 5 checks passed.
+```
+
+What this proves:
+- The new conda env (python 3.9 + torch 2.1.2 + mmcv 1.7.2 + flash-attn 2.3.2 +
+  nuplan-devkit + hydra + lightning) coexists in one image without import-time
+  conflicts.
+- `SparseDriveAgent`'s wiring (`sys.path` boost, plugin import, mmcv config →
+  `build_detector`) works end-to-end with the navsim-variant config
+  (`ego_fut_ts=8`, `num_driving_cmds=4`).
+- The 8→6 camera reduction in `SparseDriveFeatureBuilder` produces tensors with
+  shapes the head expects.
+
+What this does NOT prove yet:
+- Forward pass through SparseDrive on real navsim images (no GPU on local).
+- That `SparseDriveAgent.forward` reads the right key out of the head's output
+  dict — TODO marker still live in the agent.
+- Anything PDM-Score related — needs metric cache + nuplan maps.
+
+### Build issues encountered + fixes
+
+1. `apt-get` failed inside `docker build` due to docker-default DNS being
+   unreachable from the host. Fixed by passing `--network=host` to the build
+   command (now noted in the Dockerfile header).
+2. `mmcv 1.7.2` source build crashed with
+   `ModuleNotFoundError: No module named 'pkg_resources'` because
+   `pip install --upgrade setuptools` pulled setuptools 80, where
+   `pkg_resources` is no longer top-level importable from a setup.py. Fixed by
+   pinning `setuptools==65.5.1` (also navsim's own pin).
+3. `deformable_aggregation_ext.cpython-39-*.so` left over on the host from a
+   prior python-3.9 build had stale torch symbols, shadowed the in-image fresh
+   build via the bind-mount. Fixed by rebuilding inside the new container; the
+   3.8 .so on the host is left untouched so the original
+   `Dockerfile.cuda118pytorch21` image keeps working.
+4. NavSim variant config pointed at navsim-specific k-means anchors that don't
+   exist yet. Added `tools/make_navsim_kmeans_placeholder.py` to write random
+   placeholders with the correct shapes ((10, 6, 16, 2) motion, (4, 6, 8, 2)
+   plan); real anchors must be regenerated from navtrain after data lands.
 
 | Model | PDMS | NC | DAC | EP | TTC | Comf. | DDC | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |

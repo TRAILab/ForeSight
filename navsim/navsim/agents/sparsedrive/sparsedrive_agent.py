@@ -53,9 +53,17 @@ class SparseDriveAgent(AbstractAgent):
     # ------------------------------------------------------------------ build
     def _build_model_from_foresight_config(self) -> nn.Module:
         """Construct the SparseDrive nn.Module via mmcv's registry."""
+        import os
+        import sys
+
         from mmcv import Config
-        from mmcv.utils import Registry, build_from_cfg
         from mmdet.models import build_detector  # type: ignore
+
+        # Hydra cd's into its output dir at training time, so the foresight root
+        # is no longer in cwd. Add it explicitly so the plugin import resolves.
+        foresight_root = os.environ.get("FORESIGHT_ROOT", "/workspace/ForeSight")
+        if foresight_root not in sys.path:
+            sys.path.insert(0, foresight_root)
 
         # Importing the plugin registers SparseDriveHead, MotionPlanningHead, etc.
         import projects.mmdet3d_plugin  # noqa: F401
