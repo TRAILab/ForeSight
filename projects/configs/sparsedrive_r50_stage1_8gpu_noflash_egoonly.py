@@ -104,7 +104,11 @@ model = dict(
         frozen_stages=-1,
         norm_eval=False,
         style="pytorch",
-        with_cp=True,
+        # Gradient checkpointing reuses params during backward, which clashes
+        # with find_unused_parameters=True (DDP marks params ready twice).
+        # Disable for this config; ego-only forward is small enough that the
+        # extra activation memory is fine on Apollo's GPUs.
+        with_cp=False,
         out_indices=(0, 1, 2, 3),
         norm_cfg=dict(type="BN", requires_grad=True),
         pretrained="ckpt/resnet50-19c8e357.pth",
