@@ -123,6 +123,8 @@ class HierarchicalPlanningDecoder(object):
         use_rescore_learned_hard=False,
         rescore_learned_hard_score_thresh=0.5,
         rescore_learned_hard_prob_thresh=0.5,
+        rescore_learned_hard_aggregation='any',
+        rescore_learned_hard_topk_k=2,
         rescore_confidence_source='det',
         rescore_score_thresh=0.5,
     ):
@@ -139,6 +141,20 @@ class HierarchicalPlanningDecoder(object):
         self.use_rescore_learned_hard = use_rescore_learned_hard
         self.rescore_learned_hard_score_thresh = rescore_learned_hard_score_thresh
         self.rescore_learned_hard_prob_thresh = rescore_learned_hard_prob_thresh
+        # `rescore_learned_hard_aggregation`: how per-(anchor, mode) collision
+        # probabilities collapse to per-mode binary flags.
+        #   'any'         : (prob > thr).any(anchor)         — original behavior
+        #   'topk'        : (prob > thr).sum(anchor) >= k    — robust to single-anchor FPs
+        #   'detweighted' : (det_conf * prob > thr).any(...) — soft det-conf weighting,
+        #                   replaces hard det_conf cutoff entirely.
+        valid_agg = {'any', 'topk', 'detweighted'}
+        if rescore_learned_hard_aggregation not in valid_agg:
+            raise ValueError(
+                f"rescore_learned_hard_aggregation must be in {valid_agg}, "
+                f"got {rescore_learned_hard_aggregation!r}"
+            )
+        self.rescore_learned_hard_aggregation = rescore_learned_hard_aggregation
+        self.rescore_learned_hard_topk_k = int(rescore_learned_hard_topk_k)
         # `rescore_confidence_source`: which per-agent score gates the
         # rescore.filter_mask. 'det' (default) uses det_confidence (max class
         # prob from Sparse4DHead). 'motion' uses motion top-mode probability
@@ -567,21 +583,35 @@ class HierarchicalPlanningDecoder(object):
 
         # Per-(anchor, mode) collision probability.
         prob = torch.sigmoid(logits_cmd)
-        # Drop low-confidence anchors: their collision probability is forced
-        # to 0 so they cannot trigger the per-mode `any(anchor)` reduction.
-        det_thr = float(self.rescore_learned_hard_score_thresh)
-        det_mask = (det_confidence < det_thr)  # (bs, A)
-        if det_mask.any():
-            zero = prob.new_tensor(0.0)
-            prob = torch.where(
-                det_mask.unsqueeze(-1).expand_as(prob),
-                zero.expand_as(prob),
-                prob,
-            )
-
-        # Per-mode binary collision: any anchor exceeds prob threshold.
         prob_thr = float(self.rescore_learned_hard_prob_thresh)
-        col = (prob > prob_thr).any(dim=1)  # (bs, M_per_cmd)
+        det_thr = float(self.rescore_learned_hard_score_thresh)
+        agg = self.rescore_learned_hard_aggregation
+
+        if agg == 'detweighted':
+            # Soft det-confidence weighting on the prob; no hard det-conf gate.
+            # `det_confidence` is in [0, 1]; multiplying preserves [0, 1] range.
+            prob = prob * det_confidence.unsqueeze(-1)
+            col = (prob > prob_thr).any(dim=1)  # (bs, M_per_cmd)
+        else:
+            # Drop low-confidence anchors: their collision probability is forced
+            # to 0 so they cannot trigger the per-mode reduction.
+            det_mask = (det_confidence < det_thr)  # (bs, A)
+            if det_mask.any():
+                zero = prob.new_tensor(0.0)
+                prob = torch.where(
+                    det_mask.unsqueeze(-1).expand_as(prob),
+                    zero.expand_as(prob),
+                    prob,
+                )
+            if agg == 'any':
+                # Per-mode binary collision: any anchor exceeds prob threshold.
+                col = (prob > prob_thr).any(dim=1)  # (bs, M_per_cmd)
+            else:  # 'topk'
+                # Require ≥ k anchors above threshold per mode. Robust to
+                # isolated single-anchor false positives.
+                k = max(1, self.rescore_learned_hard_topk_k)
+                count = (prob > prob_thr).sum(dim=1)  # (bs, M_per_cmd)
+                col = count >= k
 
         # All-collide fallback: if every mode collides, no rescore is applied.
         all_col = col.all(dim=-1)  # (bs,)

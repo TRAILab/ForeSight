@@ -287,6 +287,7 @@ class MotionPlanningHead(BaseModule):
         plan_softcost_geometry='gaussian',
         plan_softcost_collision_tau=0.5,
         conflict_label_source='predicted',
+        conflict_smooth_max_tau=5.0,
         detach_perception=False,
         relevance_selection=False,
         relevance_corridor=2.0,
@@ -334,6 +335,7 @@ class MotionPlanningHead(BaseModule):
         self.plan_softcost_geometry = plan_softcost_geometry
         self.plan_softcost_collision_tau = plan_softcost_collision_tau
         self.conflict_label_source = conflict_label_source
+        self.conflict_smooth_max_tau = float(conflict_smooth_max_tau)
         self.detach_perception = detach_perception
         self.relevance_selection = relevance_selection
         self.relevance_corridor = float(relevance_corridor)
@@ -1594,9 +1596,8 @@ class MotionPlanningHead(BaseModule):
             # Motion buffers are empty (num_anchor=0). Skip the sampler (which
             # would index into the empty pred buffer with detection's matched
             # indices and crash) but emit a zero-valued keepalive loss that
-            # still references each motion-only branch output, so motion params
-            # show up as "ready" in DDP without find_unused_parameters=True
-            # (lets us keep with_cp=True).
+            # still references the motion-only branch outputs, so motion params
+            # show up as "ready" in DDP without find_unused_parameters=True.
             keepalive = reg_preds[0].new_zeros(())
             for cls, reg in zip(cls_scores, reg_preds):
                 keepalive = keepalive + cls.sum() * 0.0 + reg.sum() * 0.0
@@ -2040,6 +2041,14 @@ class MotionPlanningHead(BaseModule):
             tangent), polygon-on-polygon SAT intersection per timestep,
             ``any(t)`` reduction, ``box_coll AND NOT gt_box_coll`` mask.
             This is the exact eval criterion the head should learn to predict.
+          - 'evalmatch_mode' (v4): same evalmatch label generation, then
+            aggregated to per-mode via ``any(matched_anchor)``. The training
+            objective matches the inference-time selector
+            (``rescore_learned_hard``'s ``any(anchor)`` reduction): BCE is
+            applied on a smooth-max-over-matched-anchors of the head logits
+            against the per-mode label. Fixes train/eval aggregation mismatch
+            that v3 had — v3 supervised per-(anchor, mode) but eval reduces
+            with ``any(anchor)``, causing per-anchor FPs to cascade.
 
         Returns (loss, diag) where diag is a dict with `pos_logit_mean`,
         `neg_logit_mean`, `acc_05`, `pos_rate` over the labelled (anchor, mode)
@@ -2060,7 +2069,7 @@ class MotionPlanningHead(BaseModule):
         target = conf_logits.new_zeros(bs, num_anchor, M)
         weight = conf_logits.new_zeros(bs, num_anchor, M)
 
-        if self.conflict_label_source == 'evalmatch':
+        if self.conflict_label_source in ('evalmatch', 'evalmatch_mode'):
             self._fill_evalmatch_labels(
                 target, weight, reg, data, motion_loss_cache
             )
@@ -2115,6 +2124,29 @@ class MotionPlanningHead(BaseModule):
                     pidx = torch.as_tensor(pred_idx, device=device, dtype=torch.long)
                 target[b, pidx] = label
                 weight[b, pidx] = 1.0
+
+        # `evalmatch_mode`: collapse per-(anchor, mode) tensors to per-mode by
+        # any(matched_anchor) on the label and smooth-max(matched_anchor) on
+        # the logit. Done by substituting `conf_logits`, `target`, `weight`
+        # before the shared BCE+diag block below so diagnostics report
+        # per-mode classifier quality instead of per-(anchor, mode).
+        if self.conflict_label_source == 'evalmatch_mode':
+            matched_anchor_mask = weight.any(dim=-1)  # (bs, A) — anchor matched
+            anchor_mask_expanded = matched_anchor_mask.unsqueeze(-1)  # (bs, A, 1)
+            # Per-mode label: any matched anchor labelled positive.
+            target_per_mode = (target * weight).max(dim=1).values  # (bs, M)
+            # Per-mode weight: 1 if at least one matched anchor exists this batch item.
+            wb = matched_anchor_mask.any(dim=1).float()  # (bs,)
+            weight_per_mode = wb.unsqueeze(-1).expand(bs, M).contiguous()
+            # Smooth-max logit over matched anchors only.
+            tau = float(self.conflict_smooth_max_tau)
+            masked = conf_logits.masked_fill(~anchor_mask_expanded, -1e9)
+            # (1/τ)·logsumexp(τ·x, dim) → max as τ → ∞; τ=5 already very tight.
+            pred_logit_per_mode = torch.logsumexp(tau * masked, dim=1) / tau  # (bs, M)
+            # Substitute for the shared BCE+diag below.
+            conf_logits = pred_logit_per_mode
+            target = target_per_mode
+            weight = weight_per_mode
 
         denom = weight.sum().clamp(min=1.0)
         pos_w_val = self._resolve_conflict_pos_weight(target, weight)
