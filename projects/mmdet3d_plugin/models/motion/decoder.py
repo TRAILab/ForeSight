@@ -125,6 +125,7 @@ class HierarchicalPlanningDecoder(object):
         rescore_learned_hard_prob_thresh=0.5,
         rescore_learned_hard_aggregation='any',
         rescore_learned_hard_topk_k=2,
+        use_rescore_hybrid_or=False,
         rescore_confidence_source='det',
         rescore_score_thresh=0.5,
     ):
@@ -155,6 +156,11 @@ class HierarchicalPlanningDecoder(object):
             )
         self.rescore_learned_hard_aggregation = rescore_learned_hard_aggregation
         self.rescore_learned_hard_topk_k = int(rescore_learned_hard_topk_k)
+        # `use_rescore_hybrid_or`: applies hard rescore THEN learned-hard
+        # rescore in sequence on the same plan_cls. -999 masks accumulate, so
+        # the per-mode collide flag is the OR of both selectors. Tests whether
+        # the learned head adds any signal hard rescore misses.
+        self.use_rescore_hybrid_or = use_rescore_hybrid_or
         # `rescore_confidence_source`: which per-agent score gates the
         # rescore.filter_mask. 'det' (default) uses det_confidence (max class
         # prob from Sparse4DHead). 'motion' uses motion top-mode probability
@@ -255,6 +261,24 @@ class HierarchicalPlanningDecoder(object):
                 cmd,
             )
         elif self.use_rescore_learned_hard:
+            plan_cls = self.rescore_learned_hard(
+                plan_cls,
+                planning_output,
+                det_confidence,
+                cmd,
+            )
+        elif self.use_rescore_hybrid_or:
+            # Hard rescore first, then learned-hard. Each writes -999 to
+            # colliding modes; the union is the OR of both selectors' flags.
+            plan_cls = self.rescore(
+                plan_cls,
+                plan_reg,
+                motion_cls,
+                motion_reg,
+                det_anchors,
+                filter_score,
+                score_thresh=self.rescore_score_thresh,
+            )
             plan_cls = self.rescore_learned_hard(
                 plan_cls,
                 planning_output,

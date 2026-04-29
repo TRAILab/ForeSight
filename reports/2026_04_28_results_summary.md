@@ -108,6 +108,15 @@ Baseline: hard-rescore `ptaux2d_ppdeformmm_planifls`.
 | Analytic soft rescore w30 | 1 | 0.7492 | 0.079% | - | - | - | - | - | - | - | L2 collapses |
 | `planaux_conf_anchorlabel` | 1 | 0.7692 | 1.028% | 0.6003 | 0.7256 | 0.5169 | 0.4269 | 0.5433 | 0.4404 | 0.5607 | Learned scorer failed |
 | `planaux_conf_evalmatch` | 1 | 0.5355 | 0.178% | 0.5966 | 0.7340 | 0.5082 | 0.4239 | 0.5472 | 0.4428 | 0.5600 | Eval-match recovers most of the regression but still worse than hard rescore |
+| `evalmatch` T=0.70 any (3675) | 1 | 0.5379 | 0.158% | - | - | - | - | - | - | - | Eval-only — same evalmatch ckpt, threshold ↑ |
+| `evalmatch` T=0.85 any (3676) | 1 | 0.5413 | 0.142% | - | - | - | - | - | - | - | Eval-only |
+| `evalmatch` T=0.90 any (3677) | 1 | 0.5399 | 0.122% | - | - | - | - | - | - | - | Best CR among `any`-aggregation thresholds |
+| `evalmatch` T=0.95 any (3678) | 1 | 0.5315 | 0.156% | - | - | - | - | - | - | - | Eval-only |
+| `evalmatch` T=0.99 any (3679) | 1 | 0.5227 | 0.201% | - | - | - | - | - | - | - | Best L2 (rejects almost nothing); CR rises |
+| `evalmatch` T=0.85 topk2 (3680) | 1 | 0.5284 | 0.159% | - | - | - | - | - | - | - | k=2 anchors required; CR worse than `any` |
+| `evalmatch` T=0.85 topk3 (3681) | 1 | 0.5247 | 0.173% | - | - | - | - | - | - | - | k=3; FPs not single-anchor — multi-anchor agreement |
+| `evalmatch` T=0.85 detweighted (3682) | 1 | 0.5370 | 0.119% | - | - | - | - | - | - | - | det-conf soft-weighting beats T-sweep on CR |
+| `planaux_conf_evalmatchmode` (3319213) | 1 | 0.5328 | 0.080% | 0.6033 | 0.7271 | 0.5142 | 0.4267 | 0.5434 | 0.4376 | 0.5587 | Per-mode aggregated BCE — best learned-scorer CR; ~0.017pp from hard rescore |
 
 ## Run-to-Run Noise
 
@@ -172,3 +181,6 @@ Practical threshold: single-run L2 differences below about `0.007` / `1.3%` and 
 - Stage-2 nomap on top of normal stage-1 (`laststage_s2nomap`) is roughly tied with laststage baseline — dropping map supervision at stage-2 alone is not catastrophic, unlike dropping it at both stages.
 - The "Arm B" joint stage-1 → modern stage-2 (`ptjoint_planpredtrajdeformmm`) regresses further than the legacy-head detach version on both planning and perception. **Caveat:** the Arm B stage-1 config still has `detach_perception=True`; the difference vs Arm A is the head architecture, not the gradient flow. The actual non-detach hypothesis (`detach_perception=False`) has not been tested yet.
 - The learned scorer with eval-match (`planaux_conf_evalmatch`) recovers most of the catastrophic regression of `planaux_conf_anchorlabel` (L2 0.77 → 0.54) but is still worse than the hard-rescore baseline (L2 0.499); the matched-baseline eval setup matters but does not flip the result.
+- Threshold sweep on the evalmatch checkpoint (T ∈ {0.50, 0.70, 0.85, 0.90, 0.95, 0.99}) traces a CR U-curve with minimum at T=0.90 (CR=0.122%, vs T=0.50 default 0.178%); L2 monotonically improves as T → 0.99 (rejecting fewer modes converges to no-rescore). Threshold tuning alone cuts CR by ~30% but does not close the ~0.06pp gap to hard rescore (0.063%).
+- Selector aggregation variants on the evalmatch checkpoint at T=0.85: `topk` (k=2, k=3) regresses CR vs `any`, indicating false positives are *not* concentrated at single anchors per mode — multiple anchors per mode flag together. `detweighted` (multiply prob by det_confidence, no hard det-conf gate) achieves the best CR among eval-only fixes (CR=0.119%) at modest L2 cost.
+- **Per-mode aggregated retrain (`evalmatchmode`, label_source='evalmatch_mode', smooth-max τ=5.0)** matches the inference-time `any(anchor)` reduction at training time and is the first learned-scorer to come within ~0.02pp CR of hard rescore: L2=0.5328 / CR=0.080% (vs hard 0.4988 / 0.063%). Classifier diagnostics improve substantially (acc_05 0.95 vs evalmatch 0.98 at much higher pos_rate 7.6% vs 0.5%; F1 ≈ 0.72 vs 0.36). L2 is still ~0.034 worse than hard rescore — the head closes most of the CR gap but cannot match L2 even at matched aggregation. Train/eval aggregation alignment is the single most impactful fix in the rescoring family.

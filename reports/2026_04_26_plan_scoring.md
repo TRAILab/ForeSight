@@ -287,3 +287,78 @@ Configs (4 new):
 - `..._planifls_softrescore_w{3,10,30}_s2.py` — Exp 2 evals. Hard rescore off, soft rescore on, `rescore_soft_sigma=2.0`, `rescore_soft_w_col` swept. `eval_mode = {with_planning=True}` only — det/track/map/motion metric computation skipped (forward pass still runs since rescore_soft consumes `det_output` + `motion_output`). Saves ~10–20 min of post-processing per run.
 
 Workflow note: Exp 2 evals reuse the *Killarney* `iter_11720.pth` ckpt for a strict same-checkpoint comparison against Exp 0's `0.5008 / 0.106%` and the Killarney baseline's `0.4988 / 0.063%`. Ckpt scp'd Killarney → local → narval to `work_dirs/sparsedrive_r50_stage2_4gpu_bs24_ptaux2d_ppdeformmm_planifls_killarney/iter_11720.pth` so it does not clobber narval's separately-trained planifls ckpt at the canonical work_dir.
+
+## Exp 5: threshold sweep + selector aggregation on the evalmatch checkpoint (eval-only)
+
+After v3 (`evalmatch`) landed at `L2=0.5355 / CR=0.178%` — better than v1 anchorlabel but ~3× the hard-rescore CR — training-time diagnostics showed the head was well-separated in logit space (mean P(pos)=0.88, mean P(neg)=0.019, `acc_05=0.983`) but operating at a poorly-chosen threshold. The default `T=0.5` threshold combined with `any(anchor)` reduction over ~50 anchors and a base rate of ~0.5% positives means an anchor-level FP rate of ~1.7% cascades into ~57% of modes getting falsely flagged. Exp 5 tested two cheap, eval-only fixes against the existing checkpoint.
+
+**Code (committed `826279f`).**
+- `HierarchicalPlanningDecoder` gains `rescore_learned_hard_aggregation` ∈ {`any`, `topk`, `detweighted`} and `rescore_learned_hard_topk_k`. `topk` requires k anchors above the prob threshold; `detweighted` multiplies prob by `det_confidence` and skips the hard det-conf cutoff.
+
+**Submission (DGX 2-GPU eval-only, 10–15 min each; planning-only `eval_mode`).** All re-use Killarney `iter_11720.pth` scp'd to DGX as `work_dirs/..._evalmatch_killarney/iter_11720.pth`.
+
+| # | Config suffix | Param | DGX job | L2 | CR |
+|---|---|---|---:|---:|---:|
+| (control) | `_evalmatch` | T=0.50, any | Killarney 3314427 | 0.5355 | 0.178% |
+| 1 | `_evalmatch_t70` | T=0.70, any | 3675 | 0.5379 | 0.158% |
+| 2 | `_evalmatch_t85` | T=0.85, any | 3676 | 0.5413 | 0.142% |
+| 3 | `_evalmatch_t90` | T=0.90, any | 3677 | **0.5399** | **0.122%** |
+| 4 | `_evalmatch_t95` | T=0.95, any | 3678 | 0.5315 | 0.156% |
+| 5 | `_evalmatch_t99` | T=0.99, any | 3679 | 0.5227 | 0.201% |
+| 6 | `_evalmatch_t85_topk2` | T=0.85, k=2 | 3680 | 0.5284 | 0.159% |
+| 7 | `_evalmatch_t85_topk3` | T=0.85, k=3 | 3681 | 0.5247 | 0.173% |
+| 8 | `_evalmatch_t85_detweighted` | T=0.85, det-weighted | 3682 | 0.5370 | **0.119%** |
+
+Reference: hard rescore `0.4988 / 0.063%`; no rescore `0.5008 / 0.106%`.
+
+**Findings.**
+- **Threshold sweep is a U-curve in CR.** Tightening the threshold from 0.50 → 0.90 monotonically improves CR (0.178% → 0.122%, −31%), then collapses past 0.90 as too few modes are rejected. L2 trades inversely: tighter T → fewer rejections → L2 closer to no-rescore (best L2 at T=0.99: 0.5227). This matches the well-separated logit picture but the residual ~0.06pp gap to hard rescore (0.063% vs 0.122%) shows threshold tuning alone is not enough.
+- **Top-k aggregation does not help.** Requiring k=2 or k=3 anchors above threshold per mode worsens CR vs `any` (0.159% / 0.173% vs 0.142% at T=0.85). False positives are *not* concentrated at single anchors per mode — multiple anchors per mode flag together, so top-k misses true positives faster than it filters out FPs. This in turn implies the head is over-confident on a *spatial cluster* of anchors near each spurious-collision mode, not on isolated noise spikes.
+- **Det-weighting is the strongest eval-only fix.** Multiplying per-(anchor, mode) prob by `det_confidence` and removing the hard det-conf gate gives `0.5370 / 0.119%` — best CR among Exp-5 variants, slightly better than the T=0.90 sweep result. Low-det-conf anchors do contribute noticeably to FPs; soft-weighting is a better gate than the binary 0.5 threshold.
+- **None match hard rescore.** Best CR among Exp 5 variants is 0.119% (det-weighted) — still ~2× hard rescore's 0.063%, and L2 is ~0.04 worse than hard rescore in every variant. The eval-only operating-point fixes are real but bounded.
+
+## Exp 6: per-mode aggregated training (`evalmatch_mode`)
+
+The decisive failure mode of v3 (`evalmatch`) was train/eval aggregation mismatch: training supervised per-(anchor, mode) BCE, but the inference selector reduces with `any(anchor)`, so per-anchor FPs cascade into per-mode false-collide flags. Exp 6 fixes this directly by making the training objective match the inference computation.
+
+**Code (committed `826279f`).**
+- `MotionPlanningHead` gains `conflict_label_source='evalmatch_mode'` and `conflict_smooth_max_tau` (default 5.0).
+- Label generation reuses `_fill_evalmatch_labels` (per-(anchor, mode) polygon-on-polygon SAT replicating the eval). Then the per-(anchor, mode) target/weight are collapsed:
+  - **Per-mode label**: `mode_label[m] = max_{matched_a} target[a, m]` — exact `any(anchor)` reduction.
+  - **Per-mode prediction**: `score[m] = (1/τ) · logsumexp(τ · logit[a, m])` over matched anchors only. With τ=5, this is a tight smooth-max approximation; differentiable through anchors and matches the `max(anchor)` decision the selector makes at inference.
+  - BCE applied on per-mode (logit, label); `pos_weight='auto'` recalibrated against the new (much higher) base rate.
+- All other knobs identical to `evalmatch` (loss weight 0.10, threshold 2.0, full evalmatch label geometry).
+
+**Result.** Killarney 3319213, full stage-2 retrain, 7.6h on 4×L40S.
+
+| Run | L2 | CR | NDS | mAP | mAP_normal | car_ade | ped_ade | car_epa | ped_epa |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Hard rescore baseline | 0.4988 | 0.063% | 0.5447 | 0.4403 | 0.5633 | 0.6228 | 0.7201 | 0.5073 | 0.4302 |
+| `evalmatch` (v3) | 0.5355 | 0.178% | 0.5472 | 0.4428 | 0.5600 | 0.5966 | 0.7340 | 0.5082 | 0.4239 |
+| `evalmatch_mode` (v4) | **0.5328** | **0.080%** | 0.5434 | 0.4376 | 0.5587 | 0.6033 | 0.7271 | 0.5142 | 0.4267 |
+
+**Classifier diagnostics (training-time, last 10% averaged).**
+
+| metric | v3 `evalmatch` | v4 `evalmatch_mode` |
+|---|---:|---:|
+| `acc_05` | 0.9830 | 0.9489 |
+| predict-all-neg baseline | 0.9953 | 0.9237 |
+| acc lift over baseline | −0.0123 | **+0.0252** |
+| mean P(pos) | 0.883 | 0.614 |
+| mean P(neg) | 0.019 | 0.065 |
+| `pos_rate` | 0.0047 | **0.0763** |
+| F1 (recall=1 bound) | 0.36 | **0.75** |
+
+The `pos_rate` jumps 16× because the per-mode aggregation changes the base-rate problem: the per-(anchor, mode) label is dominated by trivial negatives (most anchors aren't relevant to most modes); the per-mode label has many more positives because *some anchor* is usually relevant somewhere in a colliding mode. Predict-all-negative accuracy drops from 0.9953 to 0.9237, and the classifier now beats it by 2.5pp instead of trailing it by 1.2pp. Implied F1 jumps from ~0.36 to ~0.75 — roughly 2× improvement on the genuine classification task.
+
+**Findings.**
+- **Train/eval aggregation alignment is the single most impactful fix.** CR drops from 0.178% → 0.080% (−55%), more than the entire threshold + aggregation eval-only batch combined. This is the first learned-scorer to come within ~0.02pp of hard rescore (0.063%) on CR.
+- **L2 still trails hard rescore by ~0.034.** Even at matched aggregation, the head doesn't quite recover the L2 quality of the geometric check. The remaining gap is consistent with the head occasionally rejecting an L2-best mode that hard rescore would have accepted (or vice versa). Whether a follow-up threshold sweep on the v4 ckpt closes this further is open.
+- **Detection metrics drift slightly negative** (NDS 0.5447 → 0.5434, mAP 0.4403 → 0.4376) — within run-to-run noise (`±0.005 NDS`) but consistent across the v3 and v4 evalmatch runs vs the hard-rescore baseline. The conflict-head loss adds gradient pressure to the planning decoder; this is a small cost.
+
+**Implications for paper architecture.** v4 promotes the learned scorer from "null path" to "viable but slightly worse than hard rescore." If the v1-paper claim is the no-K/V Stage 2 architecture with optional learned cost replacement (per `2026_04_28_paper_plan.md`), v4 is now a defensible variant: CR within ~0.02pp of hard rescore, L2 within ~0.03, and the inference path is fully decoupled from `det_output`-derived motion futures. The "hard rescore is essential" finding is also weaker now — it's still better, but not by a wide margin once the train/eval objective is aligned.
+
+**Followups.**
+- Threshold sweep on v4 ckpt at T ∈ {0.50, 0.70, 0.85, 0.90, 0.95}: cheap eval-only batch (2h DGX). Likely to localise a better operating point given the much-improved classifier separation.
+- Selector aggregation variants (top-k, detweighted) on v4: same setup as Exp 5 but on the new ckpt; tests whether the alignment fix changes the optimal aggregation regime.
+- Hybrid: stack v4 selector on top of hard rescore (take the OR of their veto decisions) — answers whether the head adds *any* signal hard rescore misses.
