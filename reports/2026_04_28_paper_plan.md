@@ -7,15 +7,28 @@
 - [ ] Decide on paper title (working title above is a placeholder)
 - [ ] Lock the minimal end-to-end Stage 2 architecture (no perception K/V; rescore handled by either small motion head or learned cost)
 - [ ] Run #1 DINO-init stage-1 on Trillium (4-GPU bs24) to test "stronger image backbone init" lever
-- [ ] Run #7 stage-1-nomap_dn_rotaug + stage-2-with-map on Killarney to resolve the backbone-shaping vs inference-path confound in prior nomap evidence
+- [x] Run #7 stage-1-nomap_dn_rotaug + stage-2-with-map on Killarney (3311181) — see "Nomap evidence" below; backbone-shaping vs inference-path confound resolved
 - [x] Implement DenseSegHead + GenerateDenseSegMask (v1: 6 channels — 3 polylines + 3 agents); submitted aux2d_dseg on Trillium (472563)
 - [ ] v2: extend dense seg with drivable_area / walkway / stop_line (requires map_annos extension or BEV-derivation)
 - [ ] Run all-waypoint planning deformable variant (T2.5)
 - [ ] Run temporal image-feature stacking variant (T2.6)
-- [ ] Wait for Arm B s1 → s2 to finalize the joint-stage-1 negative result that anchors the "perception loss isn't the right stage-1 signal" claim
+- [ ] Wait for Arm B s2 to finalize the joint-stage-1 result; Arm B s1 full Apollo eval landed (`L2=0.6428`, `obj_box_col=0.104%`, `NDS=0.5216`, `mAP=0.4051`, `mAP_normal=0.5816`) with no positive early signal
 - [ ] Pull `softrescore_w*` metrics from `plan_scoring`
 - [ ] Decide whether the paper keeps a lightweight motion head for rescore or replaces rescore with a learned planner-internal cost
 - [ ] Prepare baselines: SparseDrive default, our current best (`ptaux2d_ppdeformmm_planifls_planinstfeat_laststage`), and one external end-to-end baseline (UniAD or VAD)
+- [x] Batch F: single-channel K/V disambiguation. F1 `_laststage_nodetkv` (Killarney 3314590) → L2=0.5466 / CR=0.125% (regression on both); F2 `_laststage_s2nomap` (3314591) → L2=0.5266 / CR=0.069% (tied with baseline); F3 `_laststage_nomapkv` (3314708) → L2=0.5246 / CR=0.047% (tied with baseline). Outcome: map K/V is dispensable, det K/V is not, and `_laststage_nodetmap`'s L2 win is a joint-removal artifact. Headline reframes toward "stage-2 map task dispensable" — see `2026_04_26_plan_gaps.md` Batch F outcome.
+- [x] Batch G eval-only diagnostics on DGX (2-GPU). Re-IDs after queue rejection of 3660–3662: G1 `_laststage_motionconf` (3663) → L2=0.5184 / CR=0.084%; G2 `_laststage_norescore` (3664) → L2=0.5188 / CR=0.104%; G3 `_planifls_motionconf` (3665) → L2=0.5036 / CR=0.089%; G4 `_laststage_nodetmap_norescore` (3666) → L2=0.5131 / CR=0.089%. Outcome: motion-confidence rescore lies between hard and none on CR (not a substitute for det-confidence); the K/V-removal CR cost is rescore-recovery failure, not planner-output regression. See `2026_04_26_plan_gaps.md` Batch G outcome.
+- [ ] Stage-1 aux2d Trillium runs (`aux2d_dino` 472496, `aux2d_dseg` 472563) hit 24 h TIMEOUT at iter 70320 = **epoch 60/100** (1172 iters/epoch × 60 epochs; checkpoint_epoch_interval=20 saved at epochs 20, 40, 60). No eval yet. Resubmit with `--resume-from` — one more 24 h window should finish each (≈ 40 epochs ≈ 16 h remaining).
+- [ ] Arm B stage-2 (`ptjoint_planpredtrajdeformmm`, Killarney 3314809) completed → L2=0.6948 / CR=0.124% / NDS=0.4785 / mAP=0.3713 / mAP_normal=0.5318. Worse than Arm A (`ptjointdetach_planpredtrajdeformmm` L2=0.6669) on both planning and perception. **Important caveat:** the Arm B stage-1 config (`sparsedrive_r50_stage1_8gpu_noflash_joint.py:535`) sets `detach_perception=True`, identical to the older `detach_det=True` flag in Arm A's stage-1. So Arm B is *not* a non-detach experiment — it is "modern head + detach" vs Arm A's "legacy head + detach." The non-detach hypothesis (planning gradients flowing back through det/map heads) has not been tested. To actually test it, train a stage-1 with `detach_perception=False`.
+- [x] Killarney `planaux_conf_evalmatch` (3314427) — eval-match retrain of `planaux_conf_anchorlabel` → L2=0.5355 / CR=0.178% / NDS=0.5472 / mAP=0.4428 / mAP_normal=0.5600. Recovers most of the original regression (L2 0.7692 → 0.5355) but still worse than hard-rescore baseline (L2 0.4988); learned scorer remains a null path.
+
+## Naming convention
+
+Two distinct interventions get conflated under "nomap" / "nodet" in older configs:
+- **head-off**: head module not built. No perception loss → no backbone gradient pressure at that stage → also no K/V to planner. Examples: `stage1_nomap_dn_rotaug` (s1 map head gone), `stage2_4gpu_nomap` (s2 map head gone).
+- **K/V-off**: head trained as usual (gradient pressure flows back into backbone), but the planner's `cross_gnn`/`gnn` op is nulled so tokens don't reach the planner. Examples: `_nodetmap` family (`skip_perception_kv=True`).
+
+`skip_perception_kv` now accepts `'det'` (null only `gnn` op — det K/V), `'map'` (null only `cross_gnn` op — map K/V), `True`/`'both'` (legacy, both), or `False` (default). Reports should use "head-off" vs "K/V-off" to disambiguate.
 
 ## Working thesis
 
@@ -64,9 +77,9 @@ Every confirmed positive lever in the planning-refinement era touches the image-
 - aux2d (non-planning supervision shaping the backbone): positive.
 - joint_detach stage-1 ckpt + modern stage-2 head (Arm A, Killarney 3301176): regressed L2 by 0.125.
 - joint_detach stage-1 ckpt + matched legacy stage-2 head (Arm A-matched, Killarney 3305025): regressed L2 by 0.059.
-- Modern-head joint stage-1 (Arm B, in flight on Apollo): pending.
+- Modern-head joint stage-1 (Arm B): full Apollo stage-1 eval landed at `L2=0.6428`, `obj_box_col=0.104%`, `NDS=0.5216`, `mAP=0.4051`, `mAP_normal=0.5816`, `AMOTA=0.3856`, `IDS=585`; motion metrics are `car_ade=0.6571`, `ped_ade=0.7286`, `car_epa=0.4921`, `ped_epa=0.4086`. Stage-2 follow-up remains the actual planning test.
 
-The matched run rules out head-mismatch as the cause. Joint planning supervision at stage 1 with `detach_perception=True` does not produce a useful planning init. If Arm B also regresses (likely by mechanism extrapolation), the conclusion is: **stage-1 alignment via planning loss does not work; auxiliary tasks that shape image features without competing for backbone capacity (e.g. aux2d) do.**
+The matched run rules out head-mismatch as the cause. Joint planning supervision at stage 1 with `detach_perception=True` does not produce a useful planning init. Arm B's stage-1 eval improves planning over `joint_detach` but does not recover perception or planning to the plain baseline; the conclusion still waits on Arm B stage 2. If that also regresses, **stage-1 alignment via planning loss does not work; auxiliary tasks that shape image features without competing for backbone capacity (e.g. aux2d) do.**
 
 ### Nomap evidence — perception-decoder removal at training time is risky
 
@@ -143,7 +156,7 @@ Each new stage-1 train is followed by an identical stage-2 best recipe so the on
 | **3** | **`occupancy_aux2d`** — class-conditional BEV occupancy, *added* on top of det+map+aux2d | dense agent supervision without box decoding | ~1–2d label-gen; 1× ~32h | second additive planner-aware aux |
 | **4** | **`dadense + occupancy + aux2d`** | full additive aux suite | trivial after #2,#3; 1× ~32h | strongest stage-1 recipe; headline number |
 | **5** | **DINO-init + best additive stage-1** | best-of-both | 1× ~32h | optional further-best |
-| **6** | **Arm B (`stage1_8gpu_noflash_joint`)** modernized joint-stage-1 — already running | locks in negative for "joint planning supervision at stage 1" | already in flight | closes joint-stage-1 line for the paper |
+| **6** | **Arm B (`stage1_8gpu_noflash_joint`)** modernized joint-stage-1 — s1 full eval landed; s2 pending | locks in negative for "joint planning supervision at stage 1" | stage-1 done; stage-2 follow-up still needed | closes joint-stage-1 line for the paper |
 | **7** | **`stage1_nomap_dn_rotaug` ckpt + stage-2 *with* map** (no new stage-1 train; already have ckpt) | resolves backbone-shaping vs inference-path confound from prior nomap evidence | 1× stage-2 only ~12h | side study / appendix — **DONE**: Killarney 3311181, see results below |
 | **8** | **`stage1_nodet`** + stage-2 with det | analog of #7 for detection | 1× ~32h | side study / appendix |
 | **9** | **`aux2d_only`** (no det, no map at stage 1) + stage-2 with full perception heads | extreme replacement test, *with* stage 2 keeping perception decoders for safety | 1× ~32h | appendix; gated on #7 outcome |
@@ -179,7 +192,7 @@ Compute budget for #1–#5: ~5 stage-1 trains × ~32h each = ~160 GPU-days, plus
 
 ## Decision points and gating
 
-- **Now (week of 2026-04-28):** finalize the architecture sketch and run the two highest-EV cheap experiments (DINOv2-init + current best, and temporal stacking T2.6). Wait for Arm B s1.
+- **Now (week of 2026-04-28):** finalize the architecture sketch and run the two highest-EV cheap experiments (DINOv2-init + current best, and temporal stacking T2.6). Arm B s1 full eval has landed; wait for Arm B s2.
 - **+1 week:** Arm B s2 result lands. Decision: if Arm B regresses, the joint-stage-1 negative is locked in; commit to the paper. If Arm B improves, the paper's stage-1 story shifts to "joint stage-1 with the right head + lr is the right pretrain" — different paper, also strong.
 - **+2 weeks:** stage-1 auxiliary sweep (~3 backbones in flight). Decide on the best stage-1 aux combination.
 - **+3-4 weeks:** end-to-end no-K/V Stage-2 architecture training + tuning.
@@ -190,9 +203,9 @@ NeurIPS 2026 abstract deadline (typical: mid-May) — tight but feasible if we l
 
 ## What to do this week
 
-1. Wait on Arm B s1 (Apollo).
+1. Wait on Arm B s2; Arm B s1 full Apollo eval produced `L2=0.6428`, `obj_box_col=0.104%`, `NDS=0.5216`, `mAP=0.4051`, `mAP_normal=0.5816`.
 2. Submit **#1 DINO-init stage-1** on Trillium (4-GPU bs=24, lr=1.5e-4, 100ep) — validates Trillium for stage-1 jobs and tests the "stronger image backbone" lever.
-3. Submit **#7 stage-1 nomap_dn_rotaug + stage-2 with map** on Killarney (stage-2 only, ~12h) — resolves the backbone-shaping vs inference-path confound in the prior nomap evidence.
+3. #7 stage-1 nomap_dn_rotaug + stage-2 with map is done; use it as the nomap confound-resolution cell.
 4. Begin label-gen for **drivable-area BEV** (#2) — first additive planner-aware aux.
 5. Begin implementation of the **no-perception-K/V Stage-2** architecture — `with_perception_kv=False` flag in `MotionPlanningHead` that skips the cross_gnn op and zero-pads num_det/num_map at the construction level.
 6. Begin implementation of **temporal image-feature stacking** (T2.6) — highest-EV architectural experiment for the no-K/V stage-2.

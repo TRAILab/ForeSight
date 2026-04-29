@@ -108,9 +108,10 @@ To implement (Exp 3, if gated):
 | Killarney | `ptaux2d_ppdeformmm_planifls_bidir` | 3284641 | COMPLETED — regression |
 | Apollo | `stage1_8gpu_noflash_joint_detach` (prior, vanilla head, lr=1.5e-4) | — | COMPLETED 2026-03-23 — never used as stage-2 init |
 | Killarney | `ptjointdetach_planpredtrajdeformmm` | 3301176 | COMPLETED — planning regression (Arm A, modern stage-2 head) |
-| Killarney | `ptjointdetach` (legacy stage-2 head, matches joint_detach stage-1) | 3305025 | SUBMITTED — Arm A-matched (apples-to-apples vs DGX bs24 baseline L2=0.636) |
-| Apollo | `stage1_8gpu_noflash_joint` (modern recipe, bs=48, lr=3e-4) | tmux:armb_s1 | RUNNING — Arm B stage 1 (peak ~21GB/GPU; ETA ~38h) |
-| Killarney | `ptjoint_planpredtrajdeformmm` | — | PLANNED — Arm B stage 2 (after Arm B stage 1) |
+| Killarney | `ptjointdetach` (legacy stage-2 head, matches joint_detach stage-1) | 3305025 | COMPLETED — planning regression (Arm A-matched) |
+| Apollo | `stage1_8gpu_noflash_joint` (modern recipe, bs=48, lr=3e-4) | tmux:armb_s1 | COMPLETED 2026-04-28 — Arm B stage 1, final ckpt iter_58600.pth; full eval metrics logged |
+| Killarney | `stage1_8gpu_noflash_joint` (Arm B stage 1 eval-only, 2-GPU) | 3314785 | COMPLETED — separate modified planning-eval diagnostic on same checkpoint; do not compare as a duplicate of Apollo final eval |
+| Killarney | `ptjoint_planpredtrajdeformmm` | 3314809 | COMPLETED 2026-04-29 — Arm B stage 2 (4-GPU): L2=0.6948, CR=0.124%, NDS=0.4785, mAP=0.3713, mAP_normal=0.5318. Worse than Arm A on both planning and perception. **Caveat:** Arm B stage-1 config still sets `detach_perception=True` (same gradient setup as Arm A's `detach_det=True`); difference between arms is "modern head" vs "legacy head," NOT detach vs non-detach. The non-detach hypothesis remains untested. |
 | TBD | `ptaux2d_ppdeformmm_planifls_planinstfeat_laststage_mappromote` | — | PLANNED — Exp 2 |
 | TBD | `ptaux2d_egoquery_planifls` | — | GATED on Exp 1/2 |
 
@@ -121,8 +122,10 @@ To implement (Exp 3, if gated):
 | `ptaux2d_ppdeformmm_planifls_alldet` (Killarney 3284640) | 0.5018 | 0.084% | 0.6031 | 0.7119 | 0.5090 | 0.4270 | 0.5477 | 0.4404 |
 | `ptaux2d_ppdeformmm_planifls_bidir` (Killarney 3284641) | 0.5378 | 0.057% | 0.6069 | 0.7227 | 0.5134 | 0.4280 | 0.5442 | 0.4386 |
 | `stage1_8gpu_noflash_joint_detach` (stage-1 eval only) | 0.6825 | 0.142% | — | — | 0.4950 | 0.4019 | 0.5216 | 0.4038 |
+| `stage1_8gpu_noflash_joint` (stage-1 eval, Apollo final) | 0.6428 | 0.104% | 0.6571 | 0.7286 | 0.4921 | 0.4086 | 0.5216 | 0.4051 |
 | `ptjointdetach_planpredtrajdeformmm` (Killarney 3301176, Arm A) | 0.6669 | 0.089% | 0.6336 | 0.7322 | 0.4938 | 0.4029 | 0.5261 | 0.4092 |
-| `ptjoint_planpredtrajdeformmm` (Arm B) | — | — | — | — | — | — | — | — |
+| `ptjointdetach` (Killarney 3305025, Arm A-matched, legacy head) | 0.6945 | 0.161% | 0.6460 | 0.7177 | 0.4874 | 0.4190 | 0.5231 | 0.4165 |
+| `ptjoint_planpredtrajdeformmm` (Killarney 3314809, Arm B) | 0.6948 | 0.124% | 0.7429 | 0.7469 | 0.4411 | 0.3517 | 0.4785 | 0.3713 |
 | `ptaux2d_ppdeformmm_planifls_planinstfeat_laststage_mappromote` | — | — | — | — | — | — | — | — |
 
 ## Discussion
@@ -135,7 +138,13 @@ Both completed experiments compared against the **server-matched** Killarney bas
 
 **Combined reading.** Both interventions targeted the *coupling layer* between detection and planning at decoder stage 2 (more access via `alldet`, two-way flow via `bidir`) and neither improved planning. Together with the prior `numdemapx2` null and `detrel` regression in `plan_relevance`, this is a strong signal that the binding constraint is not the planning ↔ detection interface or perception-side reshape with planning-uninformed supervision. The remaining mechanism-distinct directions are *upstream* (stage-1 backbone alignment with planning gradients) or *laterally extending the existing shared self-attention* to additional populations (map promotion, egoquery).
 
-**Arm A: planning regressed.** Stage-2 from the existing `joint_detach` ckpt landed at L2=0.6669 / obj_box_col=0.089%, vs the `planpredtrajdeformmm` comparison anchor at L2=0.5420 / ~0.047% — +0.125 L2 (~+23% relative) and ~2× collision rate. NDS=0.5261, mAP=0.4092 are flat-to-slightly-weaker, mirroring the ~1 pt NDS / ~0.7 pt mAP_normal stage-1 deficit the joint_detach ckpt already had vs plain noflash. Two confounders pin this regression on *this specific ckpt*, not the joint-stage-1 idea: (1) joint_detach used the **legacy** planning head (no deformable, no per-stage refine, no cumulative refinement) so the backbone wasn't shaped by the modern deformmm coupling stage 2 needs; (2) joint_detach's perception baseline was already weaker. Arm B (modernized stage-1 with the same deformmm head as stage 2) is the cleaner test.
+**Arm A: planning regressed.** Stage-2 from the existing `joint_detach` ckpt with the *modern* `planpredtrajdeformmm` head landed at L2=0.6669 / obj_box_col=0.089%, vs the `planpredtrajdeformmm` comparison anchor at L2=0.5420 / ~0.047% — +0.125 L2 (~+23% relative) and ~2× CR. NDS=0.5261 / mAP=0.4092 flat-to-slightly-weaker, mirroring the joint_detach stage-1 perception deficit. Two candidate confounders flagged: (1) head-mismatch (joint_detach trained the legacy planning head); (2) joint_detach's perception baseline was already weaker.
+
+**Arm A-matched: planning *still* regressed.** To control for the head-mismatch confounder, we re-ran with the **legacy** stage-2 head (matches what joint_detach actually trained). Result: L2=0.6945 / obj_box_col=0.161%, vs the plain-`stage1.pth` legacy baseline at L2=0.636 / 0.133% — +0.059 L2 (~+9.2% relative) and ~+21% CR. NDS=0.5231 / mAP=0.4165 flat. The matched recipe still underperforms the plain stage-1 init. **The joint_detach stage-1 itself is a worse init for planning than plain det+map stage-1**, regardless of which stage-2 head is used. Side observation: the modern stage-2 head (Arm A: L2=0.6669) was actually 0.028 *better* than the legacy head (Arm A-matched: L2=0.6945), even from this poor init — the modern recipe gain is robust to init quality.
+
+Arm B (modernized stage-1 head, matched lr/recipe to current stage-2) remains the clean test of the underlying joint-stage-1 hypothesis. The two completed Arm A variants tell us this *particular* joint stage-1 — `detach_perception=True` + legacy head + outlier lr=1.5e-4 — does not help planning, even when the head-mismatch is removed.
+
+**Arm B stage-1 eval: modernized joint stage 1 did not improve the pretrain.** The full Apollo training eval for `stage1_8gpu_noflash_joint` landed at `L2=0.6428`, `obj_box_col=0.104%`, `NDS=0.5216`, `mAP=0.4051`, `mAP_normal=0.5816`, `AMOTA=0.3856`, `IDS=585`, with motion `car_ade=0.6571`, `ped_ade=0.7286`, `car_epa=0.4921`, `ped_epa=0.4086`. Detection is essentially tied with `joint_detach` (`NDS=0.5216`, `mAP=0.4038`) and still below the matched plain noflash baseline cited above (`NDS=0.5307`). The planning eval is much better than `joint_detach`'s stage-1-only `L2=0.6825 / obj_box_col=0.142%`, but still not a positive early signal versus the plain stage-2 baseline. The real Arm B decision remains the submitted stage-2 follow-up.
 
 ## Plan and Future Work
 

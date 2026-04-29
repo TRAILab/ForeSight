@@ -292,6 +292,7 @@ class MotionPlanningHead(BaseModule):
         relevance_corridor=2.0,
         relevance_horizon=6,
         skip_perception_kv=False,
+        ego_only_planning=False,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -338,6 +339,7 @@ class MotionPlanningHead(BaseModule):
         self.relevance_corridor = float(relevance_corridor)
         self.relevance_horizon = int(relevance_horizon)
         self.skip_perception_kv = skip_perception_kv
+        self.ego_only_planning = ego_only_planning
         self.mode_no_agg = mode_no_agg
         self.plan_mode_time_queries = plan_mode_time_queries
         self.plan_time_attn = plan_time_attn
@@ -1022,6 +1024,12 @@ class MotionPlanningHead(BaseModule):
         ego_anchor_embed = self._project_anchor_embed(anchor_encoder(ego_anchor))
         temp_instance_feature = self._project_instance_feature(temp_instance_feature)
         temp_anchor_embed = self._project_anchor_embed(anchor_encoder(temp_anchor))
+        if self.ego_only_planning:
+            # Drop agent temporal history; keep only the ego entry (queue.get
+            # concatenates ego at the end, line 106-107 of instance_queue.py).
+            temp_instance_feature = temp_instance_feature[:, -1:]
+            temp_anchor_embed = temp_anchor_embed[:, -1:]
+            temp_mask = temp_mask[:, -1:]
         temp_instance_feature = temp_instance_feature.flatten(0, 1)
         temp_anchor_embed = temp_anchor_embed.flatten(0, 1)
         temp_mask = temp_mask.flatten(0, 1)
@@ -1115,6 +1123,24 @@ class MotionPlanningHead(BaseModule):
         else:
             motion_endpoint_anchor = None
             motion_endpoint_anchor_all = None
+
+        if self.ego_only_planning:
+            # Strip the agent slots before the decoder loop. With
+            # `skip_perception_kv='both'` and `with_conflict_head=False`, the
+            # agents are already informationally isolated from ego (no cross-
+            # token op writes them into ego); slicing them out just saves the
+            # dead-end forward through temp_gnn/deformable/refine.
+            instance_feature = instance_feature[:, num_anchor:]
+            anchor_embed = anchor_embed[:, num_anchor:]
+            instance_feature_selected = instance_feature_selected[:, -1:]
+            anchor_embed_selected = anchor_embed_selected[:, -1:]
+            motion_anchor = motion_anchor[:, :0]
+            motion_mode_query = motion_mode_query[:, :0]
+            if motion_endpoint_anchor_all is not None:
+                motion_endpoint_anchor_all = motion_endpoint_anchor_all[:, :0]
+            if motion_endpoint_anchor is not None:
+                motion_endpoint_anchor = motion_endpoint_anchor[:, :0]
+            num_anchor = 0
         _deformable_stage_idx = 0
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
@@ -1188,7 +1214,11 @@ class MotionPlanningHead(BaseModule):
                 # Apply deformable cross-attention to sensor features for
                 # agent instances only (ego token has no well-defined 3D box).
                 _deformable_stage_idx += 1
-                if self.motion_deformable_multimode:
+                if self.ego_only_planning:
+                    # No agents present; skip motion-deformable to avoid
+                    # invoking the DAF kernel with zero-length queries.
+                    agent_feature = instance_feature[:, :num_anchor]
+                elif self.motion_deformable_multimode:
                     # Attend at every mode's endpoint, aggregate by mode confidence.
                     # motion_endpoint_anchor_all: (bs, num_det, fut_mode, 11)
                     all_anchors_flat = motion_endpoint_anchor_all.reshape(
