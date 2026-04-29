@@ -151,9 +151,9 @@ Files under `navsim/navsim/agents/sparsedrive/`:
 | killarney | sparsedrive navmini smoke | n/a | PENDING |
 | killarney | sparsedrive navtrain | n/a | PENDING |
 
-### Smoke test (2026-04-29, local, no GPU needed)
+### Smoke test (2026-04-29, local, GPU)
 
-`docker run ... foresight_navsim:cuda118pytorch21 python scripts/navsim_smoke_test.py`
+`docker run --gpus all ... foresight_navsim:cuda118pytorch21 python scripts/navsim_smoke_test.py`
 
 ```
 [OK] import navsim base
@@ -164,24 +164,46 @@ Files under `navsim/navsim/agents/sparsedrive/`:
        img shape: (6, 3, 256, 704)
        projection_mat shape: (6, 4, 4)
        ego_status shape: (8,)
-All 5 checks passed.
+[OK] forward pass on synthetic batched features (eval mode)
+       trajectory type: Tensor
+       trajectory shape: (1, 8, 2)
+All 6 checks passed.
 ```
 
 What this proves:
 - The new conda env (python 3.9 + torch 2.1.2 + mmcv 1.7.2 + flash-attn 2.3.2 +
   nuplan-devkit + hydra + lightning) coexists in one image without import-time
   conflicts.
-- `SparseDriveAgent`'s wiring (`sys.path` boost, plugin import, mmcv config →
+- `SparseDriveAgent` wiring (sys.path boost, plugin import, mmcv config →
   `build_detector`) works end-to-end with the navsim-variant config
   (`ego_fut_ts=8`, `num_driving_cmds=4`).
-- The 8→6 camera reduction in `SparseDriveFeatureBuilder` produces tensors with
-  shapes the head expects.
+- The 8→6 camera reduction produces tensors with the shapes the head expects.
+- A full forward pass through SparseDrive (backbone→FPN→det/map/motion/plan
+  heads→decoder) returns a `(B, ego_fut_ts, 2)` ego trajectory when given
+  zero-input synthetic features — proving the navsim variant config and the
+  three additional `num_driving_cmds` plumbing edits (motion_planning_head,
+  motion_blocks, decoder) all reshape consistently.
 
 What this does NOT prove yet:
-- Forward pass through SparseDrive on real navsim images (no GPU on local).
-- That `SparseDriveAgent.forward` reads the right key out of the head's output
-  dict — TODO marker still live in the agent.
-- Anything PDM-Score related — needs metric cache + nuplan maps.
+- Training-mode forward + loss against real navsim GT (the empty-GT path
+  through det_head's DN sampler still hits a 10/12 shape mismatch in
+  cls_wise_reg_weights). Needs the real nuPlan box→11-dim conversion or a
+  with_det/with_map gate that doesn't break motion_plan_head's anchor_encoder
+  dependency on det_head.
+- PDM scoring — needs metric cache + nuplan maps + a real navtest pass.
+
+### num_driving_cmds plumbing edits
+
+The hardcoded literal `3` (number of nuScenes driving commands) appeared in
+three places in the SparseDrive code that all needed an additive
+`num_driving_cmds=3` constructor arg, plus the navsim variant config has to
+forward it explicitly:
+- `projects/mmdet3d_plugin/models/motion/motion_planning_head.py:1665`
+- `projects/mmdet3d_plugin/models/motion/motion_blocks.py:115` and `:125`
+- `projects/mmdet3d_plugin/models/motion/decoder.py:182,183`
+
+All keep the nuScenes default of 3, so the existing nuScenes path is
+untouched.
 
 ### Build issues encountered + fixes
 

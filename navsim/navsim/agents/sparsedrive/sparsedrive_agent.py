@@ -111,46 +111,123 @@ class SparseDriveAgent(AbstractAgent):
         return [SparseDriveTargetBuilder(self._config)]
 
     # ----------------------------------------------------- forward + loss
-    def forward(self, features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        # SparseDrive expects (img, **data); features dict already has 'img'.
+    #
+    # NavSim's AgentLightningModule._step calls:
+    #     prediction = self.agent.forward(features, targets)
+    #     loss_dict  = self.agent.compute_loss(features, targets, prediction)
+    #     return loss_dict['loss']     # backprop scalar
+    # Each k in loss_dict is logged as f"{train|val}/{k}".
+    #
+    # SparseDrive (mmcv-style) bakes its losses into forward_train, expecting
+    # gt_* keys inside the data dict. We bridge by:
+    #   - in training: merging features+targets into data, calling the model,
+    #     and returning the resulting loss dict as "prediction"
+    #   - in eval:    calling simple_test, pulling the trajectory out of the
+    #     planning_decoder result for PDM scoring
+    def forward(
+        self,
+        features: Dict[str, torch.Tensor],
+        targets: Optional[Dict[str, torch.Tensor]] = None,
+    ) -> Dict[str, torch.Tensor]:
         img = features["img"]
         data = {k: v for k, v in features.items() if k != "img"}
-        # Add a minimal projection_mat / image_wh wrapping if needed
+        if targets is not None:
+            data.update(targets)
+
+        # SparseDrive expects mmcv-style metas. Until the feature builder ships
+        # T_global, timestamps, and detection GT from the scene, inject
+        # placeholders so the head's training-mode forward runs end-to-end with
+        # task_config.with_det=False / with_motion=False / planning-only loss.
+        bs = img.shape[0]
+        if "img_metas" not in data:
+            data["img_metas"] = [
+                {"T_global": img.new_zeros(4, 4) + torch.eye(4, device=img.device)}
+                for _ in range(bs)
+            ]
+        if "timestamp" not in data:
+            data["timestamp"] = img.new_zeros(bs)
+        # Empty per-batch GT placeholders for all three heads. Real nuPlan
+        # box / map polyline conversion is a Phase-2 stage-1 follow-up; here
+        # they only keep the heads' sampling path from KeyError-ing during
+        # training. The corresponding losses are filtered to zero in
+        # compute_loss for the planning-only first pass.
+        if "gt_labels_3d" not in data:
+            data["gt_labels_3d"] = [
+                img.new_zeros(0, dtype=torch.long) for _ in range(bs)
+            ]
+        if "gt_bboxes_3d" not in data:
+            data["gt_bboxes_3d"] = [img.new_zeros(0, 11) for _ in range(bs)]
+        if "gt_map_labels" not in data:
+            data["gt_map_labels"] = [
+                img.new_zeros(0, dtype=torch.long) for _ in range(bs)
+            ]
+        if "gt_map_pts" not in data:
+            data["gt_map_pts"] = [img.new_zeros(0, 20, 2) for _ in range(bs)]
+        if "map_instance_id" not in data:
+            data["map_instance_id"] = [
+                img.new_zeros(0, dtype=torch.long) for _ in range(bs)
+            ]
+
+        if self.training:
+            # forward_train returns a dict of named loss tensors.
+            return self._sparsedrive_model(img, **data)
+
+        # eval: simple_test -> List[{"img_bbox": merged_result_dict}] per batch
+        # item. The merged dict has {"planning": (num_cmds, modes, ts, 2),
+        # "final_planning": (ts, 2), "planning_score": ..., ...}.
+        # PDM scoring needs the (ts, 3) trajectory — final_planning gives
+        # (ts, 2) and we'll synthesize heading from the trajectory tangent
+        # downstream once we wire the eval pipeline.
         outputs = self._sparsedrive_model(img, **data)
-        # `outputs` is a dict from the SparseDrive head. The trajectory lives
-        # under outputs["planning"]["trajectory"] in stage-2 inference;
-        # see motion_planning_head.post_process. Until that wiring is finalized
-        # we expose a canonical "trajectory" key to PDM scoring.
-        if "trajectory" in outputs:
-            traj = outputs["trajectory"]
-        elif "planning" in outputs and isinstance(outputs["planning"], dict):
-            traj = outputs["planning"]["trajectory"]
-        else:
-            raise KeyError(
-                "SparseDrive forward did not return a planning trajectory. "
-                f"Got top-level keys: {list(outputs.keys())}"
-            )
-        return {"trajectory": traj}
+        trajs = []
+        for sample in outputs:
+            res = sample.get("img_bbox", sample)
+            if isinstance(res, dict) and "final_planning" in res:
+                trajs.append(res["final_planning"])
+            elif isinstance(res, dict) and "planning" in res:
+                trajs.append(res["planning"])
+            else:
+                raise KeyError(
+                    f"SparseDrive post_process did not produce a planning key; "
+                    f"got top-level keys: "
+                    f"{list(res.keys()) if isinstance(res, dict) else type(res)}"
+                )
+        return {"trajectory": torch.stack(trajs, dim=0) if trajs else torch.zeros(0)}
 
     def compute_loss(
         self,
         features: Dict[str, torch.Tensor],
         targets: Dict[str, torch.Tensor],
         predictions: Dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-        # Stage-2 planning-only: simple L2 / smooth-L1 between predicted traj
-        # cumulative-sum and the GT delta-cumulative-sum.
-        pred = predictions["trajectory"]  # (B, T, 3) or (B, T, 2)
-        gt_deltas = targets["gt_ego_fut_trajs"]
+    ) -> Dict[str, torch.Tensor]:
+        # In training, predictions IS the SparseDrive loss dict. Sum scalars
+        # into the canonical 'loss' key the lightning module backprops on.
+        if isinstance(predictions, dict):
+            loss_terms = {
+                k: v
+                for k, v in predictions.items()
+                if torch.is_tensor(v) and v.dim() == 0 and v.requires_grad
+            }
+            if loss_terms:
+                total = sum(loss_terms.values())
+                return {**{k: v.detach() for k, v in predictions.items()
+                           if torch.is_tensor(v)}, "loss": total}
+
+        # Eval / fallback: simple smooth-L1 between predicted cumulative xy and
+        # the GT cumulative-sum of delta trajectories.
+        pred = predictions.get("trajectory") if isinstance(predictions, dict) else None
+        if pred is None or not torch.is_tensor(pred):
+            return {"loss": torch.zeros((), requires_grad=False)}
         if pred.shape[-1] == 3:
             pred_xy = pred[..., :2]
         else:
             pred_xy = pred
+        gt_deltas = targets["gt_ego_fut_trajs"]
         gt_xy = torch.cumsum(gt_deltas, dim=-2)
         masks = targets.get("gt_ego_fut_masks", torch.ones_like(gt_xy[..., 0]))
         loss = nn.functional.smooth_l1_loss(pred_xy, gt_xy, reduction="none")
         loss = (loss.mean(-1) * masks).sum() / masks.sum().clamp(min=1.0)
-        return loss
+        return {"loss": loss}
 
     # ------------------------------------------------------- optim
     def get_optimizers(

@@ -114,6 +114,46 @@ def t5():
     print(f"   ego_status shape: {tuple(feats['ego_status'].shape)}")
 
 
+@check("forward pass on synthetic batched features (eval mode)")
+def t6():
+    import torch
+    from navsim.agents.sparsedrive.sparsedrive_agent import SparseDriveAgent
+    from navsim.agents.sparsedrive.sparsedrive_config import SparseDriveConfig
+
+    if not torch.cuda.is_available():
+        print("SKIP (no CUDA available; SparseDrive grid_mask hardcodes .cuda())")
+        return
+
+    device = torch.device("cuda")
+    cfg = SparseDriveConfig(
+        foresight_config="projects/configs/sparsedrive_r50_stage2_navsim_planonly.py",
+        foresight_pretrained="",
+    )
+    agent = SparseDriveAgent(cfg, lr=1e-4, checkpoint_path=None).to(device)
+    agent.eval()  # skips the head's training-mode DN sampling that needs real GT
+
+    bs = 1
+    num_cams = 6
+    H, W = cfg.image_target_size
+
+    features = {
+        "img": torch.zeros(bs, num_cams, 3, H, W, device=device),
+        "projection_mat": torch.eye(4, device=device).unsqueeze(0).repeat(bs, num_cams, 1, 1).reshape(bs, num_cams, 4, 4),
+        "image_wh": torch.tensor([[[W, H]] * num_cams] * bs, dtype=torch.float32, device=device),
+        "ego_status": torch.zeros(bs, 8, device=device),
+        "gt_ego_fut_cmd": torch.tensor([[0.0, 1.0, 0.0, 0.0]] * bs, device=device),
+    }
+
+    with torch.no_grad():
+        prediction = agent.forward(features, None)
+    assert isinstance(prediction, dict), f"forward returned {type(prediction)}, expected dict"
+    assert "trajectory" in prediction, f"missing 'trajectory' key in eval output; got {list(prediction.keys())}"
+    traj = prediction["trajectory"]
+    print(f"   trajectory type: {type(traj).__name__}")
+    if torch.is_tensor(traj):
+        print(f"   trajectory shape: {tuple(traj.shape)}")
+
+
 def main():
     print(f"Python: {sys.version.split()[0]}")
     print()

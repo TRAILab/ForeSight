@@ -113,6 +113,7 @@ class HierarchicalPlanningDecoder(object):
         self,
         ego_fut_ts,
         ego_fut_mode,
+        num_driving_cmds=3,
         use_rescore=False,
         use_rescore_soft=False,
         rescore_soft_w_col=10.0,
@@ -132,6 +133,7 @@ class HierarchicalPlanningDecoder(object):
         super(HierarchicalPlanningDecoder, self).__init__()
         self.ego_fut_ts = ego_fut_ts
         self.ego_fut_mode = ego_fut_mode
+        self.num_driving_cmds = num_driving_cmds
         self.use_rescore = use_rescore
         self.use_rescore_soft = use_rescore_soft
         self.rescore_soft_w_col = rescore_soft_w_col
@@ -179,8 +181,8 @@ class HierarchicalPlanningDecoder(object):
         classification = planning_output['classification'][-1]
         prediction = planning_output['prediction'][-1]
         bs = classification.shape[0]
-        classification = classification.reshape(bs, 3, self.ego_fut_mode)
-        prediction = prediction.reshape(bs, 3, self.ego_fut_mode, self.ego_fut_ts, 2).cumsum(dim=-2)
+        classification = classification.reshape(bs, self.num_driving_cmds, self.ego_fut_mode)
+        prediction = prediction.reshape(bs, self.num_driving_cmds, self.ego_fut_mode, self.ego_fut_ts, 2).cumsum(dim=-2)
         classification, final_planning = self.select(
             det_output, motion_output, classification, prediction, data, planning_output
         )

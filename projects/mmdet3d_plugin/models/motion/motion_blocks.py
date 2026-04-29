@@ -22,6 +22,7 @@ class MotionPlanningRefinementModule(BaseModule):
         fut_mode=6,
         ego_fut_ts=6,
         ego_fut_mode=3,
+        num_driving_cmds=3,
         with_da_head=False,
         with_conflict_head=False,
         plan_mode_time_queries=False,
@@ -32,6 +33,7 @@ class MotionPlanningRefinementModule(BaseModule):
         self.fut_mode = fut_mode
         self.ego_fut_ts = ego_fut_ts
         self.ego_fut_mode = ego_fut_mode
+        self.num_driving_cmds = num_driving_cmds
         self.plan_mode_time_queries = plan_mode_time_queries
 
         self.motion_cls_branch = nn.Sequential(
@@ -112,7 +114,7 @@ class MotionPlanningRefinementModule(BaseModule):
         motion_reg = self.motion_reg_branch(motion_query).reshape(bs, num_anchor, self.fut_mode, self.fut_ts, 2)
         if self.plan_mode_time_queries:
             # plan_query: (bs, 1, M_total*T, D) -> per-(mode, ts) reshape.
-            M_total = 3 * self.ego_fut_mode
+            M_total = self.num_driving_cmds * self.ego_fut_mode
             T = self.ego_fut_ts
             plan_query_mt = plan_query.reshape(bs, 1, M_total, T, self.embed_dims)
             # Per-(mode, ts) (x, y).
@@ -122,7 +124,7 @@ class MotionPlanningRefinementModule(BaseModule):
             plan_cls = self.plan_cls_branch(plan_query_mode).squeeze(-1)
         else:
             plan_cls = self.plan_cls_branch(plan_query).squeeze(-1)
-            plan_reg = self.plan_reg_branch(plan_query).reshape(bs, 1, 3 * self.ego_fut_mode, self.ego_fut_ts, 2)
+            plan_reg = self.plan_reg_branch(plan_query).reshape(bs, 1, self.num_driving_cmds * self.ego_fut_mode, self.ego_fut_ts, 2)
         planning_status = self.plan_status_branch(ego_feature + ego_anchor_embed)
 
         plan_da = None

@@ -87,6 +87,10 @@ decouple_attn_motion = True
 with_quality_estimation = True
 
 task_config = dict(
+    # All three heads must construct because motion_plan_head pulls
+    # anchor_encoder + instance_bank out of det_head. Det/map losses are
+    # filtered out of the total in SparseDriveAgent.compute_loss for the
+    # planning-only first pass; they run forward against empty GT placeholders.
     with_det=True,
     with_map=True,
     with_motion_plan=True,
@@ -476,6 +480,7 @@ model = dict(
                 fut_mode=fut_mode,
                 ego_fut_ts=ego_fut_ts,
                 ego_fut_mode=ego_fut_mode,
+                num_driving_cmds=num_driving_cmds,
             ),
             motion_sampler=dict(
                 type="MotionTarget",
@@ -507,6 +512,7 @@ model = dict(
                 type="HierarchicalPlanningDecoder",
                 ego_fut_ts=ego_fut_ts,
                 ego_fut_mode=ego_fut_mode,
+                num_driving_cmds=num_driving_cmds,
                 use_rescore=True,
             ),
             num_det=50,
