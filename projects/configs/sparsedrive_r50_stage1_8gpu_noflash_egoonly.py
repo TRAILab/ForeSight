@@ -526,7 +526,7 @@ model = dict(
                 type="HierarchicalPlanningDecoder",
                 ego_fut_ts=ego_fut_ts,
                 ego_fut_mode=ego_fut_mode,
-                use_rescore=True,
+                use_rescore=False,
             ),
             planning_cumulative_refinement=True,
             motion_cumulative_refinement=True,
