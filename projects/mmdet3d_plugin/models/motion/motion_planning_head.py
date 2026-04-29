@@ -2633,13 +2633,17 @@ class MotionPlanningHead(BaseModule):
         planning_output,
         data,
     ):
-        motion_result = self.motion_decoder.decode(
-            det_output["classification"],
-            det_output["prediction"],
-            det_output.get("instance_id"),
-            det_output.get("quality"),
-            motion_output,
-        )
+        if self.ego_only_planning:
+            bs = det_output["classification"][-1].shape[0]
+            motion_result = [dict() for _ in range(bs)]
+        else:
+            motion_result = self.motion_decoder.decode(
+                det_output["classification"],
+                det_output["prediction"],
+                det_output.get("instance_id"),
+                det_output.get("quality"),
+                motion_output,
+            )
         planning_result = self.planning_decoder.decode(
             det_output,
             motion_output,
