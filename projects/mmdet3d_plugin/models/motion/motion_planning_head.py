@@ -1591,9 +1591,16 @@ class MotionPlanningHead(BaseModule):
         reg_preds = model_outs["prediction"]
         output = {}
         if self.ego_only_planning:
-            # Motion task disabled — motion buffers are empty and motion-only
-            # params receive no gradient. DDP must run with
-            # `find_unused_parameters=True` for this config.
+            # Motion buffers are empty (num_anchor=0). Skip the sampler (which
+            # would index into the empty pred buffer with detection's matched
+            # indices and crash) but emit a zero-valued keepalive loss that
+            # still references each motion-only branch output, so motion params
+            # show up as "ready" in DDP without find_unused_parameters=True
+            # (lets us keep with_cp=True).
+            keepalive = reg_preds[0].new_zeros(())
+            for cls, reg in zip(cls_scores, reg_preds):
+                keepalive = keepalive + cls.sum() * 0.0 + reg.sum() * 0.0
+            output['motion_loss_keepalive'] = keepalive
             return output
         for decoder_idx, (cls, reg) in enumerate(
             zip(cls_scores, reg_preds)
