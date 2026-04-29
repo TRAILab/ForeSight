@@ -11,16 +11,18 @@ Camera mapping (8 → 6, nuScenes-aligned):
     cam_l1, cam_r1: dropped (pure-side cameras have no nuScenes counterpart)
 """
 
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 import torch
 from torchvision import transforms
 
 from navsim.agents.abstract_agent import AbstractAgent  # noqa: F401  (for type hints)
 from navsim.agents.sparsedrive.sparsedrive_config import SparseDriveConfig
-from navsim.common.dataclasses import AgentInput, Cameras, Scene
+from navsim.common.dataclasses import AgentInput, Annotations, Cameras, Scene
+from navsim.common.enums import BoundingBoxIndex
 from navsim.planning.training.abstract_feature_target_builder import (
     AbstractFeatureBuilder,
     AbstractTargetBuilder,
@@ -35,6 +37,73 @@ _NUSC_TO_NAVSIM = (
     "cam_r2",
     "cam_b0",
 )
+
+
+# nuPlan tracked-object name -> SparseDrive (nuScenes-style) class index. The
+# nuScenes class list is fixed at 10 in projects/configs/...; nuPlan ships a
+# coarser set so we coalesce. -1 means drop the object entirely.
+_NUSC_CLASS_INDEX = {
+    "car": 0, "truck": 1, "construction_vehicle": 2, "bus": 3, "trailer": 4,
+    "barrier": 5, "motorcycle": 6, "bicycle": 7, "pedestrian": 8, "traffic_cone": 9,
+}
+_NAVSIM_TO_NUSC_CLASS = {
+    "vehicle": _NUSC_CLASS_INDEX["car"],
+    "pedestrian": _NUSC_CLASS_INDEX["pedestrian"],
+    "bicycle": _NUSC_CLASS_INDEX["bicycle"],
+    "traffic_cone": _NUSC_CLASS_INDEX["traffic_cone"],
+    "barrier": _NUSC_CLASS_INDEX["barrier"],
+    # czone_sign + generic_object don't map cleanly; bucket into barrier so
+    # they still contribute to obstacle awareness in the planning-only first
+    # pass. Drop ego (it's the agent itself).
+    "czone_sign": _NUSC_CLASS_INDEX["barrier"],
+    "generic_object": _NUSC_CLASS_INDEX["barrier"],
+    "ego": -1,
+}
+
+
+def navsim_boxes_to_sparsedrive(
+    annotations: Annotations,
+) -> Tuple[npt.NDArray[np.float32], npt.NDArray[np.int_]]:
+    """nuPlan Annotations -> SparseDrive (N, 11) anchors + (N,) class indices.
+
+    SparseDrive 11-dim anchor (projects/mmdet3d_plugin/core/box3d.py):
+        [X, Y, Z, log_W, log_L, log_H, SIN_YAW, COS_YAW, VX, VY, VZ]
+    nuPlan box (BoundingBoxIndex):
+        [X, Y, Z, LENGTH, WIDTH, HEIGHT, HEADING]
+    Velocity comes from Annotations.velocity_3d (m/s, lidar frame).
+    """
+    if len(annotations.boxes) == 0:
+        return np.zeros((0, 11), dtype=np.float32), np.zeros((0,), dtype=np.int64)
+
+    out_boxes: List[npt.NDArray[np.float32]] = []
+    out_labels: List[int] = []
+    for i, name in enumerate(annotations.names):
+        cls = _NAVSIM_TO_NUSC_CLASS.get(name, -1)
+        if cls < 0:
+            continue
+        b = annotations.boxes[i]
+        x = float(b[BoundingBoxIndex.X])
+        y = float(b[BoundingBoxIndex.Y])
+        z = float(b[BoundingBoxIndex.Z])
+        length = max(float(b[BoundingBoxIndex.LENGTH]), 1e-3)
+        width = max(float(b[BoundingBoxIndex.WIDTH]), 1e-3)
+        height = max(float(b[BoundingBoxIndex.HEIGHT]), 1e-3)
+        heading = float(b[BoundingBoxIndex.HEADING])
+        vx, vy, vz = annotations.velocity_3d[i].astype(np.float32).tolist()
+        out_boxes.append(
+            np.array(
+                [x, y, z,
+                 np.log(width), np.log(length), np.log(height),
+                 np.sin(heading), np.cos(heading),
+                 vx, vy, vz],
+                dtype=np.float32,
+            )
+        )
+        out_labels.append(cls)
+
+    if not out_boxes:
+        return np.zeros((0, 11), dtype=np.float32), np.zeros((0,), dtype=np.int64)
+    return np.stack(out_boxes, axis=0), np.array(out_labels, dtype=np.int64)
 
 
 def _select_cams(cameras: Cameras, cam_names) -> List:
@@ -147,15 +216,17 @@ class SparseDriveTargetBuilder(AbstractTargetBuilder):
         deltas[0] = poses[0, :2]
         deltas[1:] = poses[1:, :2] - poses[:-1, :2]
 
-        targets = {
+        # Det/map GT from the current frame's annotations, mapped into the
+        # SparseDrive 11-dim anchor format. The det loss is filtered out of
+        # the planning-only total in compute_loss for the first pass; these
+        # targets keep the head's training-mode sampler from KeyError-ing.
+        frame_idx = scene.scene_metadata.num_history_frames - 1
+        annotations = scene.frames[frame_idx].annotations
+        boxes_11d, labels = navsim_boxes_to_sparsedrive(annotations)
+
+        return {
             "gt_ego_fut_trajs": deltas,
             "gt_ego_fut_masks": torch.ones(cfg.num_future_poses, dtype=torch.float32),
+            "gt_bboxes_3d": torch.from_numpy(boxes_11d),
+            "gt_labels_3d": torch.from_numpy(labels),
         }
-
-        # Stage 1 / detection / motion supervision. Phase 1 leaves these as TODOs.
-        if cfg.use_detection_loss or cfg.use_motion_loss:
-            raise NotImplementedError(
-                "Detection/motion targets from nuPlan annotations are pending. "
-                "Need 8-dim nuPlan box -> 11-dim SparseDrive anchor mapping."
-            )
-        return targets

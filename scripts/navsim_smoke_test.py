@@ -154,6 +154,44 @@ def t6():
         print(f"   trajectory shape: {tuple(traj.shape)}")
 
 
+@check("nuPlan->11-dim box conversion")
+def t7():
+    import numpy as np
+    from navsim.common.dataclasses import Annotations
+    from navsim.agents.sparsedrive.sparsedrive_features import (
+        navsim_boxes_to_sparsedrive,
+    )
+
+    # Synthetic 3 boxes: a vehicle, a pedestrian, an "ego" (which must be dropped)
+    annotations = Annotations(
+        boxes=np.array(
+            [
+                # [X, Y, Z, LENGTH, WIDTH, HEIGHT, HEADING]
+                [10.0, 0.0, 0.0, 4.5, 1.8, 1.5, 0.0],   # vehicle
+                [3.0,  2.0, 0.0, 0.6, 0.6, 1.7, 1.5],   # pedestrian
+                [0.0,  0.0, 0.0, 4.5, 1.8, 1.5, 0.0],   # ego (drop)
+            ],
+            dtype=np.float32,
+        ),
+        names=["vehicle", "pedestrian", "ego"],
+        velocity_3d=np.array(
+            [[2.0, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32
+        ),
+        instance_tokens=["a", "b", "c"],
+        track_tokens=["A", "B", "C"],
+    )
+    boxes11, labels = navsim_boxes_to_sparsedrive(annotations)
+    assert boxes11.shape == (2, 11), f"expected (2,11), got {boxes11.shape}"
+    assert labels.shape == (2,), f"expected (2,), got {labels.shape}"
+    # vehicle -> car (idx 0); pedestrian -> 8
+    assert labels.tolist() == [0, 8], f"got labels {labels.tolist()}"
+    # log_W = log(1.8) for vehicle
+    assert abs(boxes11[0, 3] - np.log(1.8)) < 1e-5
+    # cos(0) = 1 for vehicle
+    assert abs(boxes11[0, 7] - 1.0) < 1e-5
+    print(f"   boxes shape: {boxes11.shape}  labels: {labels.tolist()}")
+
+
 def main():
     print(f"Python: {sys.version.split()[0]}")
     print()
