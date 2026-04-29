@@ -362,3 +362,37 @@ The `pos_rate` jumps 16× because the per-mode aggregation changes the base-rate
 - Threshold sweep on v4 ckpt at T ∈ {0.50, 0.70, 0.85, 0.90, 0.95}: cheap eval-only batch (2h DGX). Likely to localise a better operating point given the much-improved classifier separation.
 - Selector aggregation variants (top-k, detweighted) on v4: same setup as Exp 5 but on the new ckpt; tests whether the alignment fix changes the optimal aggregation regime.
 - Hybrid: stack v4 selector on top of hard rescore (take the OR of their veto decisions) — answers whether the head adds *any* signal hard rescore misses.
+
+## Exp 7: v4 followups — threshold + aggregation + hybrid_or (eval-only)
+
+Run in parallel on DGX (3683–3691) and Killarney (3324524–3324532); 2-GPU each, 2:59:00 timelimit, planning-only `eval_mode`. Both clusters returned identical metrics (Killarney finished first end-to-end; DGX duplicates 3688–3691 cancelled). All re-use the v4 (`evalmatchmode`) `iter_11720.pth` ckpt (Killarney 3319213).
+
+**Code (committed `0d354d6`).** Added `use_rescore_hybrid_or` to `HierarchicalPlanningDecoder`: applies hard `rescore()` then `rescore_learned_hard()` in sequence on the same `plan_cls`. Each writes `-999` to colliding modes, so the per-mode collide flag is the OR of both selectors.
+
+**Results.**
+
+| # | Variant | DGX job | Killarney job | L2 | CR |
+|---|---|---:|---:|---:|---:|
+| (control) | `_evalmatchmode` (training-end eval) | — | 3319213 | 0.5328 | 0.080% |
+| 1 | T=0.50 any | 3683 | 3324524 | 0.5331 | 0.082% |
+| 2 | T=0.70 any | 3684 | 3324525 | **0.5316** | 0.081% |
+| 3 | T=0.85 any | 3685 | 3324526 | 0.5343 | 0.093% |
+| 4 | T=0.90 any | 3686 | 3324527 | 0.5335 | 0.085% |
+| 5 | T=0.95 any | 3687 | 3324528 | 0.5334 | 0.080% |
+| 6 | T=0.85 topk2 | 3688† | 3324529 | 0.5350 | 0.092% |
+| 7 | T=0.85 topk3 | 3689† | 3324530 | 0.5325 | 0.101% |
+| 8 | T=0.85 detweighted | 3690† | 3324531 | 0.5320 | 0.097% |
+| 9 | T=0.85 hybrid_or | 3691† | 3324532 | 0.5330 | **0.063%** |
+
+†Cancelled before completion; metrics from Killarney.
+
+References: hard rescore `0.4988 / 0.063%`; no rescore `0.5008 / 0.106%`; v3 evalmatch `0.5355 / 0.178%`.
+
+**Findings.**
+- **Threshold sweep on v4 is essentially flat.** All 5 thresholds land within 0.003 L2 and ~0.013pp CR. Contrasts sharply with the v3 sweep (T 0.5→0.9 cut CR 0.178→0.122%, −31%). The per-mode aggregation training fix already pushed positive logits to a sensible default operating point, so threshold tuning has nothing left to do. Confirms that v3's threshold sensitivity was an aggregation-mismatch symptom, not a real calibration gap.
+- **Top-k and det-weighted no longer help** (and slightly regress). With the aggregation already aligned at training time, FP cascading is gone, and the smoothing effect of top-k or det-conf weighting only filters out true positives.
+- **Hybrid_or matches hard rescore CR exactly: 0.063%.** This is the headline result. L2 stays at v4's level (0.5330), not hard rescore's (0.4988), because OR-ing rejection sets only adds rejections; the hybrid selector keeps every veto from either side, including v4's FPs.
+- **Implied conclusion: the learned head's correct rejections are a subset of hard rescore's.** If v4 caught any unique collisions, hybrid_or would have CR < 0.063% (lower than either alone). Equality at 0.063% means hard rescore's rejection set is sufficient — the head doesn't see anything hard rescore misses on this architecture and dataset. The L2 cost (0.5330 vs 0.4988 = +0.034) is purely from v4's FPs that wouldn't have been rejected by hard rescore.
+- **Net for the paper: the learned scorer is dominated by hard rescore.** v4 is a viable variant if hard rescore is unavailable (e.g., a future architecture with no `det_output`-based motion futures), but it's not a Pareto improvement over the geometric check. The "hard rescore is essential" claim from earlier reports is now strengthened, not weakened: v4 was the strongest-engineered learned alternative and still failed to find unique signal.
+
+**Implications for paper architecture.** Drop the "learned cost replaces rescore" option from `2026_04_28_paper_plan.md`'s Stage-2 architecture choices (line 145). Keep the lightweight motion head + hard rescore. The learned scorer thread closes here unless a different formulation appears (per-(mode, agent) residual, scene-level head with post-t=0 agents, distillation from a planner with access to GT futures).

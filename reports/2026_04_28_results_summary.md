@@ -42,6 +42,8 @@ Baseline: Killarney same-host `ptaux2d_ppdeformmm_planifls_laststage`.
 | `laststage_nodetmap` | 1 | 0.5153 | 0.086% | 0.6235 | 0.7236 | 0.4900 | 0.4169 | 0.5230 | 0.4109 | 0.5596 | L2 improves, CR worsens |
 | `laststage_nodetkv` | 1 | 0.5466 | 0.125% | 0.6171 | 0.7195 | 0.4914 | 0.4161 | 0.5255 | 0.4134 | 0.5526 | Removing det K/V (keep map) regresses |
 | `laststage_nomapkv` | 1 | 0.5246 | 0.047% | 0.6239 | 0.7092 | 0.4943 | 0.4185 | 0.5262 | 0.4123 | 0.5549 | Removing map K/V (keep det) is roughly tied |
+| `laststage_nodetmap_decoder6` | 1 | 0.5194 | 0.077% | - | - | 0.4923 | 0.4185 | 0.5265 | 0.4140 | 0.5527 | Doubling decoder layers (3→6) is within noise |
+| `laststage_nodetmap_planwp_full6` | 1 | 0.6352 | 0.097% | - | - | 0.4950 | 0.4159 | 0.5286 | 0.4135 | 0.5488 | All-waypoint planning deformable (T2.5) regresses L2 by 0.12 |
 
 ## Laststage Rescore Variants
 
@@ -117,6 +119,15 @@ Baseline: hard-rescore `ptaux2d_ppdeformmm_planifls`.
 | `evalmatch` T=0.85 topk3 (3681) | 1 | 0.5247 | 0.173% | - | - | - | - | - | - | - | k=3; FPs not single-anchor — multi-anchor agreement |
 | `evalmatch` T=0.85 detweighted (3682) | 1 | 0.5370 | 0.119% | - | - | - | - | - | - | - | det-conf soft-weighting beats T-sweep on CR |
 | `planaux_conf_evalmatchmode` (3319213) | 1 | 0.5328 | 0.080% | 0.6033 | 0.7271 | 0.5142 | 0.4267 | 0.5434 | 0.4376 | 0.5587 | Per-mode aggregated BCE — best learned-scorer CR; ~0.017pp from hard rescore |
+| `evalmatchmode` T=0.50 any (K3324524) | 1 | 0.5331 | 0.082% | - | - | - | - | - | - | - | Reproduces v4 default — same ckpt, planning-only eval |
+| `evalmatchmode` T=0.70 any (K3324525) | 1 | **0.5316** | 0.081% | - | - | - | - | - | - | - | Best L2 in v4 sweep |
+| `evalmatchmode` T=0.85 any (K3324526) | 1 | 0.5343 | 0.093% | - | - | - | - | - | - | - | T-sweep on v4 is essentially flat |
+| `evalmatchmode` T=0.90 any (K3324527) | 1 | 0.5335 | 0.085% | - | - | - | - | - | - | - | v4 already calibrated; no leverage from T tuning |
+| `evalmatchmode` T=0.95 any (K3324528) | 1 | 0.5334 | **0.080%** | - | - | - | - | - | - | - | Ties v4 default CR |
+| `evalmatchmode` T=0.85 topk2 (K3324529) | 1 | 0.5350 | 0.092% | - | - | - | - | - | - | - | top-k no longer needed once train aligned |
+| `evalmatchmode` T=0.85 topk3 (K3324530) | 1 | 0.5325 | 0.101% | - | - | - | - | - | - | - | top-k regresses CR |
+| `evalmatchmode` T=0.85 detweighted (K3324531) | 1 | 0.5320 | 0.097% | - | - | - | - | - | - | - | det-weighting no longer helpful |
+| `evalmatchmode` T=0.85 hybrid_or (K3324532) | 1 | 0.5330 | **0.063%** | - | - | - | - | - | - | - | OR(hard, learned) matches hard rescore CR exactly; learned head adds no unique vetoes |
 
 ## Run-to-Run Noise
 
@@ -184,3 +195,6 @@ Practical threshold: single-run L2 differences below about `0.007` / `1.3%` and 
 - Threshold sweep on the evalmatch checkpoint (T ∈ {0.50, 0.70, 0.85, 0.90, 0.95, 0.99}) traces a CR U-curve with minimum at T=0.90 (CR=0.122%, vs T=0.50 default 0.178%); L2 monotonically improves as T → 0.99 (rejecting fewer modes converges to no-rescore). Threshold tuning alone cuts CR by ~30% but does not close the ~0.06pp gap to hard rescore (0.063%).
 - Selector aggregation variants on the evalmatch checkpoint at T=0.85: `topk` (k=2, k=3) regresses CR vs `any`, indicating false positives are *not* concentrated at single anchors per mode — multiple anchors per mode flag together. `detweighted` (multiply prob by det_confidence, no hard det-conf gate) achieves the best CR among eval-only fixes (CR=0.119%) at modest L2 cost.
 - **Per-mode aggregated retrain (`evalmatchmode`, label_source='evalmatch_mode', smooth-max τ=5.0)** matches the inference-time `any(anchor)` reduction at training time and is the first learned-scorer to come within ~0.02pp CR of hard rescore: L2=0.5328 / CR=0.080% (vs hard 0.4988 / 0.063%). Classifier diagnostics improve substantially (acc_05 0.95 vs evalmatch 0.98 at much higher pos_rate 7.6% vs 0.5%; F1 ≈ 0.72 vs 0.36). L2 is still ~0.034 worse than hard rescore — the head closes most of the CR gap but cannot match L2 even at matched aggregation. Train/eval aggregation alignment is the single most impactful fix in the rescoring family.
+- v4 (`evalmatchmode`) followups confirm the train/eval-alignment fix already calibrated the head — threshold sweep is essentially flat (L2 ∈ [0.5316, 0.5350], CR ∈ [0.080, 0.101]%), and aggregation variants (top-k, detweighted) no longer help once training matches inference. The big knob from Exp 5 (sweeping T from 0.5 to 0.9 cut v3 CR ~30%) collapses to noise on v4. **The hybrid_or selector (OR of hard rescore + v4 learned-hard) hits CR=0.063% — exactly matching hard rescore** while L2 stays at v4's level (0.5330). This means the learned head's correct rejections are a subset of hard rescore's; the head adds no unique collision-avoidance signal beyond the geometric check, only contributes FPs that hurt L2. **Conclusion: the learned scorer cannot beat hard rescore on this architecture.** Hard rescore stays the right inference component.
+- All-waypoint planning deformable (T2.5, `_laststage_nodetmap_planwp_full6`) regresses L2 by 0.12 vs the `_laststage_nodetmap` baseline. The single-endpoint deformable already collects the planning-relevant image features; spreading attention across all waypoints dilutes the signal. T2.5 is a null lever.
+- Doubling decoder depth (3 → 6 layers, `_laststage_nodetmap_decoder6`) is within noise (ΔL2 = +0.004, ΔCR = −0.009 pp). Decoder depth is not a useful lever on this stack.
