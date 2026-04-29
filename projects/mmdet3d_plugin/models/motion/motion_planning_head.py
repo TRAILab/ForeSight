@@ -1281,6 +1281,10 @@ class MotionPlanningHead(BaseModule):
                         metas,
                     ))
                 if self.planning_deformable:
+                    multi_wp = (
+                        self.planning_deformable_waypoints is not None
+                        and not self.plan_mode_time_queries
+                    )
                     if self.plan_mode_time_queries:
                         # Per-(mode, ts) anchor box, flattened along (mode, ts).
                         T = self.ego_fut_ts
@@ -1288,6 +1292,15 @@ class MotionPlanningHead(BaseModule):
                             plan_anchor.detach(), ego_anchor, list(range(T)),
                         )  # (bs, M_total, T, 11)
                         plan_anchor_box = plan_anchor_box_mt.flatten(1, 2)  # (bs, M_total*T, 11)
+                    elif multi_wp:
+                        # Per-(mode, K) anchor boxes flattened to (bs, num_modes*K, 11).
+                        # Used by both the non-instfeat else-branch (existing) and
+                        # the _use_instfeat branch (K-pool after deformable).
+                        plan_anchor_box_mk = self._build_planning_anchor_boxes_multi(
+                            plan_anchor.detach(), ego_anchor,
+                            self.planning_deformable_waypoints,
+                        )  # (bs, num_modes, K, 11)
+                        plan_anchor_box = plan_anchor_box_mk.flatten(1, 2)
                     else:
                         plan_anchor_box = self._build_planning_anchor_boxes(
                             plan_anchor.detach(),
@@ -1316,7 +1329,19 @@ class MotionPlanningHead(BaseModule):
                             # mode-distinct) while still injecting ego instance
                             # feature. Update plan_mode_query like standard branch;
                             # leave ego token in instance_feature unchanged.
-                            daf_query = plan_mode_query + ego_feat_exp
+                            if multi_wp:
+                                # plan_mode_query is (bs, num_modes, D); expand to
+                                # (bs, num_modes*K, D) to match per-(mode, K) anchors.
+                                K = len(self.planning_deformable_waypoints)
+                                num_modes_real = plan_mode_query.shape[1]
+                                pmq_exp = (
+                                    plan_mode_query.unsqueeze(2)
+                                    .expand(-1, -1, K, -1)
+                                    .reshape(bs, num_modes_real * K, self.embed_dims)
+                                )
+                                daf_query = pmq_exp + ego_feat_exp
+                            else:
+                                daf_query = plan_mode_query + ego_feat_exp
                             attended_plan = self.layers[i](
                                 self._project_deformable_feature(daf_query),
                                 plan_anchor_box,
@@ -1324,9 +1349,16 @@ class MotionPlanningHead(BaseModule):
                                 feature_maps,
                                 metas,
                             )
-                            plan_mode_query = self._project_deformable_output(
+                            attended_plan = self._project_deformable_output(
                                 attended_plan
                             )
+                            if multi_wp:
+                                K = len(self.planning_deformable_waypoints)
+                                num_modes_real = attended_plan.shape[1] // K
+                                attended_plan = attended_plan.reshape(
+                                    bs, num_modes_real, K, self.embed_dims
+                                ).mean(dim=2)
+                            plan_mode_query = attended_plan
                             instance_feature = torch.cat(
                                 [agent_feature, instance_feature[:, num_anchor:]], dim=1
                             )
@@ -1347,6 +1379,15 @@ class MotionPlanningHead(BaseModule):
                             attended_plan = self._project_deformable_output(
                                 attended_plan
                             )  # (bs, num_plan_queries, embed_dims)
+                            if multi_wp:
+                                # K-pool back to per-mode so classification-weighted
+                                # aggregation matches plan_weights' (bs, num_modes) shape.
+                                K = len(self.planning_deformable_waypoints)
+                                num_modes_real = num_plan_queries // K
+                                attended_plan = attended_plan.reshape(
+                                    bs, num_modes_real, K, self.embed_dims
+                                ).mean(dim=2)
+                                num_plan_queries = num_modes_real
                             if self.mode_no_agg:
                                 # Bypass softmax aggregation: additively blend per-query
                                 # attended features into plan_mode_query (preserves
