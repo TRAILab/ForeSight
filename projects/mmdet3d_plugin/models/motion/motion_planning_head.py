@@ -1481,7 +1481,10 @@ class MotionPlanningHead(BaseModule):
                         motion_anchor_upd[..., -1, :], hidden_dim=self.embed_dims
                     )
                 )
-                if self.motion_deformable_multimode:
+                if self.ego_only_planning:
+                    # No agents — keep motion_endpoint buffers empty.
+                    pass
+                elif self.motion_deformable_multimode:
                     motion_endpoint_anchor_all = self._build_motion_endpoint_anchors_all_modes(
                         motion_anchor_upd, det_anchors
                     )
@@ -1587,15 +1590,20 @@ class MotionPlanningHead(BaseModule):
         cls_scores = model_outs["classification"]
         reg_preds = model_outs["prediction"]
         output = {}
+        if self.ego_only_planning:
+            # Motion task disabled — motion buffers are empty and motion-only
+            # params receive no gradient. DDP must run with
+            # `find_unused_parameters=True` for this config.
+            return output
         for decoder_idx, (cls, reg) in enumerate(
             zip(cls_scores, reg_preds)
         ):
             (
-                cls_target, 
-                cls_weight, 
-                reg_pred, 
-                reg_target, 
-                reg_weight, 
+                cls_target,
+                cls_weight,
+                reg_pred,
+                reg_target,
+                reg_weight,
                 num_pos
             ) = self.motion_sampler.sample(
                 reg,

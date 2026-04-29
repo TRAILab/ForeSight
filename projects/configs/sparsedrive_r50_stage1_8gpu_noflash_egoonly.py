@@ -35,6 +35,9 @@ load_from = None
 resume_from = None
 workflow = [("train", 1)]
 fp16 = dict(loss_scale=32.0)
+# motion-only params (motion_*_branch, motion_anchor_encoder) receive no
+# gradient when ego_only_planning=True; allow DDP to skip them.
+find_unused_parameters = True
 input_shape = (704, 256)
 
 
