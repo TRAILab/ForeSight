@@ -192,6 +192,27 @@ What this does NOT prove yet:
   dependency on det_head.
 - PDM scoring — needs metric cache + nuplan maps + a real navtest pass.
 
+### nuPlan -> 11-dim box conversion (2026-04-29)
+
+`navsim_boxes_to_sparsedrive()` in
+`navsim/navsim/agents/sparsedrive/sparsedrive_features.py` maps nuPlan-style
+`Annotations` to SparseDrive's 11-dim anchor format (`[X, Y, Z, log_W,
+log_L, log_H, SIN_YAW, COS_YAW, VX, VY, VZ]`). Class remapping:
+
+| nuPlan name | nuScenes index | nuScenes name |
+| --- | --- | --- |
+| `vehicle` | 0 | car |
+| `pedestrian` | 8 | pedestrian |
+| `bicycle` | 7 | bicycle |
+| `traffic_cone` | 9 | traffic_cone |
+| `barrier` | 5 | barrier |
+| `czone_sign` | 5 | barrier (coalesced) |
+| `generic_object` | 5 | barrier (coalesced) |
+| `ego` | -1 | dropped |
+
+Smoke test #7 verifies the shape, the ego-drop, and the log-WLH /
+sin/cos-heading encoding.
+
 ### num_driving_cmds plumbing edits
 
 The hardcoded literal `3` (number of nuScenes driving commands) appeared in
