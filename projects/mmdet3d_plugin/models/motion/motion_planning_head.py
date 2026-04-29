@@ -1325,6 +1325,12 @@ class MotionPlanningHead(BaseModule):
             )
             metas_p = dict(metas)
             metas_p["projection_mat"] = projection_mat_p
+            # image_wh is also per-cam; replicate it to match the extended cam
+            # axis. All past frames share the same image dimensions.
+            if metas.get("image_wh") is not None:
+                metas_p["image_wh"] = metas["image_wh"].repeat(
+                    1, self.planning_temporal_stack + 1, 1
+                )
         else:
             feature_maps_p = feature_maps
             metas_p = metas
