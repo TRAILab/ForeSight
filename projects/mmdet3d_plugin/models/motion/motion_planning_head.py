@@ -217,6 +217,7 @@ class MotionPlanningHead(BaseModule):
         fut_mode=6,
         ego_fut_ts=6,
         ego_fut_mode=3,
+        num_driving_cmds=3,
         motion_anchor=None,
         plan_anchor=None,
         embed_dims=256,
@@ -302,6 +303,7 @@ class MotionPlanningHead(BaseModule):
         self.fut_mode = fut_mode
         self.ego_fut_ts = ego_fut_ts
         self.ego_fut_mode = ego_fut_mode
+        self.num_driving_cmds = num_driving_cmds
 
         self.decouple_attn = decouple_attn
         self.operation_order = operation_order
@@ -1660,7 +1662,7 @@ class MotionPlanningHead(BaseModule):
                             # intra-mode temporal coupling. Reshape
                             # (bs, M*T, D) -> (bs*M, T, D), add learnable
                             # time pos embed, MHA self-attn with residual + LN.
-                            M_total = 3 * self.ego_fut_mode
+                            M_total = self.num_driving_cmds * self.ego_fut_mode
                             T_q = self.ego_fut_ts
                             pq_mt = plan_mode_query.reshape(
                                 bs, M_total, T_q, self.embed_dims
