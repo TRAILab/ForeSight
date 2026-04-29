@@ -752,10 +752,10 @@ runner = dict(
 
 # ================== eval ========================
 eval_mode = dict(
-    with_det=True,
-    with_tracking=True,
-    with_map=True,
-    with_motion=True,
+    with_det=False,
+    with_tracking=False,
+    with_map=False,
+    with_motion=False,
     with_planning=True,
     tracking_threshold=0.2,
     motion_threshhold=0.2,
