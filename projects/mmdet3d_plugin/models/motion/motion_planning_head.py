@@ -294,6 +294,8 @@ class MotionPlanningHead(BaseModule):
         relevance_horizon=6,
         skip_perception_kv=False,
         ego_only_planning=False,
+        planning_temporal_stack=0,
+        planning_temporal_egocomp=True,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -342,6 +344,15 @@ class MotionPlanningHead(BaseModule):
         self.relevance_horizon = int(relevance_horizon)
         self.skip_perception_kv = skip_perception_kv
         self.ego_only_planning = ego_only_planning
+        self.planning_temporal_stack = int(planning_temporal_stack)
+        self.planning_temporal_egocomp = bool(planning_temporal_egocomp)
+        # Cache for temporal feature stacking. Set to None at construction;
+        # populated each forward (current frame) and consumed on the next.
+        self._temp_col_feats = None
+        self._temp_spatial_shape = None
+        self._temp_scale_start_index = None
+        self._temp_projection_mat = None
+        self._temp_T_global = None
         self.mode_no_agg = mode_no_agg
         self.plan_mode_time_queries = plan_mode_time_queries
         self.plan_time_attn = plan_time_attn
@@ -407,6 +418,23 @@ class MotionPlanningHead(BaseModule):
             for i, op in enumerate(self.operation_order):
                 if (op == "gnn" and skip_det) or (op == "cross_gnn" and skip_map):
                     self.layers[i] = None
+
+        # Separate planning deformable layers with extended num_cams when
+        # temporal stacking is enabled. Detection / motion deformables stay
+        # on self.layers[i] with the original num_cams.
+        self.planning_temporal_layers = None
+        if self.planning_temporal_stack > 0:
+            assert deformable_model is not None
+            base_num_cams = deformable_model.get("num_cams", 6)
+            ext_num_cams = base_num_cams * (self.planning_temporal_stack + 1)
+            temporal_cfg = copy.deepcopy(deformable_model)
+            temporal_cfg["num_cams"] = ext_num_cams
+            self.planning_temporal_layers = nn.ModuleList(
+                [
+                    build_from_cfg(temporal_cfg, ATTENTION)
+                    for _ in range(self._n_deformable_stages)
+                ]
+            )
         self.embed_dims = embed_dims
         self.adapter = _MotionPlanningAdapter(
             input_embed_dims=self.input_embed_dims,
@@ -909,6 +937,138 @@ class MotionPlanningHead(BaseModule):
         trajs_lidar = torch.einsum('abcij,jkab->abcik', trajs, rot_mat_T)
         return trajs_lidar
 
+    def _build_temporal_planning_inputs(self, feature_maps, metas):
+        """
+        Build extended (feature_maps, projection_mat) for the planning
+        deformable when planning_temporal_stack > 0.
+
+        Concatenates the cached prev N frames along the camera axis. For each
+        past frame, the projection matrix is recomposed so that points in the
+        *current* ego frame project into past camera images:
+            proj_t-k = proj_past @ T_ego_past_from_global @ T_global_from_ego_curr
+        which is equivalent to mapping `p_curr -> p_past -> pix_past`.
+
+        Returns (feature_maps_t, projection_mat_t). If no cache yet (first
+        frame in this run), the current frame is replicated for past slots,
+        which is harmless for the deformable.
+        """
+        col_feats, spatial_shape, scale_start_index = feature_maps
+        bs = col_feats.shape[0]
+        proj_curr = metas["projection_mat"]
+        # proj_curr: (bs, n_cam_base, 4, 4)
+        n_cam_base = proj_curr.shape[1]
+        N = self.planning_temporal_stack
+        device = col_feats.device
+        dtype = col_feats.dtype
+
+        # Build past col_feats / spatial_shape / scale_start_index lists.
+        # Cache stores past frames in order [t-1, t-2, ...], i.e. most recent
+        # first. If cache is missing or batch size mismatches (eval-vs-train),
+        # replicate current.
+        cache_ok = (
+            self._temp_col_feats is not None
+            and isinstance(self._temp_col_feats, list)
+            and len(self._temp_col_feats) > 0
+            and self._temp_col_feats[0].shape[0] == bs
+        )
+
+        col_list = [col_feats]
+        ss_list = [spatial_shape]
+        ssi_list = [scale_start_index]
+        proj_list = [proj_curr]
+
+        for k in range(N):
+            if cache_ok and k < len(self._temp_col_feats):
+                past_col = self._temp_col_feats[k].to(device=device, dtype=dtype)
+                past_ss = self._temp_spatial_shape[k].to(device=device)
+                past_ssi = self._temp_scale_start_index[k].to(device=device)
+                past_proj = self._temp_projection_mat[k].to(
+                    device=device, dtype=proj_curr.dtype
+                )
+                if self.planning_temporal_egocomp:
+                    # T_ego_past_from_ego_curr = T_global_from_ego_past_inv
+                    #     @ T_global_from_ego_curr
+                    # But projection_mat[..., :, :] already encodes
+                    # (K @ T_cam<-ego_past), so to get a current-ego-input
+                    # projection: past_proj @ T_ego_past_from_ego_curr
+                    T_global_curr = proj_curr.new_tensor(
+                        np.stack([m["T_global"] for m in metas["img_metas"]])
+                    )  # (bs, 4, 4)
+                    past_T_global = self._temp_T_global[k].to(
+                        device=device, dtype=proj_curr.dtype
+                    )  # (bs, 4, 4) ego_past -> global
+                    T_global_inv_past = torch.linalg.inv(past_T_global)
+                    T_egop_from_egoc = torch.matmul(T_global_inv_past, T_global_curr)
+                    # (bs, 1, 4, 4)
+                    T_egop_from_egoc = T_egop_from_egoc.unsqueeze(1)
+                    past_proj = torch.matmul(past_proj, T_egop_from_egoc)
+            else:
+                # No cache → replicate current. T_temp2cur is identity.
+                past_col = col_feats
+                past_ss = spatial_shape
+                past_ssi = scale_start_index
+                past_proj = proj_curr
+
+            col_list.append(past_col)
+            ss_list.append(past_ss)
+            ssi_list.append(past_ssi)
+            proj_list.append(past_proj)
+
+        # Concat col_feats along the (cam*spatial) axis (dim=1).
+        col_feats_t = torch.cat(col_list, dim=1)
+        # Stack spatial_shape along the cam axis (dim=0). Same H/W per level
+        # so concatenation is safe.
+        spatial_shape_t = torch.cat(ss_list, dim=0)
+        # scale_start_index for past frames must be offset by the cumulative
+        # length of preceding entries.
+        offsets = [0]
+        for col in col_list[:-1]:
+            offsets.append(offsets[-1] + col.shape[1])
+        ssi_t = torch.cat(
+            [s + o for s, o in zip(ssi_list, offsets)], dim=0
+        )
+
+        feature_maps_t = [col_feats_t, spatial_shape_t, ssi_t]
+        projection_mat_t = torch.cat(proj_list, dim=1)  # (bs, n_cam_base*(N+1), 4, 4)
+        return feature_maps_t, projection_mat_t
+
+    def _cache_planning_temporal(self, feature_maps, metas):
+        """
+        After the forward, push the current frame onto the temporal cache.
+        Cache is kept on CPU to avoid GPU memory pressure across iters.
+        """
+        if self.planning_temporal_stack <= 0:
+            return
+        col_feats, spatial_shape, scale_start_index = feature_maps
+        # Detach + move to CPU; the next forward will move back to device.
+        col_cpu = col_feats.detach().to("cpu")
+        ss_cpu = spatial_shape.detach().to("cpu")
+        ssi_cpu = scale_start_index.detach().to("cpu")
+        proj_cpu = metas["projection_mat"].detach().to("cpu")
+        T_global = col_feats.new_tensor(
+            np.stack([m["T_global"] for m in metas["img_metas"]])
+        ).detach().to("cpu")
+
+        if self._temp_col_feats is None:
+            self._temp_col_feats = []
+            self._temp_spatial_shape = []
+            self._temp_scale_start_index = []
+            self._temp_projection_mat = []
+            self._temp_T_global = []
+
+        # Insert at front (most-recent first), trim to stack length.
+        self._temp_col_feats.insert(0, col_cpu)
+        self._temp_spatial_shape.insert(0, ss_cpu)
+        self._temp_scale_start_index.insert(0, ssi_cpu)
+        self._temp_projection_mat.insert(0, proj_cpu)
+        self._temp_T_global.insert(0, T_global)
+        N = self.planning_temporal_stack
+        self._temp_col_feats = self._temp_col_feats[:N]
+        self._temp_spatial_shape = self._temp_spatial_shape[:N]
+        self._temp_scale_start_index = self._temp_scale_start_index[:N]
+        self._temp_projection_mat = self._temp_projection_mat[:N]
+        self._temp_T_global = self._temp_T_global[:N]
+
     def graph_model(
         self,
         index,
@@ -1143,6 +1303,31 @@ class MotionPlanningHead(BaseModule):
             if motion_endpoint_anchor is not None:
                 motion_endpoint_anchor = motion_endpoint_anchor[:, :0]
             num_anchor = 0
+        # Temporal image-feature stacking for planning-deformable calls only.
+        # Builds an extended (feature_maps, projection_mat) once; each
+        # planning deformable call routes through self.planning_temporal_layers
+        # with this stacked input.
+        if self.planning_temporal_stack > 0 and self.planning_deformable:
+            # If InstanceQueue just reset (eval-vs-train batch swap, scene
+            # boundary at the start of a run), drop the temporal cache too —
+            # otherwise we'd splice features from the previous run.
+            if (
+                self.instance_queue is not None
+                and self.instance_queue.metas is None
+            ):
+                self._temp_col_feats = None
+                self._temp_spatial_shape = None
+                self._temp_scale_start_index = None
+                self._temp_projection_mat = None
+                self._temp_T_global = None
+            feature_maps_p, projection_mat_p = self._build_temporal_planning_inputs(
+                feature_maps, metas
+            )
+            metas_p = dict(metas)
+            metas_p["projection_mat"] = projection_mat_p
+        else:
+            feature_maps_p = feature_maps
+            metas_p = metas
         _deformable_stage_idx = 0
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
@@ -1281,6 +1466,20 @@ class MotionPlanningHead(BaseModule):
                         metas,
                     ))
                 if self.planning_deformable:
+                    # Pick layer + temporal feature_maps/metas for planning
+                    # deformable calls. When planning_temporal_stack > 0 we
+                    # use a separate layer with extended num_cams and the
+                    # past-frame-stacked feature maps built above.
+                    if self.planning_temporal_layers is not None:
+                        plan_layer = self.planning_temporal_layers[
+                            _deformable_stage_idx - 1
+                        ]
+                        plan_fmaps = feature_maps_p
+                        plan_metas = metas_p
+                    else:
+                        plan_layer = self.layers[i]
+                        plan_fmaps = feature_maps
+                        plan_metas = metas
                     multi_wp = (
                         self.planning_deformable_waypoints is not None
                         and not self.plan_mode_time_queries
@@ -1342,12 +1541,12 @@ class MotionPlanningHead(BaseModule):
                                 daf_query = pmq_exp + ego_feat_exp
                             else:
                                 daf_query = plan_mode_query + ego_feat_exp
-                            attended_plan = self.layers[i](
+                            attended_plan = plan_layer(
                                 self._project_deformable_feature(daf_query),
                                 plan_anchor_box,
                                 plan_anchor_embed,
-                                feature_maps,
-                                metas,
+                                plan_fmaps,
+                                plan_metas,
                             )
                             attended_plan = self._project_deformable_output(
                                 attended_plan
@@ -1369,12 +1568,12 @@ class MotionPlanningHead(BaseModule):
                             ego_feat_exp_q = instance_feature[:, num_anchor:num_anchor+1].expand(
                                 -1, num_plan_queries, -1
                             )
-                            attended_plan = self.layers[i](
+                            attended_plan = plan_layer(
                                 self._project_deformable_feature(ego_feat_exp_q),
                                 plan_anchor_box,
                                 plan_anchor_embed,
-                                feature_maps,
-                                metas,
+                                plan_fmaps,
+                                plan_metas,
                             )
                             attended_plan = self._project_deformable_output(
                                 attended_plan
@@ -1430,11 +1629,11 @@ class MotionPlanningHead(BaseModule):
                                 .expand(-1, -1, K, -1)
                                 .reshape(bs, num_mode * K, self.embed_dims)
                             )
-                            attended = self.layers[i](
+                            attended = plan_layer(
                                 self._project_deformable_feature(query_exp),
                                 boxes_flat,
                                 embed_flat,
-                                feature_maps, metas,
+                                plan_fmaps, plan_metas,
                             )
                             plan_mode_query = self._project_deformable_output(
                                 attended
@@ -1443,12 +1642,12 @@ class MotionPlanningHead(BaseModule):
                             ).mean(dim=2)
                         else:
                             plan_mode_query = self._project_deformable_output(
-                                self.layers[i](
+                                plan_layer(
                                 self._project_deformable_feature(plan_mode_query),
                                 plan_anchor_box,
                                 plan_anchor_embed,
-                                feature_maps,
-                                metas,
+                                plan_fmaps,
+                                plan_metas,
                             ))
                         if self.plan_time_attn and self.plan_mode_time_queries:
                             # Per-mode time-axis self-attention to restore
@@ -1564,6 +1763,9 @@ class MotionPlanningHead(BaseModule):
         self.instance_queue.cache_motion(cache_motion_feature, det_output, metas)
         # Cache only the real ego token, not DN ego tokens.
         self.instance_queue.cache_planning(cache_ego_feature, plan_status)
+        # Push current frame's image features onto the planning temporal cache
+        # for the next forward.
+        self._cache_planning_temporal(feature_maps, metas)
 
         motion_output = {
             "classification": motion_classification,
