@@ -44,19 +44,28 @@ download_maps() {
 
 download_test() {
     cd "${OPENSCENE_DATA_ROOT}"
-    wget https://huggingface.co/datasets/OpenDriveLab/OpenScene/resolve/main/openscene-v1.1/openscene_metadata_test.tgz
-    tar -xzf openscene_metadata_test.tgz && rm openscene_metadata_test.tgz
+    mkdir -p navsim_logs sensor_blobs
+    if [ ! -d navsim_logs/test ]; then
+        wget -c https://huggingface.co/datasets/OpenDriveLab/OpenScene/resolve/main/openscene-v1.1/openscene_metadata_test.tgz
+        tar -xzf openscene_metadata_test.tgz && rm openscene_metadata_test.tgz
+    fi
     for split in {0..31}; do
-        wget https://huggingface.co/datasets/OpenDriveLab/OpenScene/resolve/main/openscene-v1.1/openscene_sensor_test_camera/openscene_sensor_test_camera_${split}.tgz
-        tar -xzf openscene_sensor_test_camera_${split}.tgz && rm openscene_sensor_test_camera_${split}.tgz
+        if [ ! -f .test_camera_${split}.done ]; then
+            wget -c https://huggingface.co/datasets/OpenDriveLab/OpenScene/resolve/main/openscene-v1.1/openscene_sensor_test_camera/openscene_sensor_test_camera_${split}.tgz
+            tar -xzf openscene_sensor_test_camera_${split}.tgz && rm openscene_sensor_test_camera_${split}.tgz
+            touch .test_camera_${split}.done
+        fi
     done
     for split in {0..31}; do
-        wget https://huggingface.co/datasets/OpenDriveLab/OpenScene/resolve/main/openscene-v1.1/openscene_sensor_test_lidar/openscene_sensor_test_lidar_${split}.tgz
-        tar -xzf openscene_sensor_test_lidar_${split}.tgz && rm openscene_sensor_test_lidar_${split}.tgz
+        if [ ! -f .test_lidar_${split}.done ]; then
+            wget -c https://huggingface.co/datasets/OpenDriveLab/OpenScene/resolve/main/openscene-v1.1/openscene_sensor_test_lidar/openscene_sensor_test_lidar_${split}.tgz
+            tar -xzf openscene_sensor_test_lidar_${split}.tgz && rm openscene_sensor_test_lidar_${split}.tgz
+            touch .test_lidar_${split}.done
+        fi
     done
-    mv openscene-v1.1/meta_datas test_navsim_logs
-    mv openscene-v1.1/sensor_blobs test_sensor_blobs
-    rm -r openscene-v1.1
+    [ -d openscene-v1.1/meta_datas/test ]   && mv openscene-v1.1/meta_datas/test   navsim_logs/test
+    [ -d openscene-v1.1/sensor_blobs/test ] && mv openscene-v1.1/sensor_blobs/test sensor_blobs/test
+    [ -d openscene-v1.1 ] && rm -rf openscene-v1.1
 }
 
 download_navtrain() {
