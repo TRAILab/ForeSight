@@ -10,12 +10,12 @@
 #   bash scripts/navsim_setup.sh metric_cache       # build navtest metric cache
 #   bash scripts/navsim_setup.sh all                # everything (NOT recommended)
 #
-# Layout produced under $OPENSCENE_DATA_ROOT:
+# Layout produced under $OPENSCENE_DATA_ROOT (matches upstream navsim Hydra
+# config that resolves paths as ${OPENSCENE_DATA_ROOT}/navsim_logs/<split>
+# and ${OPENSCENE_DATA_ROOT}/sensor_blobs/<split>):
 #   $OPENSCENE_DATA_ROOT/
-#       trainval_navsim_logs/   (meta)
-#       trainval_sensor_blobs/  (~500 GB if navtrain)
-#       test_navsim_logs/
-#       test_sensor_blobs/
+#       navsim_logs/{trainval,test,mini}/       (meta pkls)
+#       sensor_blobs/{trainval,test,mini}/      (camera + lidar blobs)
 #   $NUPLAN_MAPS_ROOT/maps/
 
 set -e
@@ -88,8 +88,10 @@ download_navmini() {
         wget https://huggingface.co/datasets/OpenDriveLab/OpenScene/resolve/main/openscene-v1.1/openscene_sensor_mini_lidar/openscene_sensor_mini_lidar_${split}.tgz
         tar -xzf openscene_sensor_mini_lidar_${split}.tgz && rm openscene_sensor_mini_lidar_${split}.tgz
     done
-    mv openscene-v1.1/meta_datas mini_navsim_logs
-    mv openscene-v1.1/sensor_blobs mini_sensor_blobs
+    # Move into the upstream-compatible layout: navsim_logs/<split>/ + sensor_blobs/<split>/.
+    mkdir -p navsim_logs sensor_blobs
+    mv openscene-v1.1/meta_datas/mini navsim_logs/mini
+    mv openscene-v1.1/sensor_blobs/mini sensor_blobs/mini
     rm -r openscene-v1.1
 }
 

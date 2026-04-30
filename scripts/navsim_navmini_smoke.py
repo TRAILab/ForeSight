@@ -36,10 +36,10 @@ def main():
 
     openscene_root = Path(os.environ["OPENSCENE_DATA_ROOT"])
     # navmini layout (post download_navmini):
-    #     openscene_root/mini_navsim_logs/<log>.pkl
-    #     openscene_root/mini_sensor_blobs/<sensor data>
-    data_path = openscene_root / "mini_navsim_logs"
-    sensor_blobs_path = openscene_root / "mini_sensor_blobs"
+    #     openscene_root/navsim_logs/mini/<log>.pkl
+    #     openscene_root/sensor_blobs/mini/<sensor data>
+    data_path = openscene_root / "navsim_logs" / "mini"
+    sensor_blobs_path = openscene_root / "sensor_blobs" / "mini"
     if not data_path.is_dir():
         print(f"ERROR: navmini logs dir not found at {data_path}", file=sys.stderr)
         sys.exit(1)
