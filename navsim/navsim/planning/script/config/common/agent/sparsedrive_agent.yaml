@@ -5,8 +5,8 @@ config:
   _target_: navsim.agents.sparsedrive.sparsedrive_config.SparseDriveConfig
   _convert_: 'all'
 
-  foresight_config: ${oc.env:FORESIGHT_ROOT}/projects/configs/sparsedrive_r50_stage2_4gpu_bs24.py
-  foresight_pretrained: ${oc.env:FORESIGHT_ROOT}/ckpt/sparsedrive_stage2.pth
+  foresight_config: ${oc.env:FORESIGHT_ROOT}/projects/configs/sparsedrive_r50_stage2_navsim_planonly.py
+  foresight_pretrained: null  # null = train from scratch; set a stage-2 ckpt to warm-start
 
   num_history_frames: 4
   num_future_poses: 8

@@ -180,16 +180,16 @@ def t7():
         instance_tokens=["a", "b", "c"],
         track_tokens=["A", "B", "C"],
     )
-    boxes11, labels = navsim_boxes_to_sparsedrive(annotations)
-    assert boxes11.shape == (2, 11), f"expected (2,11), got {boxes11.shape}"
+    boxes9, labels = navsim_boxes_to_sparsedrive(annotations)
+    assert boxes9.shape == (2, 9), f"expected (2,9), got {boxes9.shape}"
     assert labels.shape == (2,), f"expected (2,), got {labels.shape}"
     # vehicle -> car (idx 0); pedestrian -> 8
     assert labels.tolist() == [0, 8], f"got labels {labels.tolist()}"
-    # log_W = log(1.8) for vehicle
-    assert abs(boxes11[0, 3] - np.log(1.8)) < 1e-5
-    # cos(0) = 1 for vehicle
-    assert abs(boxes11[0, 7] - 1.0) < 1e-5
-    print(f"   boxes shape: {boxes11.shape}  labels: {labels.tolist()}")
+    # raw W = 1.8 for vehicle (no log here — head's encode_reg_target logs it)
+    assert abs(boxes9[0, 3] - 1.8) < 1e-5
+    # raw heading = 0 for vehicle
+    assert abs(boxes9[0, 6] - 0.0) < 1e-5
+    print(f"   boxes shape: {boxes9.shape}  labels: {labels.tolist()}")
 
 
 def main():

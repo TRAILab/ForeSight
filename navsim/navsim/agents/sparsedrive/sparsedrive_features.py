@@ -64,16 +64,17 @@ _NAVSIM_TO_NUSC_CLASS = {
 def navsim_boxes_to_sparsedrive(
     annotations: Annotations,
 ) -> Tuple[npt.NDArray[np.float32], npt.NDArray[np.int_]]:
-    """nuPlan Annotations -> SparseDrive (N, 11) anchors + (N,) class indices.
+    """nuPlan Annotations -> SparseDrive raw GT (N, 9) + class indices (N,).
 
-    SparseDrive 11-dim anchor (projects/mmdet3d_plugin/core/box3d.py):
-        [X, Y, Z, log_W, log_L, log_H, SIN_YAW, COS_YAW, VX, VY, VZ]
+    SparseDrive's training-mode loss path expects RAW boxes in nuScenes layout
+    (the head's encode_reg_target handles log-WLH + sin/cos-yaw):
+        [X, Y, Z, W, L, H, YAW, VX, VY]
     nuPlan box (BoundingBoxIndex):
         [X, Y, Z, LENGTH, WIDTH, HEIGHT, HEADING]
     Velocity comes from Annotations.velocity_3d (m/s, lidar frame).
     """
     if len(annotations.boxes) == 0:
-        return np.zeros((0, 11), dtype=np.float32), np.zeros((0,), dtype=np.int64)
+        return np.zeros((0, 9), dtype=np.float32), np.zeros((0,), dtype=np.int64)
 
     out_boxes: List[npt.NDArray[np.float32]] = []
     out_labels: List[int] = []
@@ -89,20 +90,15 @@ def navsim_boxes_to_sparsedrive(
         width = max(float(b[BoundingBoxIndex.WIDTH]), 1e-3)
         height = max(float(b[BoundingBoxIndex.HEIGHT]), 1e-3)
         heading = float(b[BoundingBoxIndex.HEADING])
-        vx, vy, vz = annotations.velocity_3d[i].astype(np.float32).tolist()
+        vx, vy, _vz = annotations.velocity_3d[i].astype(np.float32).tolist()
         out_boxes.append(
-            np.array(
-                [x, y, z,
-                 np.log(width), np.log(length), np.log(height),
-                 np.sin(heading), np.cos(heading),
-                 vx, vy, vz],
-                dtype=np.float32,
-            )
+            np.array([x, y, z, width, length, height, heading, vx, vy],
+                     dtype=np.float32)
         )
         out_labels.append(cls)
 
     if not out_boxes:
-        return np.zeros((0, 11), dtype=np.float32), np.zeros((0,), dtype=np.int64)
+        return np.zeros((0, 9), dtype=np.float32), np.zeros((0,), dtype=np.int64)
     return np.stack(out_boxes, axis=0), np.array(out_labels, dtype=np.int64)
 
 
@@ -175,14 +171,13 @@ class SparseDriveFeatureBuilder(AbstractFeatureBuilder):
 
         img_tensor = torch.stack(imgs, dim=0)  # (num_cams, 3, H, W)
 
-        # ego status: [acc_x, acc_y, vel_x, vel_y, cmd_left, cmd_straight, cmd_right, cmd_unknown]
-        ego_status = np.concatenate(
-            [
-                current_status.ego_acceleration[:2],
-                current_status.ego_velocity[:2],
-                current_status.driving_command.astype(np.float32),
-            ]
-        ).astype(np.float32)
+        # SparseDrive expects a 10-dim ego_status (nuScenes layout):
+        #   [acc_x, acc_y, acc_z, rot_rate_xyz(3), vel_x, vel_y, vel_z, steer]
+        # NavSim ships 2D acc + 2D vel only; pad the unavailable channels with 0.
+        ego_status = np.zeros(10, dtype=np.float32)
+        ego_status[0:2] = current_status.ego_acceleration[:2]
+        ego_status[6:8] = current_status.ego_velocity[:2]
+        # ego_status[2] (acc_z), [3:6] (rot_rate), [8] (vel_z), [9] (steer) -> 0
 
         return {
             "img": img_tensor,

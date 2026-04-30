@@ -140,8 +140,9 @@ class SparseDriveAgent(AbstractAgent):
         # task_config.with_det=False / with_motion=False / planning-only loss.
         bs = img.shape[0]
         if "img_metas" not in data:
+            eye = torch.eye(4, device=img.device, dtype=img.dtype)
             data["img_metas"] = [
-                {"T_global": img.new_zeros(4, 4) + torch.eye(4, device=img.device)}
+                {"T_global": eye.clone(), "T_global_inv": eye.clone()}
                 for _ in range(bs)
             ]
         if "timestamp" not in data:
@@ -156,7 +157,7 @@ class SparseDriveAgent(AbstractAgent):
                 img.new_zeros(0, dtype=torch.long) for _ in range(bs)
             ]
         if "gt_bboxes_3d" not in data:
-            data["gt_bboxes_3d"] = [img.new_zeros(0, 11) for _ in range(bs)]
+            data["gt_bboxes_3d"] = [img.new_zeros(0, 9) for _ in range(bs)]
         if "gt_map_labels" not in data:
             data["gt_map_labels"] = [
                 img.new_zeros(0, dtype=torch.long) for _ in range(bs)
@@ -166,6 +167,21 @@ class SparseDriveAgent(AbstractAgent):
         if "map_instance_id" not in data:
             data["map_instance_id"] = [
                 img.new_zeros(0, dtype=torch.long) for _ in range(bs)
+            ]
+        # Motion head needs per-agent future trajectories. Real per-agent
+        # tracking through time isn't yet wired in the target builder, so for
+        # the planning-only first pass we feed empty agent lists. Their motion
+        # losses become zero contributions on the all-zero numerator.
+        # Note: motion head's fut_ts uses the head's own constant (16 for
+        # navsim variant) so we infer from the model.
+        fut_ts = self._sparsedrive_model.head.motion_plan_head.fut_ts
+        if "gt_agent_fut_trajs" not in data:
+            data["gt_agent_fut_trajs"] = [
+                img.new_zeros(0, fut_ts, 2) for _ in range(bs)
+            ]
+        if "gt_agent_fut_masks" not in data:
+            data["gt_agent_fut_masks"] = [
+                img.new_zeros(0, fut_ts) for _ in range(bs)
             ]
 
         if self.training:

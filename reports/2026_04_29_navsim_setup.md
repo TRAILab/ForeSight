@@ -149,6 +149,7 @@ Files under `navsim/navsim/agents/sparsedrive/`:
 | --- | --- | --- | --- |
 | local | smoke test (7 import/build/forward checks) | n/a | COMPLETED |
 | local | navmini E2E smoke (real Scene through agent) | n/a | COMPLETED |
+| local | navmini Hydra training step 1 (forward+loss+backward) | n/a | COMPLETED |
 | killarney | sparsedrive navmini training | n/a | PENDING |
 | killarney | sparsedrive navtrain training | n/a | PENDING |
 
@@ -222,6 +223,48 @@ What it does NOT prove yet:
   for synthetic features may collide with the real GT shapes via
   `cls_wise_reg_weights`.
 - PDM-Score eval on navtest.
+
+### First Hydra training step on navmini (2026-04-29)
+
+`scripts/navsim_train.sh navmini ...` produces a complete training step
+through the navsim Lightning runner with all four heads active:
+
+```
+Epoch 0:  33%|███▎      | 1/3 [00:01<00:02,  0.79it/s]
+  train/det_loss_cls_0_step=2.13e+3  train/det_loss_box_0_step=17.9
+  train/map_loss_cls_0_step=54.3     train/map_loss_line_0_step=0.0
+  train/motion_loss_cls_0_step=0.0   train/motion_loss_reg_0_step=0.0
+  train/planning_loss_cls_0_step=0.027 train/planning_loss_reg_0_step=2.51
+  train/planning_loss_status_0_step=1.04
+  train/loss_step=1.77e+4
+```
+
+Forward + loss + backward + logging all green. Loss magnitudes are noisy
+because the training-mode placeholders (empty agent futures, empty map GT)
+mean det/map heads see no real supervision yet.
+
+Wiring fixes that landed to get here:
+- `sparsedrive_agent.yaml` was pointing at the baseline nuScenes config; now
+  points at `sparsedrive_r50_stage2_navsim_planonly.py`.
+- Three additional hardcoded `3 *` driving-cmd literals replaced with
+  `num_driving_cmds`: in `motion/target.py` (PlanningTarget.sample), in
+  `motion/decoder.py` (HierarchicalPlanningDecoder.decode), and in
+  `motion/motion_blocks.py` (MotionPlanningRefinementModule).
+- Target builder produces RAW 9-dim boxes `[X,Y,Z,W,L,H,YAW,VX,VY]` (the
+  head's `encode_reg_target` does the log/sin/cos encoding); not the
+  pre-encoded 11-dim form I had originally.
+- Feature builder returns a 10-dim `ego_status` matching the nuScenes
+  layout `[acc_xyz, rot_rate_xyz, vel_xyz, steer]`; nuPlan ships only 2D
+  acc + 2D vel so the unavailable channels are zero-padded.
+- Agent injects `T_global_inv` along with `T_global` into `img_metas`
+  for the temporal cache.
+
+Known follow-ups blocking multi-step training:
+- Step 2 hits `TypeError: can't convert cuda:0 device type tensor to numpy`
+  inside the instance_bank temporal cache. The cache path expects T_global
+  on CPU as numpy; the agent currently injects identity tensors on CUDA.
+  Needs the feature builder to ship a real T_global from the scene's
+  ego_pose (and probably as numpy) instead of a placeholder.
 
 ### nuPlan -> 11-dim box conversion (2026-04-29)
 

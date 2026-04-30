@@ -497,6 +497,7 @@ model = dict(
                 type="PlanningTarget",
                 ego_fut_ts=ego_fut_ts,
                 ego_fut_mode=ego_fut_mode,
+                num_driving_cmds=num_driving_cmds,
             ),
             plan_loss_cls=dict(
                 type='FocalLoss',
