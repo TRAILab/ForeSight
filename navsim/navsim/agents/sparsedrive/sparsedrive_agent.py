@@ -140,9 +140,12 @@ class SparseDriveAgent(AbstractAgent):
         # task_config.with_det=False / with_motion=False / planning-only loss.
         bs = img.shape[0]
         if "img_metas" not in data:
-            eye = torch.eye(4, device=img.device, dtype=img.dtype)
+            # SparseDrive's instance_bank stacks T_global / T_global_inv via
+            # numpy.stack, so they must be CPU numpy arrays, not torch tensors.
+            import numpy as np
+            eye = np.eye(4, dtype=np.float32)
             data["img_metas"] = [
-                {"T_global": eye.clone(), "T_global_inv": eye.clone()}
+                {"T_global": eye.copy(), "T_global_inv": eye.copy()}
                 for _ in range(bs)
             ]
         if "timestamp" not in data:

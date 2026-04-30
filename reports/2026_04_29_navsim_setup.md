@@ -150,6 +150,7 @@ Files under `navsim/navsim/agents/sparsedrive/`:
 | local | smoke test (7 import/build/forward checks) | n/a | COMPLETED |
 | local | navmini E2E smoke (real Scene through agent) | n/a | COMPLETED |
 | local | navmini Hydra training step 1 (forward+loss+backward) | n/a | COMPLETED |
+| local | navmini Hydra multi-step training (5 steps, loss decreases) | n/a | COMPLETED |
 | killarney | sparsedrive navmini training | n/a | PENDING |
 | killarney | sparsedrive navtrain training | n/a | PENDING |
 
@@ -259,12 +260,12 @@ Wiring fixes that landed to get here:
 - Agent injects `T_global_inv` along with `T_global` into `img_metas`
   for the temporal cache.
 
-Known follow-ups blocking multi-step training:
-- Step 2 hits `TypeError: can't convert cuda:0 device type tensor to numpy`
-  inside the instance_bank temporal cache. The cache path expects T_global
-  on CPU as numpy; the agent currently injects identity tensors on CUDA.
-  Needs the feature builder to ship a real T_global from the scene's
-  ego_pose (and probably as numpy) instead of a placeholder.
+Multi-step training also works after switching the agent's
+`T_global` / `T_global_inv` injections from CUDA torch tensors to CPU
+numpy arrays — `instance_bank.get` calls `np.stack` on them and that
+needed numpy. 5 training steps land cleanly with measurable loss decrease:
+`loss_step` drops from 1.77e4 → 476 across the 5-batch run on a single
+log; `planning_loss_reg` drops 2.51 → 0.80.
 
 ### nuPlan -> 11-dim box conversion (2026-04-29)
 
