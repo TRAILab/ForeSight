@@ -26,6 +26,8 @@ class MotionPlanningRefinementModule(BaseModule):
         with_da_head=False,
         with_conflict_head=False,
         plan_mode_time_queries=False,
+        plan_per_bucket_reg=False,
+        plan_bucket_split=None,
     ):
         super(MotionPlanningRefinementModule, self).__init__()
         self.embed_dims = embed_dims
@@ -35,6 +37,17 @@ class MotionPlanningRefinementModule(BaseModule):
         self.ego_fut_mode = ego_fut_mode
         self.num_driving_cmds = num_driving_cmds
         self.plan_mode_time_queries = plan_mode_time_queries
+        # Variant 4: per-bucket plan_reg branch on speedstrat anchors. Modes
+        # 0..plan_bucket_split-1 use a "low-speed" reg MLP and the remainder
+        # use a "high-speed" reg MLP. Disabled by default; baseline keeps the
+        # single shared plan_reg_branch.
+        self.plan_per_bucket_reg = bool(plan_per_bucket_reg)
+        if self.plan_per_bucket_reg:
+            assert plan_bucket_split is not None and 0 < plan_bucket_split < ego_fut_mode, (
+                f"plan_per_bucket_reg=True requires 0 < plan_bucket_split < "
+                f"ego_fut_mode={ego_fut_mode}; got plan_bucket_split={plan_bucket_split}"
+            )
+            self.plan_bucket_split = int(plan_bucket_split)
 
         self.motion_cls_branch = nn.Sequential(
             *linear_relu_ln(embed_dims, 1, 2),
@@ -54,13 +67,30 @@ class MotionPlanningRefinementModule(BaseModule):
         # Time-queries mode: each query produces a single (x, y) waypoint.
         # Default: each query produces all ego_fut_ts waypoints at once.
         plan_reg_out = 2 if plan_mode_time_queries else ego_fut_ts * 2
-        self.plan_reg_branch = nn.Sequential(
-            nn.Linear(embed_dims, embed_dims),
-            nn.ReLU(),
-            nn.Linear(embed_dims, embed_dims),
-            nn.ReLU(),
-            nn.Linear(embed_dims, plan_reg_out),
-        )
+        if self.plan_per_bucket_reg:
+            self.plan_reg_branch_low = nn.Sequential(
+                nn.Linear(embed_dims, embed_dims),
+                nn.ReLU(),
+                nn.Linear(embed_dims, embed_dims),
+                nn.ReLU(),
+                nn.Linear(embed_dims, plan_reg_out),
+            )
+            self.plan_reg_branch_high = nn.Sequential(
+                nn.Linear(embed_dims, embed_dims),
+                nn.ReLU(),
+                nn.Linear(embed_dims, embed_dims),
+                nn.ReLU(),
+                nn.Linear(embed_dims, plan_reg_out),
+            )
+            self.plan_reg_branch = None
+        else:
+            self.plan_reg_branch = nn.Sequential(
+                nn.Linear(embed_dims, embed_dims),
+                nn.ReLU(),
+                nn.Linear(embed_dims, embed_dims),
+                nn.ReLU(),
+                nn.Linear(embed_dims, plan_reg_out),
+            )
         self.plan_status_branch = nn.Sequential(
             nn.Linear(embed_dims, embed_dims),
             nn.ReLU(),
@@ -118,13 +148,32 @@ class MotionPlanningRefinementModule(BaseModule):
             T = self.ego_fut_ts
             plan_query_mt = plan_query.reshape(bs, 1, M_total, T, self.embed_dims)
             # Per-(mode, ts) (x, y).
+            assert not self.plan_per_bucket_reg, (
+                "plan_per_bucket_reg is not supported with plan_mode_time_queries"
+            )
             plan_reg = self.plan_reg_branch(plan_query_mt).reshape(bs, 1, M_total, T, 2)
             # Mode classification: collapse over time via mean before MLP.
             plan_query_mode = plan_query_mt.mean(dim=3)  # (bs, 1, M_total, D)
             plan_cls = self.plan_cls_branch(plan_query_mode).squeeze(-1)
         else:
             plan_cls = self.plan_cls_branch(plan_query).squeeze(-1)
-            plan_reg = self.plan_reg_branch(plan_query).reshape(bs, 1, self.num_driving_cmds * self.ego_fut_mode, self.ego_fut_ts, 2)
+            if self.plan_per_bucket_reg:
+                # plan_query: (bs, 1, num_modes, D) where
+                # num_modes = num_driving_cmds * ego_fut_mode. Within each cmd,
+                # modes [0:split) hit the low-bucket reg MLP and [split:M) hit
+                # the high-bucket MLP. Reshape so the bucket boundary is
+                # contiguous, run the two MLPs, restore order.
+                num_cmd = self.num_driving_cmds
+                M = self.ego_fut_mode
+                split = self.plan_bucket_split
+                pq = plan_query.reshape(bs, 1, num_cmd, M, self.embed_dims)
+                low = self.plan_reg_branch_low(pq[..., :split, :])
+                high = self.plan_reg_branch_high(pq[..., split:, :])
+                plan_reg = torch.cat([low, high], dim=-2).reshape(
+                    bs, 1, num_cmd * M, self.ego_fut_ts, 2
+                )
+            else:
+                plan_reg = self.plan_reg_branch(plan_query).reshape(bs, 1, self.num_driving_cmds * self.ego_fut_mode, self.ego_fut_ts, 2)
         planning_status = self.plan_status_branch(ego_feature + ego_anchor_embed)
 
         plan_da = None

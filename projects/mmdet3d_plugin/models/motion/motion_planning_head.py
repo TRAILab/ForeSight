@@ -299,6 +299,13 @@ class MotionPlanningHead(BaseModule):
         ego_only_planning=False,
         planning_temporal_stack=0,
         planning_temporal_egocomp=True,
+        plan_anchor_norm_mode='none',
+        plan_anchor_refmag=None,
+        plan_anchor_velnorm_eps=1.0,
+        plan_magnitude_head_enable=False,
+        plan_magnitude_loss_weight=1.0,
+        plan_ego_status_encode_enable=False,
+        plan_ego_status_indices=(0, 1, 5, 6, 7),
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -352,6 +359,24 @@ class MotionPlanningHead(BaseModule):
         self.ego_only_planning = ego_only_planning
         self.planning_temporal_stack = int(planning_temporal_stack)
         self.planning_temporal_egocomp = bool(planning_temporal_egocomp)
+        # Anchor normalization variants. 'none' is the default static-meter
+        # behavior. 'endptnorm' loads endpoint-normalized shape anchors and a
+        # per-cluster reference-magnitude buffer (refmag); the metric anchor =
+        # shape * refmag, fixed per (cmd, mode). 'velnorm' loads velocity-
+        # normalized shape anchors (units = seconds); the metric anchor =
+        # shape * ||v_0|| with ||v_0|| read per-batch from metas['ego_status'].
+        if plan_anchor_norm_mode not in ('none', 'endptnorm', 'velnorm'):
+            raise ValueError(
+                f"plan_anchor_norm_mode must be one of "
+                f"'none'/'endptnorm'/'velnorm'; got {plan_anchor_norm_mode!r}"
+            )
+        self.plan_anchor_norm_mode = plan_anchor_norm_mode
+        self.plan_anchor_velnorm_eps = float(plan_anchor_velnorm_eps)
+        self._plan_anchor_refmag_path = plan_anchor_refmag
+        self.plan_magnitude_head_enable = bool(plan_magnitude_head_enable)
+        self.plan_magnitude_loss_weight = float(plan_magnitude_loss_weight)
+        self.plan_ego_status_encode_enable = bool(plan_ego_status_encode_enable)
+        self.plan_ego_status_indices = list(plan_ego_status_indices)
         # Cache for temporal feature stacking. Set to None at construction;
         # populated each forward (current frame) and consumed on the next.
         self._temp_col_feats = None
@@ -527,6 +552,57 @@ class MotionPlanningHead(BaseModule):
             Linear(embed_dims, embed_dims),
         )
 
+        # Endpoint-normalization variant: load the per-cluster reference
+        # magnitude (median ||end|| of the cluster's training trajectories).
+        # Shape (num_driving_cmds, ego_fut_mode); used to recover metric
+        # sampling positions as shape_anchor * refmag.
+        if self.plan_anchor_norm_mode == 'endptnorm':
+            if self._plan_anchor_refmag_path is None:
+                raise ValueError(
+                    "plan_anchor_norm_mode='endptnorm' requires "
+                    "plan_anchor_refmag (path to per-cluster refmag .npy)"
+                )
+            refmag_arr = np.load(self._plan_anchor_refmag_path)
+            assert refmag_arr.shape == self.plan_anchor.shape[:2], (
+                f"plan_anchor_refmag shape {refmag_arr.shape} does not match "
+                f"plan_anchor leading shape {tuple(self.plan_anchor.shape[:2])}"
+            )
+            self.plan_anchor_refmag = nn.Parameter(
+                torch.tensor(refmag_arr, dtype=torch.float32),
+                requires_grad=False,
+            )
+
+        # Per-decoder-stage scalar magnitude head. One Linear-MLP per refine
+        # stage; output shape (bs, num_driving_cmds * ego_fut_mode) at each
+        # stage. Supervised below by smooth-L1 against ||gt_end|| for the
+        # cmd-indexed best-mode (matches planning_sampler structure).
+        if self.plan_magnitude_head_enable:
+            n_refine = sum(1 for op in operation_order if op == 'refine')
+            self.plan_magnitude_branches = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(embed_dims, embed_dims),
+                    nn.ReLU(),
+                    nn.Linear(embed_dims, embed_dims),
+                    nn.ReLU(),
+                    nn.Linear(embed_dims, 1),
+                )
+                for _ in range(n_refine)
+            ])
+
+        # ego_status injection. MLP consuming a fixed slice of CAN-frame
+        # ego_status (default planar accel + yaw rate + planar velocity);
+        # output broadcast-added to plan_mode_query at init and at every
+        # per-stage rebuild after refine. The MLP learns the CAN→LiDAR
+        # rotation implicitly; no pre-rotation is applied (rotation about z
+        # is consistent across both frames under aug).
+        if self.plan_ego_status_encode_enable:
+            in_dim = len(self.plan_ego_status_indices)
+            self.plan_ego_status_encoder = nn.Sequential(
+                nn.Linear(in_dim, embed_dims),
+                nn.ReLU(),
+                nn.Linear(embed_dims, embed_dims),
+            )
+
         self.num_det = num_det
         self.num_map = num_map
 
@@ -540,6 +616,32 @@ class MotionPlanningHead(BaseModule):
         # Index of the refine layer (last refine op) — used for DN forward.
         refine_indices = [i for i, op in enumerate(operation_order) if op == 'refine']
         self._dn_refine_idx = refine_indices[-1] if refine_indices else None
+
+    def _get_initial_plan_anchor(self, bs, metas):
+        """Per-batch metric plan_anchor at decoder init.
+
+        Returns a tensor of shape (bs, num_driving_cmds * ego_fut_mode,
+        ego_fut_ts, 2) in metric LiDAR-frame meters. The default 'none'
+        path tiles the static (3, M, T, 2) buffer; the 'endptnorm' path
+        rescales each (cmd, mode) anchor by the per-cluster reference
+        magnitude; the 'velnorm' path rescales by per-batch ||v_0|| read
+        from metas['ego_status'][:, 6:8].
+        """
+        base = self.plan_anchor[None]  # (1, 3, M, T, 2)
+        if self.plan_anchor_norm_mode == 'endptnorm':
+            scaled = base * self.plan_anchor_refmag[None, ..., None, None]
+            plan_anchor = scaled.expand(bs, -1, -1, -1, -1)
+        elif self.plan_anchor_norm_mode == 'velnorm':
+            ego_status = metas['ego_status'].to(base.dtype)
+            v_xy = ego_status[..., 6:8]
+            v_0 = torch.linalg.norm(v_xy, dim=-1)  # (bs,)
+            v_0 = v_0.clamp_min(self.plan_anchor_velnorm_eps)
+            plan_anchor = base.expand(bs, -1, -1, -1, -1) * v_0[
+                :, None, None, None, None
+            ]
+        else:
+            plan_anchor = base.expand(bs, -1, -1, -1, -1)
+        return plan_anchor.reshape(bs, -1, self.ego_fut_ts, 2).contiguous()
 
     def _build_motion_endpoint_anchors(self, motion_anchor_upd, det_anchors, motion_cls):
         """Build 3D box anchors at the best-mode predicted endpoint for each agent.
@@ -1205,9 +1307,7 @@ class MotionPlanningHead(BaseModule):
 
         # =========== mode anchor init ===========
         motion_anchor = self.get_motion_anchor(det_classification, det_anchors)
-        plan_anchor = torch.tile(
-            self.plan_anchor[None], (bs, 1, 1, 1, 1)
-        ).reshape(bs, -1, self.ego_fut_ts, 2)
+        plan_anchor = self._get_initial_plan_anchor(bs, metas)
 
         # =========== mode query init ===========
         motion_mode_query = self.motion_anchor_encoder(
@@ -1226,6 +1326,25 @@ class MotionPlanningHead(BaseModule):
                 plan_anchor[..., -1, :], hidden_dim=self.embed_dims
             )
             plan_mode_query = self.plan_anchor_encoder(plan_pos)
+        # ego_status injection (variants 2/3): broadcast a per-batch encoded
+        # vector to all plan modes. Same encoded vector is re-applied at every
+        # per-stage rebuild after refine, so ego state stays in scope across
+        # decoder layers.
+        if self.plan_ego_status_encode_enable:
+            es_in = metas['ego_status'][:, self.plan_ego_status_indices].to(
+                plan_mode_query.dtype
+            )
+            ego_status_embed = self.plan_ego_status_encoder(es_in)  # (bs, D)
+            if self.plan_mode_time_queries:
+                plan_mode_query = (
+                    plan_mode_query + ego_status_embed[:, None, :]
+                )
+            else:
+                plan_mode_query = (
+                    plan_mode_query + ego_status_embed[:, None, :]
+                )
+        else:
+            ego_status_embed = None
 
         # =========== cat instance and ego ===========
         instance_feature_selected = torch.cat([instance_feature_selected, ego_feature], dim=1)
@@ -1271,8 +1390,10 @@ class MotionPlanningHead(BaseModule):
         planning_classification = []
         planning_prediction = []
         planning_status = []
+        planning_magnitude = []
         planning_da_logits = []
         planning_conflict_logits = []
+        _refine_count = 0
         # Initialize motion endpoint anchors from k-means prior for first decoder
         # deformable stage — a future position rather than the current det box.
         if self.motion_deformable_multimode:
@@ -1726,6 +1847,16 @@ class MotionPlanningHead(BaseModule):
                 planning_classification.append(plan_cls)
                 planning_prediction.append(plan_reg)
                 planning_status.append(plan_status)
+                # Per-stage scalar magnitude head (variants 1a / 3). Reads the
+                # refined plan_query for this stage and emits one scalar per
+                # plan mode; supervised in loss_planning by smooth-L1 vs the
+                # cmd-indexed best-mode's ||gt_end||.
+                if self.plan_magnitude_head_enable:
+                    mag_pred = self.plan_magnitude_branches[_refine_count](
+                        plan_query.squeeze(1)
+                    ).squeeze(-1)
+                    planning_magnitude.append(mag_pred)
+                _refine_count += 1
                 # Update mode anchor queries for the next decoder iteration.
                 # cumsum converts delta trajectories to absolute endpoints.
                 motion_anchor_upd = motion_reg.detach().cumsum(dim=-2)
@@ -1760,6 +1891,10 @@ class MotionPlanningHead(BaseModule):
                         gen_sineembed_for_position(
                             plan_anchor[..., -1, :], hidden_dim=self.embed_dims
                         )
+                    )
+                if ego_status_embed is not None:
+                    plan_mode_query = (
+                        plan_mode_query + ego_status_embed[:, None, :]
                     )
         
         cache_motion_feature = (
@@ -1796,6 +1931,8 @@ class MotionPlanningHead(BaseModule):
             planning_output["da_logits"] = planning_da_logits
         if planning_conflict_logits:
             planning_output["conflict_logits"] = planning_conflict_logits
+        if planning_magnitude:
+            planning_output["magnitude"] = planning_magnitude
 
         if self.training:
             refine_module = self.layers[self._dn_refine_idx]
@@ -1820,6 +1957,12 @@ class MotionPlanningHead(BaseModule):
                 dn_ego_embed = anchor_embed[:, dn_e_start:dn_e_end]
                 # dn_plan_mode_query_var: (bs, num_dn_ego, 1, embed_dims)
                 dn_pq = dn_plan_mode_query_var + (dn_ego_inst + dn_ego_embed).unsqueeze(2)
+                if refine_module.plan_reg_branch is None:
+                    raise RuntimeError(
+                        "DN-plan groups are not supported when "
+                        "plan_per_bucket_reg=True (no shared plan_reg_branch). "
+                        "Set num_dn_plan_groups=0."
+                    )
                 dn_plan_reg = refine_module.plan_reg_branch(dn_pq).reshape(
                     bs, num_dn_ego, self.ego_fut_ts, 2
                 )
@@ -1927,6 +2070,7 @@ class MotionPlanningHead(BaseModule):
         status_preds = model_outs["status"]
         da_logits_list = model_outs.get("da_logits", [])
         conf_logits_list = model_outs.get("conflict_logits", [])
+        magnitude_preds = model_outs.get("magnitude", [])
         output = {}
         for decoder_idx, (cls, reg, status) in enumerate(
             zip(cls_scores, reg_preds, status_preds)
@@ -2000,6 +2144,26 @@ class MotionPlanningHead(BaseModule):
                     f"planning_loss_status_{decoder_idx}": status_loss,
                 }
             )
+
+            if decoder_idx < len(magnitude_preds):
+                # Smooth-L1 between mag_pred for the cmd-indexed best-mode and
+                # ||gt_end||. cls_target (from planning_sampler) is the
+                # winning-mode index within the 6-mode cmd slice, so we gather
+                # mag for that mode only — non-matched modes are not penalized.
+                mag_all = magnitude_preds[decoder_idx]  # (bs, 3*M)
+                bs_m = mag_all.shape[0]
+                M = self.ego_fut_mode
+                cmd_idx_m = data['gt_ego_fut_cmd'].argmax(dim=-1)  # (bs,)
+                bs_arr = torch.arange(bs_m, device=mag_all.device)
+                mag_cmd = mag_all.reshape(bs_m, 3, M)[bs_arr, cmd_idx_m]  # (bs, M)
+                best_mode = cls_target.reshape(bs_m).long()
+                mag_best = mag_cmd[bs_arr, best_mode]  # (bs,)
+                gt_cum = data['gt_ego_fut_trajs'].cumsum(dim=-2)  # (bs, T, 2)
+                gt_end_norm = torch.linalg.norm(gt_cum[:, -1, :], dim=-1)  # (bs,)
+                mag_loss = F.smooth_l1_loss(
+                    mag_best, gt_end_norm.to(mag_best.dtype), beta=1.0
+                ) * self.plan_magnitude_loss_weight
+                output[f"planning_loss_mag_{decoder_idx}"] = mag_loss
 
             if self.plan_diversity_reg:
                 # Pairwise-similarity penalty across cmd-indexed plan modes.
