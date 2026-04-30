@@ -147,9 +147,10 @@ Files under `navsim/navsim/agents/sparsedrive/`:
 
 | Server | Config | Job ID | Status |
 | --- | --- | --- | --- |
-| local | smoke test (env build + 5 import/build checks) | n/a | COMPLETED |
-| killarney | sparsedrive navmini smoke | n/a | PENDING |
-| killarney | sparsedrive navtrain | n/a | PENDING |
+| local | smoke test (7 import/build/forward checks) | n/a | COMPLETED |
+| local | navmini E2E smoke (real Scene through agent) | n/a | COMPLETED |
+| killarney | sparsedrive navmini training | n/a | PENDING |
+| killarney | sparsedrive navtrain training | n/a | PENDING |
 
 ### Smoke test (2026-04-29, local, GPU)
 
@@ -191,6 +192,36 @@ What this does NOT prove yet:
   with_det/with_map gate that doesn't break motion_plan_head's anchor_encoder
   dependency on det_head.
 - PDM scoring — needs metric cache + nuplan maps + a real navtest pass.
+
+### navmini E2E smoke (2026-04-29, local, GPU)
+
+`docker run ... python scripts/navsim_navmini_smoke.py`
+
+```
+scene token: 8bc34517e08758ff
+log: 2021.10.05.07.10.04_veh-52_01442_01802  map: sg-one-north
+feature keys: img, projection_mat, image_wh, ego_status, gt_ego_fut_cmd
+target keys:  gt_ego_fut_trajs, gt_ego_fut_masks, gt_bboxes_3d, gt_labels_3d
+gt_bboxes_3d: (5, 11)  gt_labels_3d: (5,)
+prediction shape: (1, 8, 2)
+```
+
+What this proves:
+- The vendored navsim `SceneLoader` resolves the `${OPENSCENE_DATA_ROOT}/
+  navsim_logs/<split>` and `${OPENSCENE_DATA_ROOT}/sensor_blobs/<split>`
+  layout produced by our `scripts/navsim_setup.sh download_navmini`.
+- The nuPlan annotations on a real scene convert cleanly to 5 SparseDrive
+  11-dim boxes + class indices.
+- The full SparseDrive pipeline (backbone → FPN → det/map/motion/plan
+  heads → decoder) runs end-to-end on real navmini sensor data and
+  produces an `(B, ego_fut_ts, 2)` ego trajectory.
+
+What it does NOT prove yet:
+- Training-mode forward + loss against real navmini GT. Needs auditing of
+  the det/map sampler paths because the empty-GT injection that worked
+  for synthetic features may collide with the real GT shapes via
+  `cls_wise_reg_weights`.
+- PDM-Score eval on navtest.
 
 ### nuPlan -> 11-dim box conversion (2026-04-29)
 
