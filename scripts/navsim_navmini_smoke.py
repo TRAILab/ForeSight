@@ -57,10 +57,14 @@ def main():
         agent = agent.cuda()
     agent.eval()
 
-    print(f"Loading first navmini scene...")
+    # Only download_navmini's first 2 camera + lidar splits exist on disk.
+    # The metadata covers more scenes; restrict to logs whose blobs we have.
+    available_logs = [d.name for d in sensor_blobs_path.iterdir() if d.is_dir()]
+    print(f"Loading navmini scenes for {len(available_logs)} logs with blobs on disk...")
     scene_filter = SceneFilter(
         num_history_frames=cfg.num_history_frames,
         num_future_frames=cfg.num_future_poses,
+        log_names=available_logs,
         max_scenes=1,
     )
     scene_loader = SceneLoader(
@@ -70,6 +74,9 @@ def main():
         sensor_config=agent.get_sensor_config(),
     )
     print(f"  {len(scene_loader)} scenes available; loading the first one")
+    if len(scene_loader) == 0:
+        print("ERROR: no scenes match the on-disk blobs", file=sys.stderr)
+        sys.exit(1)
     token = scene_loader.tokens[0]
     scene = scene_loader.get_scene_from_token(token)
     print(f"  scene token: {token}")
