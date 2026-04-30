@@ -36,6 +36,12 @@ CMD=${@:-bash}
 APPTAINER=/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/Core/apptainer/1.4.5/bin/apptainer
 SIF_PATH=${SIF_PATH:-/scratch/spapais/ForeSight/docker/foresight_navsim.sif}
 
+# Build optional data binds. Skip openscene / nuplan-maps when the host dirs
+# are missing so the smoke test (no data needed) still runs cleanly.
+DATA_BINDS=""
+[ -d "$OPENSCENE_HOST_DIR" ]   && DATA_BINDS+=" --bind=$OPENSCENE_HOST_DIR:/workspace/ForeSight/data/openscene"
+[ -d "$NUPLAN_MAPS_HOST_DIR" ] && DATA_BINDS+=" --bind=$NUPLAN_MAPS_HOST_DIR:/workspace/ForeSight/data/nuplan-maps-v1.0"
+
 CONTAINER_CMD="$APPTAINER exec --nv -c -e --pwd /workspace/ForeSight/ \
 --env WANDB_API_KEY=$WANDB_API_KEY \
 --env WANDB_MODE=offline \
@@ -49,8 +55,7 @@ CONTAINER_CMD="$APPTAINER exec --nv -c -e --pwd /workspace/ForeSight/ \
 --bind=$TMP_DIR:/tmp \
 --bind=$WANDB_PERSIST_DIR:/wandb \
 --bind=/home/spapais/ForeSight:/workspace/ForeSight/ \
---bind=$OPENSCENE_HOST_DIR:/workspace/ForeSight/data/openscene \
---bind=$NUPLAN_MAPS_HOST_DIR:/workspace/ForeSight/data/nuplan-maps-v1.0 \
+$DATA_BINDS \
 --bind=$WORK_DIR:/workspace/ForeSight/work_dirs \
 $SIF_PATH"
 CONTAINER_CMD="$CONTAINER_CMD bash -c 'export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:\$LD_LIBRARY_PATH && $CMD'"
