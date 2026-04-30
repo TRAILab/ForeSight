@@ -61,20 +61,29 @@ download_test() {
 
 download_navtrain() {
     cd "${OPENSCENE_DATA_ROOT}"
-    wget https://huggingface.co/datasets/OpenDriveLab/OpenScene/resolve/main/openscene-v1.1/openscene_metadata_trainval.tgz
-    tar -xzf openscene_metadata_trainval.tgz && rm openscene_metadata_trainval.tgz
-    mv openscene-v1.1/meta_datas trainval_navsim_logs
-    rm -r openscene-v1.1
-    mkdir -p trainval_sensor_blobs/trainval
+    mkdir -p navsim_logs sensor_blobs
+    if [ ! -d navsim_logs/trainval ]; then
+        wget -c https://huggingface.co/datasets/OpenDriveLab/OpenScene/resolve/main/openscene-v1.1/openscene_metadata_trainval.tgz
+        tar -xzf openscene_metadata_trainval.tgz && rm openscene_metadata_trainval.tgz
+        mv openscene-v1.1/meta_datas/trainval navsim_logs/trainval
+        rm -r openscene-v1.1
+    fi
+    mkdir -p sensor_blobs/trainval
     for split in {1..4}; do
-        wget https://s3.eu-central-1.amazonaws.com/avg-projects-2/navsim/navtrain_current_${split}.tgz
-        tar -xzf navtrain_current_${split}.tgz && rm navtrain_current_${split}.tgz
-        rsync -rv current_split_${split}/* trainval_sensor_blobs/trainval && rm -r current_split_${split}
+        if [ ! -f .navtrain_current_${split}.done ]; then
+            wget -c https://s3.eu-central-1.amazonaws.com/avg-projects-2/navsim/navtrain_current_${split}.tgz
+            tar -xzf navtrain_current_${split}.tgz && rm navtrain_current_${split}.tgz
+            rsync -r current_split_${split}/ sensor_blobs/trainval/ && rm -r current_split_${split}
+            touch .navtrain_current_${split}.done
+        fi
     done
     for split in {1..4}; do
-        wget https://s3.eu-central-1.amazonaws.com/avg-projects-2/navsim/navtrain_history_${split}.tgz
-        tar -xzf navtrain_history_${split}.tgz && rm navtrain_history_${split}.tgz
-        rsync -rv history_split_${split}/* trainval_sensor_blobs/trainval && rm -r history_split_${split}
+        if [ ! -f .navtrain_history_${split}.done ]; then
+            wget -c https://s3.eu-central-1.amazonaws.com/avg-projects-2/navsim/navtrain_history_${split}.tgz
+            tar -xzf navtrain_history_${split}.tgz && rm navtrain_history_${split}.tgz
+            rsync -r history_split_${split}/ sensor_blobs/trainval/ && rm -r history_split_${split}
+            touch .navtrain_history_${split}.done
+        fi
     done
 }
 
