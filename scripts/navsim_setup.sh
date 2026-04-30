@@ -21,7 +21,9 @@
 set -e
 
 # ----- Paths (override before sourcing if you want a different layout) -----
-: "${FORESIGHT_ROOT:=/home/trail/workspace/ForeSight}"
+# FORESIGHT_ROOT defaults to the repo root that contains this script.
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+: "${FORESIGHT_ROOT:=$(dirname "${_SCRIPT_DIR}")}"
 : "${NAVSIM_DEVKIT_ROOT:=${FORESIGHT_ROOT}/navsim}"
 : "${NAVSIM_EXP_ROOT:=${FORESIGHT_ROOT}/work_dirs/navsim}"
 : "${OPENSCENE_DATA_ROOT:=${FORESIGHT_ROOT}/data/openscene}"
