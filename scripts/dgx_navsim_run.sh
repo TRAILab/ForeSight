@@ -23,7 +23,7 @@
 
 CODE_DIR=/raid/home/spapais/ForeSight
 OPENSCENE_HOST_DIR=${OPENSCENE_HOST_DIR:-/raid/home/spapais/datasets/openscene}
-NUPLAN_MAPS_HOST_DIR=${NUPLAN_MAPS_HOST_DIR:-/raid/home/spapais/data/nuplan-maps-v1.0}
+NUPLAN_MAPS_HOST_DIR=${NUPLAN_MAPS_HOST_DIR:-/raid/home/spapais/datasets/nuplan-maps-v1.0}
 WORK_DIR=${CODE_DIR}/work_dirs
 
 CMD=${@:-bash}
