@@ -12,7 +12,9 @@
 - [x] First swing at learned scorer (`planaux_conf_anchorlabel`, Trillium 472465) — **catastrophic regression** (L2=0.7692, CR=1.028%). Diagnosed in "Discussion" below: head trained well (acc=0.977) but inference selector swamped `plan_cls`, and the label was a 2m proximity proxy on plan-anchor trajectories rather than the actual collision metric.
 - [ ] **Cancel DGX 3659** — duplicate of Trillium 472465, no informational value from confirming a known-bad regression.
 - [ ] **Next: `planaux_conf_evalmatch` (Exp 4) — eval-aligned learned rescore.** Re-do the learned scorer with three structural fixes: (1) BCE label = exact replication of `planning_eval.py`'s `obj_box_col` per-(mode, anchor) computation against GT agent futures, (2) inference selector mirrors hard rescore (`-999` mask + all-collide fallback) instead of soft penalty, (3) head is trained decoupled from inference (no rescore active during training). See "Exp 4 design" below.
-- [ ] Defer iterative refinement at inference / hybrid analytic-prior + learned-residual until Exp 4 lands.
+- [x] Exp 4–7: evalmatch v3, threshold/aggregation eval-only sweep, evalmatchmode v4, v4 followups + hybrid_or — see Discussion sections below. **Conclusion on K/V-on:** v4 ties hard rescore on CR via `hybrid_or` but never beats it; v4 alone lands at L2=0.5328 / CR=0.080% (vs hard rescore 0.4988 / 0.063%).
+- [ ] **Exp 8 (running): can hard rescore be removed on the K/V-off paper architecture?** Two configs in parallel on Killarney: (Option 1) `_evalmatchmode` (3366620) — K/V-off + v4 learned scorer; (Option 2) `_distillrescore` (3366621) — K/V-off + `plan_cls` distilled from `rescore()` collide flag at training, `use_rescore=False` at inference. See "Exp 8" below.
+- [ ] Defer iterative refinement at inference / hybrid analytic-prior + learned-residual until Exp 8 results land.
 
 ## Abstract
 
@@ -146,6 +148,8 @@ To implement (Exp 3 — joint):
 | DGX | `ptaux2d_ppdeformmm_planifls_planaux_conf_anchorlabel` (learned scorer, anchor label, λ=0.05) | 3659 | SUBMITTED |
 | Trillium | `ptaux2d_ppdeformmm_planifls_planaux_conf_anchorlabel` (replicate of DGX 3659) | 472465 | COMPLETED — Exp learned-scorer |
 | TBD | `..._planinstfeat_laststage_softcost` with soft-cost rescore (joint) | — | DEPRIORITIZED — Exp 1 v1 didn't land |
+| Killarney | `_laststage_nodetmap_decoder6_planwp_evalmatchmode` (Exp 8 Option 1: K/V-off + v4) | 3366620 | SUBMITTED |
+| Killarney | `_laststage_nodetmap_decoder6_planwp_distillrescore` (Exp 8 Option 2: K/V-off + plan_cls distill) | 3366621 | SUBMITTED |
 
 | Config | L2 | obj_box_col | car_ade | ped_ade | car_epa | ped_epa | NDS | mAP | Notes |
 |--------|-----|-------------|---------|---------|---------|---------|-----|-----|-------|
@@ -396,3 +400,45 @@ References: hard rescore `0.4988 / 0.063%`; no rescore `0.5008 / 0.106%`; v3 eva
 - **Net for the paper: the learned scorer is dominated by hard rescore.** v4 is a viable variant if hard rescore is unavailable (e.g., a future architecture with no `det_output`-based motion futures), but it's not a Pareto improvement over the geometric check. The "hard rescore is essential" claim from earlier reports is now strengthened, not weakened: v4 was the strongest-engineered learned alternative and still failed to find unique signal.
 
 **Implications for paper architecture.** Drop the "learned cost replaces rescore" option from `2026_04_28_paper_plan.md`'s Stage-2 architecture choices (line 145). Keep the lightweight motion head + hard rescore. The learned scorer thread closes here unless a different formulation appears (per-(mode, agent) residual, scene-level head with post-t=0 agents, distillation from a planner with access to GT futures).
+
+## Exp 8: Removing rescore on the K/V-off architecture (parallel pair)
+
+After Exp 7 closed the "learned scorer beats hard rescore on K/V-on" line, two questions remain for the paper-plan K/V-off Stage 2 (`_laststage_nodetmap_decoder6_planwp`, current best L2=0.5150 / CR=0.068%): (a) does v4's `hybrid_or` subset relationship to hard rescore hold on the K/V-off trajectory distribution (where the planner produces different mode preferences without det K/V), and (b) is there a training-time route to remove rescore that we never tried — namely, distill `rescore()`'s collide flag into `plan_cls` directly so the planner internalises the constraint and `use_rescore=False` at inference becomes a no-op?
+
+**Code (committed `00ae4e1`).**
+- `HierarchicalPlanningDecoder.rescore()` factored: `compute_rescore_collision_mask()` returns the per-(sample, ego_mode) bool collide flag (with the all-collide fallback applied) without applying the -999 score offset. `rescore()` is the thin wrapper that adds the offset.
+- `MotionPlanningHead` gains `plan_distill_rescore_enable` and `plan_distill_rescore_weight`. New `_loss_planning_distill_rescore()` calls `compute_rescore_collision_mask` on detached cmd-indexed plan_reg/motion/det outputs; pushes plan_cls of flagged modes toward 0 via BCE-with-logits (target=0, weight=collide_mask). Per-iter diagnostics: `plan_distill_collide_rate`, `plan_distill_flagged_prob_mean`. Loss applied at every decoder stage.
+- `loss()` / `loss_planning()` signatures now thread `det_output` through (kept optional; backwards-compat default `None`).
+
+### Configs (both based on the K/V-off best, `_laststage_nodetmap_decoder6_planwp`)
+
+**Option 1 — `_evalmatchmode` (Killarney 3366620).**
+- Reuses the `evalmatch_mode` BCE conflict head + smooth-max(τ=5) per-mode aggregation that landed v4 (`_planaux_conf_evalmatchmode`) at L2=0.5328 / CR=0.080% on K/V-on.
+- Inference selector: `use_rescore=False, use_rescore_learned_hard=True` (T=0.5, agg=`any`).
+- Architecture deviation: `num_det=50` (vs the strict K/V-off baseline's 0) so the conflict head's pairwise MLP has agent features. K/V into the planner is still nulled via `skip_perception_kv=True` (the planner's `gnn`/`cross_gnn` ops never see the agent tokens), so this is K/V-off in the same sense as the parent — only the conflict head's pairwise MLP reads det features. `with_conflict_head=True` set in both `motion_plan_head` and `refine_layer` (the latter is what actually instantiates `plan_conflict_branch`).
+- Tests: do v4's rejections still subset hard rescore's, or does the K/V-off trajectory distribution surface unique signal the head can catch?
+
+**Option 2 — `_distillrescore` (Killarney 3366621).**
+- Strict K/V-off base (`num_det=0, num_map=0, skip_perception_kv=True`) + `plan_distill_rescore_enable=True, plan_distill_rescore_weight=0.05`.
+- Inference selector: `use_rescore=False`, no learned head — the planner's own logits encode the constraint after distillation training.
+- The det head is still trained (perception-as-supervisor), so `det_output` exists at training time for distill label generation; just not consumed as planner K/V or in the conflict head's pairwise MLP.
+- Tests: can the planner be trained to make hard rescore a no-op? Failure mode if any: `plan_cls` distillation may compete with imitation L1, regressing L2 (analytic `softcostcol_*` precedent suggests this is the prior).
+
+### Reference points (same baseline family for direct comparison)
+
+| Architecture | Selector | L2 | CR | Source |
+|---|---|---|---|---|
+| K/V-on `_planifls` | hard rescore | 0.4988 | 0.063% | Killarney baseline |
+| K/V-on `_planifls` | v4 `evalmatchmode` | 0.5328 | 0.080% | Killarney 3319213 |
+| K/V-on `_planifls` | hybrid_or (hard ∪ v4) | 0.5330 | 0.063% | Exp 7, DGX 3691 / Killarney 3324532 |
+| K/V-off `_decoder6_planwp` | hard rescore | 0.5150 | 0.068% | Killarney 3319227 (current best K/V-off) |
+| K/V-off `_decoder6_planwp` | v4 `evalmatchmode` (Opt 1) | ? | ? | **Killarney 3366620 (this exp)** |
+| K/V-off `_decoder6_planwp` | distilled plan_cls (Opt 2) | ? | ? | **Killarney 3366621 (this exp)** |
+
+### Expected outcomes / decision tree
+
+- **Option 1 lands at parity with K/V-off + hard rescore (within ±0.005 L2 / ±0.01pp CR).** v4 generalises to K/V-off; paper has a clean "drop hard rescore on K/V-off architecture, learned head suffices" headline.
+- **Option 2 lands at parity.** Stronger result: the planner's own logits encode the constraint with no additional inference machinery. Distillation is a viable way to remove rescore *and* the conflict head from inference.
+- **Both regress (L2 +0.02–0.05, CR +0.02–0.05pp).** Hard rescore is structurally load-bearing — the geometric check sees something neither learned-head nor distilled-logits replicate. The paper keeps hard rescore in the K/V-off architecture (consistent with `2026_04_28_paper_plan.md` decision #4).
+- **Only Option 2 lands (Option 1 regresses).** Distillation through the existing planner head turns out to be a stronger route than pairwise per-anchor learning. Suggests the bottleneck on K/V-on was the conflict head's per-anchor formulation, not the supervision signal itself.
+- **Only Option 1 lands (Option 2 regresses).** Distillation interferes with imitation. Stick with the conflict head + learned-hard inference selector on the K/V-off architecture.
