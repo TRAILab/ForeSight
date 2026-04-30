@@ -84,10 +84,11 @@ class SparseDriveHead(BaseModule):
                 indices=self.det_head.sampler.indices, 
             )
             loss_motion = self.motion_plan_head.loss(
-                motion_output, 
-                planning_output, 
-                data, 
-                motion_loss_cache
+                motion_output,
+                planning_output,
+                data,
+                motion_loss_cache,
+                det_output=det_output,
             )
             losses.update(loss_motion)
         

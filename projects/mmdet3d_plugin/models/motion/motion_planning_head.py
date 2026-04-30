@@ -287,6 +287,8 @@ class MotionPlanningHead(BaseModule):
         plan_softcost_collision_sigma=2.0,
         plan_softcost_geometry='gaussian',
         plan_softcost_collision_tau=0.5,
+        plan_distill_rescore_enable=False,
+        plan_distill_rescore_weight=0.05,
         conflict_label_source='predicted',
         conflict_smooth_max_tau=5.0,
         detach_perception=False,
@@ -338,6 +340,8 @@ class MotionPlanningHead(BaseModule):
         self.plan_softcost_collision_sigma = plan_softcost_collision_sigma
         self.plan_softcost_geometry = plan_softcost_geometry
         self.plan_softcost_collision_tau = plan_softcost_collision_tau
+        self.plan_distill_rescore_enable = plan_distill_rescore_enable
+        self.plan_distill_rescore_weight = plan_distill_rescore_weight
         self.conflict_label_source = conflict_label_source
         self.conflict_smooth_max_tau = float(conflict_smooth_max_tau)
         self.detach_perception = detach_perception
@@ -1826,15 +1830,19 @@ class MotionPlanningHead(BaseModule):
         return motion_output, planning_output
     
     def loss(self,
-        motion_model_outs, 
+        motion_model_outs,
         planning_model_outs,
-        data, 
-        motion_loss_cache
+        data,
+        motion_loss_cache,
+        det_output=None,
     ):
         loss = {}
         motion_loss = self.loss_motion(motion_model_outs, data, motion_loss_cache)
         loss.update(motion_loss)
-        planning_loss = self.loss_planning(planning_model_outs, data, motion_loss_cache)
+        planning_loss = self.loss_planning(
+            planning_model_outs, data, motion_loss_cache,
+            motion_model_outs=motion_model_outs, det_output=det_output,
+        )
         loss.update(planning_loss)
         return loss
 
@@ -1910,7 +1918,10 @@ class MotionPlanningHead(BaseModule):
         return output
 
     @force_fp32(apply_to=("model_outs"))
-    def loss_planning(self, model_outs, data, motion_loss_cache=None):
+    def loss_planning(
+        self, model_outs, data, motion_loss_cache=None,
+        motion_model_outs=None, det_output=None,
+    ):
         cls_scores = model_outs["classification"]
         reg_preds = model_outs["prediction"]
         status_preds = model_outs["status"]
@@ -2045,6 +2056,26 @@ class MotionPlanningHead(BaseModule):
                     output[f"planning_loss_softcost_col_{decoder_idx}"] = (
                         softcost_col * self.plan_softcost_collision_weight
                     )
+
+            if (
+                self.plan_distill_rescore_enable
+                and motion_model_outs is not None
+                and det_output is not None
+            ):
+                distill_ret = self._loss_planning_distill_rescore(
+                    cls, reg, data, motion_model_outs, det_output,
+                )
+                if distill_ret is not None:
+                    distill_loss, distill_diag = distill_ret
+                    output[f"planning_loss_distill_rescore_{decoder_idx}"] = (
+                        distill_loss * self.plan_distill_rescore_weight
+                    )
+                    if (
+                        distill_diag is not None
+                        and decoder_idx == len(reg_preds) - 1
+                    ):
+                        for k, v in distill_diag.items():
+                            output[f"plan_distill_{k}"] = v
 
         if 'dn_plan_reg' in model_outs:
             dn_reg = model_outs['dn_plan_reg']          # (bs, num_dn, ego_fut_ts, 2)
@@ -2626,6 +2657,71 @@ class MotionPlanningHead(BaseModule):
         if not sample_costs:
             return reg.sum() * 0.0
         return torch.stack(sample_costs).mean()
+
+    def _loss_planning_distill_rescore(self, cls, reg, data, motion_model_outs, det_output):
+        """Distill `HierarchicalPlanningDecoder.rescore()`'s collide flag into
+        `plan_cls`: pushes plan_cls of rescore-flagged modes toward 0 via
+        BCE-with-logits. Geometry inputs all detached so no gradient flows
+        back through plan_reg/motion/det.
+
+        At inference (`use_rescore=False`), the planner's own logits naturally
+        encode the rescore constraint without the explicit -999 mask.
+
+        cls: (bs, M=ego_fut_mode) raw logits — already the cmd-indexed slice
+            after `planning_sampler.sample` + `flatten(end_dim=1)`.
+        reg: (bs, 1, 3*ego_fut_mode, ego_fut_ts, 2) delta plan predictions —
+            the full pre-sample tensor; cmd slicing is done here.
+
+        Returns (loss, diag_dict) where diag_dict reports the cmd-mode
+        collision rate and the average sigmoid(plan_cls) on flagged modes.
+        """
+        decoder = self.planning_decoder
+        if decoder is None or not hasattr(decoder, 'compute_rescore_collision_mask'):
+            return None
+        bs = reg.shape[0]
+        device = reg.device
+
+        cmd = data['gt_ego_fut_cmd'].argmax(dim=-1)
+        bs_idx = torch.arange(bs, device=device)
+        M = self.ego_fut_mode
+
+        plan_cls_cmd = cls  # (bs, M) — already cmd-indexed + flattened
+
+        plan_reg_modes = reg.squeeze(1).reshape(bs, 3, M, self.ego_fut_ts, 2)
+        plan_reg_cmd_cum = plan_reg_modes[bs_idx, cmd].cumsum(dim=-2).detach()  # (bs, M, T, 2)
+
+        det_anchors = det_output["prediction"][-1].detach()
+        det_classification = det_output["classification"][-1].sigmoid().detach()
+        det_confidence = det_classification.max(dim=-1).values
+
+        motion_cls = motion_model_outs["classification"][-1].sigmoid().detach()
+        motion_reg = motion_model_outs["prediction"][-1].detach()
+
+        with torch.no_grad():
+            collide = decoder.compute_rescore_collision_mask(
+                plan_reg_cmd_cum, motion_cls, motion_reg, det_anchors, det_confidence,
+            )  # bool (bs, M)
+
+        weight = collide.to(plan_cls_cmd.dtype)
+        denom = weight.sum().clamp(min=1.0)
+        target = torch.zeros_like(plan_cls_cmd)
+        loss_per = F.binary_cross_entropy_with_logits(
+            plan_cls_cmd, target, reduction='none'
+        )
+        loss = (loss_per * weight).sum() / denom
+
+        with torch.no_grad():
+            probs = torch.sigmoid(plan_cls_cmd.detach().float())
+            collide_rate = weight.mean()
+            if weight.sum() > 0:
+                flagged_prob = (probs * weight).sum() / weight.sum().clamp(min=1.0)
+            else:
+                flagged_prob = probs.new_zeros(())
+            diag = {
+                'collide_rate': collide_rate.detach(),
+                'flagged_prob_mean': flagged_prob.detach(),
+            }
+        return loss, diag
 
     @force_fp32(apply_to=("model_outs"))
     def post_process(

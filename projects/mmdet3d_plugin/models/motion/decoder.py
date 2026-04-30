@@ -293,11 +293,11 @@ class HierarchicalPlanningDecoder(object):
         return plan_cls_full, final_planning
 
     def rescore(
-        self, 
+        self,
         plan_cls,
-        plan_reg, 
+        plan_reg,
         motion_cls,
-        motion_reg, 
+        motion_reg,
         det_anchors,
         det_confidence,
         score_thresh=0.5,
@@ -306,13 +306,41 @@ class HierarchicalPlanningDecoder(object):
         num_motion_mode=1,
         offset=0.5,
     ):
-        
+        col = self.compute_rescore_collision_mask(
+            plan_reg, motion_cls, motion_reg, det_anchors, det_confidence,
+            score_thresh=score_thresh, static_dis_thresh=static_dis_thresh,
+            dim_scale=dim_scale, num_motion_mode=num_motion_mode, offset=offset,
+        )
+        score_offset = col.float() * -999
+        return plan_cls + score_offset
+
+    def compute_rescore_collision_mask(
+        self,
+        plan_reg,
+        motion_cls,
+        motion_reg,
+        det_anchors,
+        det_confidence,
+        score_thresh=0.5,
+        static_dis_thresh=0.5,
+        dim_scale=1.1,
+        num_motion_mode=1,
+        offset=0.5,
+    ):
+        """Compute the per-(sample, ego_mode) binary collide flag using rescore
+        geometry. Inputs are the cmd-indexed cumulative plan_reg (bs, M, T, 2),
+        post-sigmoid motion_cls (bs, A, M_motion), delta motion_reg
+        (bs, A, M_motion, T_motion, 2), 11-dim det_anchors and det_confidence.
+
+        Returns bool tensor (bs, M) with the all-collide fallback applied
+        (modes set False if every mode collides, matching `rescore`'s behavior).
+        """
+
         def cat_with_zero(traj):
             zeros = traj.new_zeros(traj.shape[:-2] + (1, 2))
-            traj_cat = torch.cat([zeros, traj], dim=-2)
-            return traj_cat
-        
-        def get_yaw(traj, start_yaw=np.pi/2):
+            return torch.cat([zeros, traj], dim=-2)
+
+        def get_yaw(traj, start_yaw=np.pi / 2):
             yaw = traj.new_zeros(traj.shape[:-1])
             yaw[..., 1:-1] = torch.atan2(
                 traj[..., 2:, 1] - traj[..., :-2, 1],
@@ -323,19 +351,14 @@ class HierarchicalPlanningDecoder(object):
                 traj[..., -1, 0] - traj[..., -2, 0],
             )
             yaw[..., 0] = start_yaw
-            # for static object, estimated future yaw would be unstable
             start = traj[..., 0, :]
             end = traj[..., -1, :]
             dist = torch.linalg.norm(end - start, dim=-1)
             mask = dist < static_dis_thresh
-            start_yaw = yaw[..., 0].unsqueeze(-1)
-            yaw = torch.where(
-                mask.unsqueeze(-1),
-                start_yaw,
-                yaw,
-            )
+            sy = yaw[..., 0].unsqueeze(-1)
+            yaw = torch.where(mask.unsqueeze(-1), sy, yaw)
             return yaw.unsqueeze(-1)
-        
+
         ## ego
         bs = plan_reg.shape[0]
         plan_reg_cat = cat_with_zero(plan_reg)
@@ -377,10 +400,8 @@ class HierarchicalPlanningDecoder(object):
         col = col.reshape(bs, num_anchor, num_motion_mode, num_ego_mode, ts).permute(0, 3, 1, 2, 4)
         col = col.flatten(2, -1).any(dim=-1)
         all_col = col.all(dim=-1)
-        col[all_col] = False # for case that all modes collide, no need to rescore
-        score_offset = col.float() * -999
-        plan_cls = plan_cls + score_offset
-        return plan_cls
+        col[all_col] = False  # for case that all modes collide
+        return col
 
     def rescore_soft(
         self,
