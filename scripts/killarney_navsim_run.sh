@@ -34,7 +34,7 @@ CMD=${@:-bash}
 [[ -f ~/.bashrc ]] && source ~/.bashrc
 
 APPTAINER=/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/Core/apptainer/1.4.5/bin/apptainer
-SIF_PATH=${SIF_PATH:-/home/spapais/ForeSight/docker/foresight_navsim_cuda118pytorch21.sif}
+SIF_PATH=${SIF_PATH:-/home/spapais/ForeSight/docker/foresight_navsim.sif}
 
 CONTAINER_CMD="$APPTAINER exec --nv -c -e --pwd /workspace/ForeSight/ \
 --env WANDB_API_KEY=$WANDB_API_KEY \
