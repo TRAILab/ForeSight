@@ -194,7 +194,8 @@ Files under `navsim/navsim/agents/sparsedrive/`:
 | local | navmini E2E smoke (real Scene through agent) | n/a | COMPLETED |
 | local | navmini Hydra training step 1 (forward+loss+backward) | n/a | COMPLETED |
 | local | navmini Hydra multi-step training (5 steps, loss decreases) | n/a | COMPLETED |
-| killarney | sparsedrive navmini training | n/a | PENDING |
+| killarney | navsim 7/7 smoke (.sif on /scratch, ops rebuilt) | 3365954 | COMPLETED |
+| killarney | navmini 5-step Hydra training | 3365958 | COMPLETED |
 | killarney | sparsedrive navtrain training | n/a | PENDING |
 
 ### Smoke test (2026-04-29, local, GPU)
@@ -267,6 +268,47 @@ What it does NOT prove yet:
   for synthetic features may collide with the real GT shapes via
   `cls_wise_reg_weights`.
 - PDM-Score eval on navtest.
+
+### Killarney smoke + navmini training (2026-04-30)
+
+`foresight_navsim.sif` (12 GB) lives on Killarney at
+`/scratch/spapais/ForeSight/docker/` because `/home` is 100% full. Same
+constraint forced the navmini data and nuplan-maps onto `/scratch`:
+
+```
+/scratch/spapais/data/openscene/navsim_logs/mini/        12 GB
+/scratch/spapais/data/nuplan-maps-v1.0/                  1.4 GB
+/scratch/spapais/ForeSight/docker/foresight_navsim.sif   12 GB
+```
+
+`scripts/killarney_navsim_run.sh` defaults updated to point at these.
+
+Setup gotchas on Killarney specifically:
+- `deformable_aggregation_ext.cpython-39-*.so` checked into the repo on
+  Killarney was from Feb 2026 (different torch ABI). Rebuilt inside the
+  apptainer via
+  `apptainer exec -c -e --pwd .../ops --bind=/home/spapais/ForeSight:/workspace/ForeSight $SIF python setup.py build_ext --inplace`.
+  `setup.py develop` fails because the env's site-packages is read-only;
+  `build_ext --inplace` is the right call.
+- `tools/make_navsim_kmeans_placeholder.py` must be run once on Killarney
+  to seed `data/kmeans/kmeans_motion_navsim_6.npy` and
+  `kmeans_plan_navsim_6_cmd4.npy` (the .npy files are gitignored, not pushed).
+
+Smoke test (job 3365954, 1× L40S, ~1 min): all 7 checks pass.
+
+5-step navmini training (job 3365958, 1× L40S, ~16 s wall time for the
+training loop):
+
+```
+Epoch 0: 100%|██████████| 5/5 [00:13<00:00, 0.36it/s]
+Trainer.fit stopped: max_epochs=1 reached.
+Step 1:  loss_step=1.76e+4    planning_loss_reg=2.50
+Step 5:  loss_step=514        planning_loss_reg=0.806
+Epoch:   loss_epoch=5.43e+3   planning_loss_reg=1.82  planning_loss_status=0.76
+```
+
+86.1 M params (85.9 M trainable) — same loss trajectory as local. Image,
+data, code, and Hydra training pipeline all green on the cluster.
 
 ### First Hydra training step on navmini (2026-04-29)
 
