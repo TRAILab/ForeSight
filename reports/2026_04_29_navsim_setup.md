@@ -336,7 +336,23 @@ trajectory.
 
 ## Future Work
 
+- Real navtrain k-means anchors via `tools/gen_navsim_kmeans.py` once
+  navtrain lands on Killarney. Plan-side clustering wired; motion-side
+  per-class clustering still needs per-track future aggregation.
+- Real `T_global` from `scene.frames[i].ego_status.ego_pose` in the feature
+  builder (currently the agent injects identity placeholders, which kills
+  the temporal cache benefit but doesn't break training).
+- nuPlan `gt_agent_fut_trajs` extraction (per-track future trajectories
+  via `track_tokens` across frames) so the motion head sees real
+  supervision instead of empty placeholders.
+- Killarney submission via `scripts/killarney_navsim_run.sh` once the
+  navsim apptainer .sif lands at
+  `/home/spapais/ForeSight/docker/foresight_navsim_cuda118pytorch21.sif`.
+  Build it with
+  `docker save foresight_navsim:cuda118pytorch21 | gzip > foresight_navsim.tar.gz`
+  on local, scp to Killarney, then
+  `apptainer build foresight_navsim_cuda118pytorch21.sif docker-archive://foresight_navsim.tar.gz`.
 - Joint nuScenes + navtrain training (shared backbone, separate heads).
-- Extend the SparseDrive head to consume all 8 NavSim cameras instead of dropping
-  the side cams.
+- Extend the SparseDrive head to consume all 8 NavSim cameras instead of
+  dropping the side cams.
 - Closed-loop fine-tuning using the PDM scorer as a reward.
