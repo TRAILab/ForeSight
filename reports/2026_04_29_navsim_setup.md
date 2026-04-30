@@ -10,6 +10,49 @@ NavSim's `AbstractAgent` interface, and run training and PDM-Score evaluation
 through NavSim's Hydra runner. ForeSight's existing nuScenes runners
 (`tools/dist_train.sh`, `tools/dist_test.sh`) stay untouched.
 
+## Quickstart
+
+```bash
+# 1. Build the navsim docker image (once)
+docker build --network=host -f docker/Dockerfile.navsim_cuda118pytorch21 \
+    -t foresight_navsim:cuda118pytorch21 .
+
+# 2. Smoke-test imports + forward pass + box conversion (no data needed)
+docker run --gpus all --rm -v $PWD:/workspace/ForeSight -w /workspace/ForeSight \
+    -e FORESIGHT_ROOT=/workspace/ForeSight \
+    foresight_navsim:cuda118pytorch21 python scripts/navsim_smoke_test.py
+# Expect: All 7 checks passed.
+
+# 3. Download navmini data + nuplan maps (~12GB + 1GB; 5-10 min total)
+NAVSIM_EXP_ROOT=/tmp/navsim_exp bash scripts/navsim_setup.sh download_navmini
+cd data && wget https://motional-nuplan.s3-ap-northeast-1.amazonaws.com/public/nuplan-v1.1/nuplan-maps-v1.1.zip
+unzip nuplan-maps-v1.1.zip && rm nuplan-maps-v1.1.zip
+
+# 4. End-to-end smoke on a real scene
+docker run --gpus all --rm -v $PWD:/workspace/ForeSight -w /workspace/ForeSight \
+    -e FORESIGHT_ROOT=/workspace/ForeSight \
+    -e OPENSCENE_DATA_ROOT=/workspace/ForeSight/data/openscene \
+    -e NUPLAN_MAPS_ROOT=/workspace/ForeSight/data/nuplan-maps-v1.0 \
+    foresight_navsim:cuda118pytorch21 python scripts/navsim_navmini_smoke.py
+# Expect: prediction shape: (1, 8, 2)
+
+# 5. Run a few Hydra training steps on navmini
+docker run --gpus all --rm -v $PWD:/workspace/ForeSight -w /workspace/ForeSight \
+    -e FORESIGHT_ROOT=/workspace/ForeSight \
+    -e OPENSCENE_DATA_ROOT=/workspace/ForeSight/data/openscene \
+    -e NUPLAN_MAPS_ROOT=/workspace/ForeSight/data/nuplan-maps-v1.0 \
+    -e NAVSIM_EXP_ROOT=/tmp/navsim_exp \
+    foresight_navsim:cuda118pytorch21 \
+    bash scripts/navsim_train.sh navmini \
+        'train_logs=[<your_logs>]' 'val_logs=[...]' \
+        'dataloader.params.batch_size=1' 'dataloader.params.num_workers=0' \
+        '~dataloader.params.prefetch_factor' 'dataloader.params.pin_memory=false' \
+        'trainer.params.max_epochs=1' 'trainer.params.precision=32' \
+        'trainer.params.strategy=auto' '+trainer.params.devices=1' \
+        'trainer.params.limit_train_batches=5' 'trainer.params.limit_val_batches=0'
+# Expect: Trainer.fit stopped: max_epochs=1 reached. With loss_step decreasing.
+```
+
 ## Intro
 
 NavSim is the leading benchmark for end-to-end planning on nuPlan-style data, and
