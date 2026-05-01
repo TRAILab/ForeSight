@@ -36,12 +36,41 @@ def get_best_reg(
     return best_reg
 
 
+def _displacement_weight_scale(reg_target, cfg):
+    """Per-sample regression-loss scaling by GT endpoint displacement.
+
+    Stationary / short-trajectory samples get a smaller weight (`min_w`),
+    long-trajectory samples (turns, fast motion) get a larger weight (`max_w`).
+    Mitigates the standard nuScenes data-skew issue where the L1 trajectory
+    loss is dominated by trivial stationary/straight cases.
+
+    `cfg` keys:
+        min_w (default 0.5) — floor on the weight scale.
+        max_w (default 2.0) — ceiling on the weight scale.
+        scale_m (default 10.0) — endpoint-displacement value (meters) that
+            maps to weight scale 1.0. Lower → more aggressive upscaling of
+            small motions; higher → only large motions get full weight.
+
+    Returns a tensor of shape (bs, num_anchor) (or (bs,) for ego) to broadcast
+    over the time axis when multiplied into `reg_weight`.
+    """
+    min_w = float(cfg.get('min_w', 0.5))
+    max_w = float(cfg.get('max_w', 2.0))
+    scale_m = float(cfg.get('scale_m', 10.0))
+    # GT is per-step displacement deltas; cumsum + endpoint norm = total path length proxy.
+    endpoint_disp = reg_target.cumsum(dim=-2)[..., -1, :].norm(dim=-1)
+    return (endpoint_disp / scale_m).clamp(min=min_w, max=max_w)
+
+
 @BBOX_SAMPLERS.register_module()
 class MotionTarget():
     def __init__(
         self,
+        displacement_weight=None,
     ):
         super(MotionTarget, self).__init__()
+        # See `_displacement_weight_scale` for cfg keys. None disables.
+        self.displacement_weight = displacement_weight
 
     def sample(
         self,
@@ -61,10 +90,18 @@ class MotionTarget():
             reg_target[i, pred_idx] = gt_reg_target[i][target_idx]
             reg_weight[i, pred_idx] = gt_reg_mask[i][target_idx]
             num_pos += len(pred_idx)
-        
+
         cls_target = get_cls_target(reg_pred, reg_target, reg_weight)
         cls_weight = reg_weight.any(dim=-1)
         best_reg = get_best_reg(reg_pred, reg_target, reg_weight)
+
+        # Optional displacement-based reg_weight scaling. Applied after cls
+        # target/best_reg computation so mode selection is unchanged — only
+        # the final regression loss magnitude is rebalanced toward harder
+        # (longer) trajectories.
+        if self.displacement_weight is not None:
+            w_scale = _displacement_weight_scale(reg_target, self.displacement_weight)
+            reg_weight = reg_weight * w_scale.unsqueeze(-1)
 
         return cls_target, cls_weight, best_reg, reg_target, reg_weight, num_pos
 
@@ -76,11 +113,14 @@ class PlanningTarget():
         ego_fut_ts,
         ego_fut_mode,
         num_driving_cmds=3,
+        displacement_weight=None,
     ):
         super(PlanningTarget, self).__init__()
         self.ego_fut_ts = ego_fut_ts
         self.ego_fut_mode = ego_fut_mode
         self.num_driving_cmds = num_driving_cmds
+        # See `_displacement_weight_scale` for cfg keys. None disables.
+        self.displacement_weight = displacement_weight
 
     def sample(
         self,
@@ -104,6 +144,11 @@ class PlanningTarget():
         cls_target = get_cls_target(reg_pred, gt_reg_target, gt_reg_mask)
         cls_weight = gt_reg_mask.any(dim=-1)
         best_reg = get_best_reg(reg_pred, gt_reg_target, gt_reg_mask)
+
+        # Optional displacement-based reg_weight scaling. After cls/best_reg.
+        if self.displacement_weight is not None:
+            w_scale = _displacement_weight_scale(gt_reg_target, self.displacement_weight)
+            gt_reg_mask = gt_reg_mask * w_scale.unsqueeze(-1)
 
         return cls_pred, cls_target, cls_weight, best_reg, gt_reg_target, gt_reg_mask
 
