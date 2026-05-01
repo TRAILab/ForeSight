@@ -148,8 +148,8 @@ To implement (Exp 3 — joint):
 | DGX | `ptaux2d_ppdeformmm_planifls_planaux_conf_anchorlabel` (learned scorer, anchor label, λ=0.05) | 3659 | SUBMITTED |
 | Trillium | `ptaux2d_ppdeformmm_planifls_planaux_conf_anchorlabel` (replicate of DGX 3659) | 472465 | COMPLETED — Exp learned-scorer |
 | TBD | `..._planinstfeat_laststage_softcost` with soft-cost rescore (joint) | — | DEPRIORITIZED — Exp 1 v1 didn't land |
-| Killarney | `_laststage_nodetmap_decoder6_planwp_evalmatchmode` (Exp 8 Option 1: K/V-off + v4) | 3366620 | SUBMITTED |
-| Killarney | `_laststage_nodetmap_decoder6_planwp_distillrescore` (Exp 8 Option 2: K/V-off + plan_cls distill) | 3366621 | SUBMITTED |
+| Killarney | `_laststage_nodetmap_decoder6_planwp_evalmatchmode` (Exp 8 Option 1: K/V-off + v4) | 3366620 | COMPLETED — **L2=0.5203 / CR=0.046%** |
+| Killarney | `_laststage_nodetmap_decoder6_planwp_distillrescore` (Exp 8 Option 2: K/V-off + plan_cls distill) | 3366621 | TIMEOUT at iter 10863/11720 (93%, 11h59m); no ckpt saved before SLURM kill |
 
 | Config | L2 | obj_box_col | car_ade | ped_ade | car_epa | ped_epa | NDS | mAP | Notes |
 |--------|-----|-------------|---------|---------|---------|---------|-----|-----|-------|
@@ -164,6 +164,7 @@ To implement (Exp 3 — joint):
 | `ptaux2d_ppdeformmm_planifls_softrescore_w30_s2` (Killarney ckpt, σ=2m) | **0.7492** | **0.079%** | — | — | — | — | — | — | Exp 2c — Narval 59920746 |
 | `..._softcost` + soft-cost rescore | — | — | — | — | — | — | — | — | Exp 3 (deprioritized) |
 | `ptaux2d_ppdeformmm_planifls_planaux_conf_anchorlabel` (learned scorer, anchor label, λ=0.05) | **0.7692** | **1.028%** | 0.6003 | 0.7256 | 0.5169 | 0.4269 | 0.5433 | 0.4404 | Trillium 472465; mAP_normal=0.5607 — large planning regression (L2 +0.27, CR +0.98pp vs `_planifls_laststage` reference) |
+| `_laststage_nodetmap_decoder6_planwp_evalmatchmode` (K/V-off + v4 learned scorer) | **0.5203** | **0.046%** | 0.6275 | 0.7103 | 0.4923 | 0.4212 | 0.5248 | 0.4137 | Exp 8 Option 1 — Killarney 3366620; mAP_normal=0.5531 — **first config to beat hard rescore on CR** (0.046% < 0.063%) at parity L2 with K/V-off baseline |
 
 ## Discussion
 
@@ -442,3 +443,32 @@ After Exp 7 closed the "learned scorer beats hard rescore on K/V-on" line, two q
 - **Both regress (L2 +0.02–0.05, CR +0.02–0.05pp).** Hard rescore is structurally load-bearing — the geometric check sees something neither learned-head nor distilled-logits replicate. The paper keeps hard rescore in the K/V-off architecture (consistent with `2026_04_28_paper_plan.md` decision #4).
 - **Only Option 2 lands (Option 1 regresses).** Distillation through the existing planner head turns out to be a stronger route than pairwise per-anchor learning. Suggests the bottleneck on K/V-on was the conflict head's per-anchor formulation, not the supervision signal itself.
 - **Only Option 1 lands (Option 2 regresses).** Distillation interferes with imitation. Stick with the conflict head + learned-hard inference selector on the K/V-off architecture.
+
+### Option 1 outcome (Killarney 3366620, completed 9h45m): **lands and beats hard rescore on CR.**
+
+Final metrics: `L2=0.5203, obj_box_col=0.046%, NDS=0.5248, mAP=0.4137, mAP_normal=0.5531, car_ade=0.6275, ped_ade=0.7103, car_EPA=0.4923, ped_EPA=0.4212`. Versus the reference points the experiment was designed to compare against:
+
+| Architecture | Selector | L2 | CR | ΔL2 | ΔCR |
+|---|---|---|---|---|---|
+| K/V-on `_planifls` | hard rescore | 0.4988 | 0.063% | +0.022 | **−0.017pp** |
+| K/V-off `_decoder6_planwp` | hard rescore (Killarney 3319227) | 0.5150 | 0.068% | +0.005 | **−0.022pp** |
+| K/V-off `_decoder6_planwp` | **v4 (Option 1, this exp)** | **0.5203** | **0.046%** | (ref) | (ref) |
+
+L2 is at noise-band parity with the K/V-off baseline (+0.005, well within run-to-run variance for this family). CR drops to **0.046%**, which is below every prior data point in this report — including K/V-on hard rescore (0.063%), the prior K/V-off best (0.068%), and the K/V-on hybrid_or that pinned at 0.063% (Exp 7). Detection metrics (`NDS=0.5248, mAP=0.4137`) are within noise of the K/V-off `_decoder6_planwp` reference (`NDS=0.5275, mAP=0.4164`) — the v4 head adds modest gradient pressure but doesn't disturb perception.
+
+**Why this works on K/V-off but not K/V-on (interpretation).** Exp 7 hybrid_or showed v4's rejections were a *strict subset* of hard rescore's on K/V-on: every mode v4 vetoed, hard rescore also vetoed, and hard rescore caught more (so hybrid_or = hard rescore exactly). The hypothesis going in was that the trajectory distribution from a K/V-off planner — which can't read det/motion features at attention time — would be different enough that v4 might find unique signal there. The empirical result confirms it: the K/V-off planner's `plan_reg` outputs sit in mode regions where hard rescore (which reads `det_output` directly via predicted-agent-box geometry) misses some actual collisions, but v4 (which reads agent features through the conflict head's pairwise MLP) catches them. The two selectors have different inductive blind spots, and on K/V-off they're complementary instead of nested.
+
+**Implications for the paper.** This rewrites two sections of `2026_04_28_paper_plan.md`:
+
+1. **Decision #4 (line 209) — "Rescore: hard rescore is locked"** — flip to "v4 evalmatchmode learned scorer replaces hard rescore on the K/V-off Stage 2." On the proposed paper architecture, the learned head is now strictly better on CR at parity L2.
+2. **Risk #1 — "CR regression from removing rescore"** — closed. Removing hard rescore in favour of v4 *improves* CR by 0.022pp on the paper architecture.
+
+This is also the first viable rescore-removal route across the entire `plan_scoring` report — analytic costs (Exps 1, 1v2, 2) all failed, and learned scorers on K/V-on (Exps 4–7) tied or trailed hard rescore. Option 1 is the first experiment to break that pattern.
+
+### Option 2 outcome (Killarney 3366621, TIMEOUT at iter 10863/11720)
+
+Job hit the 11:59:00 wall-clock limit at ~93% completion. Per-iter time was ~3.84s vs the v4 reference's ~2.33s/iter (1.65× slowdown), driven by `compute_rescore_collision_mask` running at all 6 decoder stages in `_loss_planning_distill_rescore`. SLURM killed the job before the final checkpoint save and val pass, so no metrics. Resubmitting with two changes:
+- Cut distill loss to last decoder stage only (matches the inference selector — only the last stage's `plan_cls` is consumed at inference). Drops `compute_rescore_collision_mask` calls 6× per training step → ~1.5× expected speedup.
+- `--time=23:59:00` wall-clock for safety margin.
+
+Tracked under `Exp 8 Option 2 retry` once submitted.

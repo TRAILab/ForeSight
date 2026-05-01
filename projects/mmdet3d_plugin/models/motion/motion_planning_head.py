@@ -2262,7 +2262,13 @@ class MotionPlanningHead(BaseModule):
                 self.plan_distill_rescore_enable
                 and motion_model_outs is not None
                 and det_output is not None
+                and decoder_idx == len(reg_preds) - 1
             ):
+                # Distill only at the last decoder stage. Inference rescore
+                # consumes the last stage's `plan_cls` exclusively, so earlier
+                # stages don't need the constraint baked in. Skipping them
+                # cuts `compute_rescore_collision_mask` calls 6× and recovers
+                # the per-iter cost that timed out Killarney 3366621.
                 distill_ret = self._loss_planning_distill_rescore(
                     cls, reg, data, motion_model_outs, det_output,
                 )
@@ -2271,10 +2277,7 @@ class MotionPlanningHead(BaseModule):
                     output[f"planning_loss_distill_rescore_{decoder_idx}"] = (
                         distill_loss * self.plan_distill_rescore_weight
                     )
-                    if (
-                        distill_diag is not None
-                        and decoder_idx == len(reg_preds) - 1
-                    ):
+                    if distill_diag is not None:
                         for k, v in distill_diag.items():
                             output[f"plan_distill_{k}"] = v
 
