@@ -25,8 +25,8 @@
 # Parameters
 TMP_DIR=$SLURM_TMPDIR/tmp
 TMP_DATA_DIR=$SLURM_TMPDIR/data
-OPENSCENE_HOST_DIR=${OPENSCENE_HOST_DIR:-/scratch/spapais/data/openscene}
-NUPLAN_MAPS_HOST_DIR=${NUPLAN_MAPS_HOST_DIR:-/scratch/spapais/data/nuplan-maps-v1.0}
+OPENSCENE_HOST_DIR=${OPENSCENE_HOST_DIR:-/home/spapais/projects/aip-swasland/datasets/openscene}
+NUPLAN_MAPS_HOST_DIR=${NUPLAN_MAPS_HOST_DIR:-/home/spapais/projects/aip-swasland/datasets/nuplan-maps-v1.0}
 WORK_DIR=/scratch/spapais/ForeSight/work_dirs
 WANDB_PERSIST_DIR=/scratch/spapais/ForeSight/wandb
 CMD=${@:-bash}
