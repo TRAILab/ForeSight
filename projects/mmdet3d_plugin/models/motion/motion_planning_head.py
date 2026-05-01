@@ -308,6 +308,7 @@ class MotionPlanningHead(BaseModule):
         plan_magnitude_loss_weight=1.0,
         plan_ego_status_encode_enable=False,
         plan_ego_status_indices=(0, 1, 5, 6, 7),
+        motion_target_in_agent_frame=False,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -391,6 +392,15 @@ class MotionPlanningHead(BaseModule):
         self.plan_magnitude_loss_weight = float(plan_magnitude_loss_weight)
         self.plan_ego_status_encode_enable = bool(plan_ego_status_encode_enable)
         self.plan_ego_status_indices = list(plan_ego_status_indices)
+        # When True, motion regression operates in each agent's heading-aligned
+        # frame: the k-means motion anchor stays in agent frame (no
+        # _agent2lidar rotation), the model predicts agent-frame deltas, the
+        # GT target is rotated lidar→agent at loss time, and predictions are
+        # rotated agent→lidar wherever they're consumed downstream
+        # (endpoint-anchor builders, mode-query rebuild, post-process). The
+        # rotation uses the predicted yaw from det_anchors at the matched
+        # token, so target/prediction live in the same frame at inference too.
+        self.motion_target_in_agent_frame = bool(motion_target_in_agent_frame)
         # Cache for temporal feature stacking. Set to None at construction;
         # populated each forward (current frame) and consumed on the next.
         self._temp_col_feats = None
@@ -667,6 +677,10 @@ class MotionPlanningHead(BaseModule):
 
         Returns (bs, num_det, 11) anchor boxes placed at the predicted endpoints.
         """
+        if self.motion_target_in_agent_frame:
+            # The model predicts agent-frame deltas; rotate to lidar before
+            # treating them as offsets from det_anchors XY (which are lidar).
+            motion_anchor_upd = self._agent2lidar(motion_anchor_upd, det_anchors)
         best_mode = motion_cls.argmax(dim=-1)  # (bs, num_det)
         idx = best_mode[..., None, None, None].expand(
             -1, -1, 1, motion_anchor_upd.shape[-2], 2
@@ -705,6 +719,8 @@ class MotionPlanningHead(BaseModule):
 
         Returns (bs, num_det, fut_mode, 11) anchor boxes.
         """
+        if self.motion_target_in_agent_frame:
+            motion_anchor_upd = self._agent2lidar(motion_anchor_upd, det_anchors)
         bs, num_det, fut_mode, fut_ts, _ = motion_anchor_upd.shape
         w = self.deformable_waypoint
         endpoint = motion_anchor_upd[..., w, :]  # (bs, num_det, fut_mode, 2)
@@ -1036,13 +1052,18 @@ class MotionPlanningHead(BaseModule):
         return self.adapter.deformable_output(feature)
 
     def get_motion_anchor(
-        self, 
-        classification, 
+        self,
+        classification,
         prediction,
     ):
         cls_ids = classification.argmax(dim=-1)
         motion_anchor = self.motion_anchor[cls_ids]
         prediction = prediction.detach()
+        if self.motion_target_in_agent_frame:
+            # Agent-frame regression: keep the anchor in agent frame so the
+            # model predicts agent-frame deltas. Downstream consumers rotate
+            # to lidar where needed.
+            return motion_anchor
         return self._agent2lidar(motion_anchor, prediction)
 
     def _agent2lidar(self, trajs, boxes):
@@ -1058,6 +1079,36 @@ class MotionPlanningHead(BaseModule):
 
         trajs_lidar = torch.einsum('abcij,jkab->abcik', trajs, rot_mat_T)
         return trajs_lidar
+
+    def _rotate_trajs(self, trajs, boxes, agent_to_lidar=True):
+        """Rotate trajectories by box yaw, broadcasting to any traj rank.
+
+        trajs: (..., T, 2) with arbitrary leading dims (bs, num_anchor, ...).
+        boxes: shape compatible with trajs[..., 0, 0] when expanded — i.e.
+            the leading dims of boxes must match the leading dims of trajs
+            *up to T*. Boxes carries SIN_YAW / COS_YAW in the last axis.
+        agent_to_lidar=True: agent → lidar (R · v).
+        agent_to_lidar=False: lidar → agent (R⁻¹ · v); same as negating sin.
+
+        Used as a shape-flexible companion to `_agent2lidar` (which is locked
+        to a fixed rank via einsum). Suitable for the (bs, num_anchor, T, 2)
+        traj shapes seen in the loss path.
+        """
+        sin_yaw = boxes[..., SIN_YAW]
+        cos_yaw = boxes[..., COS_YAW]
+        norm = torch.sqrt(sin_yaw ** 2 + cos_yaw ** 2).clamp_min(1e-6)
+        sin_yaw = sin_yaw / norm
+        cos_yaw = cos_yaw / norm
+        if not agent_to_lidar:
+            sin_yaw = -sin_yaw
+        # Broadcast (..., 1) so the time axis aligns.
+        sin_yaw = sin_yaw.unsqueeze(-1)
+        cos_yaw = cos_yaw.unsqueeze(-1)
+        x = trajs[..., 0]
+        y = trajs[..., 1]
+        x_new = cos_yaw * x - sin_yaw * y
+        y_new = sin_yaw * x + cos_yaw * y
+        return torch.stack([x_new, y_new], dim=-1)
 
     def _build_temporal_planning_inputs(self, feature_maps, metas):
         """
@@ -1324,9 +1375,17 @@ class MotionPlanningHead(BaseModule):
         plan_anchor = self._get_initial_plan_anchor(bs, metas)
 
         # =========== mode query init ===========
+        # When motion_target_in_agent_frame, motion_anchor is in agent frame;
+        # rotate to lidar before sineembed so the positional code matches the
+        # baseline distribution.
+        motion_anchor_for_query = (
+            self._agent2lidar(motion_anchor, det_anchors)
+            if self.motion_target_in_agent_frame
+            else motion_anchor
+        )
         motion_mode_query = self.motion_anchor_encoder(
             gen_sineembed_for_position(
-                motion_anchor[..., -1, :], hidden_dim=self.embed_dims
+                motion_anchor_for_query[..., -1, :], hidden_dim=self.embed_dims
             )
         )
         if self.plan_mode_time_queries:
@@ -1898,9 +1957,18 @@ class MotionPlanningHead(BaseModule):
                 # cumsum converts delta trajectories to absolute endpoints.
                 motion_anchor_upd = motion_reg.detach().cumsum(dim=-2)
                 plan_anchor_upd = plan_reg.detach().squeeze(1).cumsum(dim=-2)
+                # Sineembed expects lidar-frame endpoint coordinates (matches
+                # the static-anchor init at line ~1378). Rotate the agent-frame
+                # cumsum into lidar before encoding so the positional code's
+                # distribution stays the same as the baseline path.
+                motion_anchor_upd_for_query = (
+                    self._agent2lidar(motion_anchor_upd, det_anchors)
+                    if self.motion_target_in_agent_frame
+                    else motion_anchor_upd
+                )
                 motion_mode_query = self.motion_anchor_encoder(
                     gen_sineembed_for_position(
-                        motion_anchor_upd[..., -1, :], hidden_dim=self.embed_dims
+                        motion_anchor_upd_for_query[..., -1, :], hidden_dim=self.embed_dims
                     )
                 )
                 if self.ego_only_planning:
@@ -2017,7 +2085,9 @@ class MotionPlanningHead(BaseModule):
         det_output=None,
     ):
         loss = {}
-        motion_loss = self.loss_motion(motion_model_outs, data, motion_loss_cache)
+        motion_loss = self.loss_motion(
+            motion_model_outs, data, motion_loss_cache, det_output=det_output
+        )
         loss.update(motion_loss)
         planning_loss = self.loss_planning(
             planning_model_outs, data, motion_loss_cache,
@@ -2027,7 +2097,7 @@ class MotionPlanningHead(BaseModule):
         return loss
 
     @force_fp32(apply_to=("model_outs"))
-    def loss_motion(self, model_outs, data, motion_loss_cache):
+    def loss_motion(self, model_outs, data, motion_loss_cache, det_output=None):
         cls_scores = model_outs["classification"]
         reg_preds = model_outs["prediction"]
         output = {}
@@ -2042,6 +2112,15 @@ class MotionPlanningHead(BaseModule):
                 keepalive = keepalive + cls.sum() * 0.0 + reg.sum() * 0.0
             output['motion_loss_keepalive'] = keepalive
             return output
+        # For agent-frame regression we need each detection token's predicted
+        # yaw to rotate `reg_target` (lidar-frame deltas from the dataset) into
+        # the same agent frame the model is predicting in.
+        det_anchors_for_rot = None
+        if self.motion_target_in_agent_frame:
+            assert det_output is not None, (
+                "loss_motion requires det_output when motion_target_in_agent_frame=True"
+            )
+            det_anchors_for_rot = det_output["prediction"][-1].detach()
         for decoder_idx, (cls, reg) in enumerate(
             zip(cls_scores, reg_preds)
         ):
@@ -2065,6 +2144,15 @@ class MotionPlanningHead(BaseModule):
             cls_weight = cls_weight.flatten(end_dim=1)
             cls_loss = self.motion_loss_cls(cls, cls_target, weight=cls_weight, avg_factor=num_pos)
 
+            if self.motion_target_in_agent_frame:
+                # reg_target is (bs, num_anchor, fut_ts, 2) lidar-frame deltas
+                # from the matched GT future. Rotate to agent frame using the
+                # predicted yaw at each detection token. Unmatched positions
+                # are zero — rotating zeros yields zeros, no harm.
+                reg_target = self._rotate_trajs(
+                    reg_target, det_anchors_for_rot, agent_to_lidar=False
+                )
+
             reg_weight = reg_weight.flatten(end_dim=1)
             reg_pred = reg_pred.flatten(end_dim=1)
             reg_target = reg_target.flatten(end_dim=1)
@@ -2083,6 +2171,10 @@ class MotionPlanningHead(BaseModule):
             )
 
         if 'dn_motion_reg' in model_outs:
+            assert not self.motion_target_in_agent_frame, (
+                "DN motion path is not adapted for agent-frame regression yet. "
+                "Set num_dn_pred_groups=0 or motion_target_in_agent_frame=False."
+            )
             dn_reg = model_outs['dn_motion_reg']          # (bs, N, fut_ts, 2)
             dn_target = model_outs['dn_motion_reg_target'] # (bs, N, fut_ts, 2)
             dn_valid = model_outs['dn_motion_valid']        # (bs, N) bool
@@ -2900,6 +2992,11 @@ class MotionPlanningHead(BaseModule):
 
         motion_cls = motion_model_outs["classification"][-1].sigmoid().detach()
         motion_reg = motion_model_outs["prediction"][-1].detach()
+        if self.motion_target_in_agent_frame:
+            # Rescore collision check is geometric and operates in lidar
+            # frame against det_anchors; rotate agent-frame motion predictions
+            # back to lidar before consuming.
+            motion_reg = self._agent2lidar(motion_reg, det_anchors)
 
         with torch.no_grad():
             collide = decoder.compute_rescore_collision_mask(
@@ -2935,6 +3032,16 @@ class MotionPlanningHead(BaseModule):
         planning_output,
         data,
     ):
+        # Agent-frame regression: motion_output["prediction"][-1] is in each
+        # agent's heading-aligned frame internally. Rotate the last-stage
+        # prediction to lidar before the decoders consume it (motion ADE/FDE,
+        # planning rescore collision check). Build a shallow-copied dict so
+        # we don't mutate the caller's reference.
+        if self.motion_target_in_agent_frame and not self.ego_only_planning:
+            det_anchors_last = det_output["prediction"][-1]
+            preds = list(motion_output["prediction"])
+            preds[-1] = self._agent2lidar(preds[-1], det_anchors_last)
+            motion_output = {**motion_output, "prediction": preds}
         if self.ego_only_planning:
             bs = det_output["classification"][-1].shape[0]
             motion_result = [dict() for _ in range(bs)]
@@ -2949,7 +3056,7 @@ class MotionPlanningHead(BaseModule):
         planning_result = self.planning_decoder.decode(
             det_output,
             motion_output,
-            planning_output, 
+            planning_output,
             data,
         )
 
