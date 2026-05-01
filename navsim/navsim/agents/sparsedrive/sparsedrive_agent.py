@@ -288,4 +288,15 @@ class SparseDriveAgent(AbstractAgent):
         return {"optimizer": optim, "lr_scheduler": scheduler}
 
     def get_training_callbacks(self) -> List[pl.Callback]:
-        return []
+        # Save the last checkpoint each epoch (and the best one by training
+        # loss). Without this, the navsim Hydra runner saves no checkpoint
+        # and PDM-Score eval has nothing to load.
+        return [
+            pl.callbacks.ModelCheckpoint(
+                save_last=True,
+                save_top_k=1,
+                monitor="train/loss_epoch",
+                mode="min",
+                filename="sparsedrive-{epoch:02d}-{step:08d}",
+            ),
+        ]
