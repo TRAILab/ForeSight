@@ -149,7 +149,8 @@ To implement (Exp 3 — joint):
 | Trillium | `ptaux2d_ppdeformmm_planifls_planaux_conf_anchorlabel` (replicate of DGX 3659) | 472465 | COMPLETED — Exp learned-scorer |
 | TBD | `..._planinstfeat_laststage_softcost` with soft-cost rescore (joint) | — | DEPRIORITIZED — Exp 1 v1 didn't land |
 | Killarney | `_laststage_nodetmap_decoder6_planwp_evalmatchmode` (Exp 8 Option 1: K/V-off + v4) | 3366620 | COMPLETED — **L2=0.5203 / CR=0.046%** |
-| Killarney | `_laststage_nodetmap_decoder6_planwp_distillrescore` (Exp 8 Option 2: K/V-off + plan_cls distill) | 3366621 | TIMEOUT at iter 10863/11720 (93%, 11h59m); no ckpt saved before SLURM kill |
+| Killarney | `_laststage_nodetmap_decoder6_planwp_distillrescore` (Exp 8 Option 2 attempt 1) | 3366621 | TIMEOUT at iter 10863/11720 (93%, 11h59m); no ckpt saved before SLURM kill |
+| Killarney | `_laststage_nodetmap_decoder6_planwp_distillrescore` (Exp 8 Option 2 attempt 2, last-stage-only distill, --time=23:59:00) | 3377533 | SUBMITTED |
 
 | Config | L2 | obj_box_col | car_ade | ped_ade | car_epa | ped_epa | NDS | mAP | Notes |
 |--------|-----|-------------|---------|---------|---------|---------|-----|-----|-------|
