@@ -211,17 +211,18 @@ class SparseDriveTargetBuilder(AbstractTargetBuilder):
         deltas[0] = poses[0, :2]
         deltas[1:] = poses[1:, :2] - poses[:-1, :2]
 
-        # Det/map GT from the current frame's annotations, mapped into the
-        # SparseDrive 11-dim anchor format. The det loss is filtered out of
-        # the planning-only total in compute_loss for the first pass; these
-        # targets keep the head's training-mode sampler from KeyError-ing.
-        frame_idx = scene.scene_metadata.num_history_frames - 1
-        annotations = scene.frames[frame_idx].annotations
-        boxes_11d, labels = navsim_boxes_to_sparsedrive(annotations)
-
+        # NOTE on det / map / motion targets:
+        # PyTorch's default_collate can't stack variable-length per-scene
+        # tensors (gt_bboxes_3d shapes like (N_i, 9) where N_i varies). The
+        # navsim Lightning runner uses default_collate, so emitting any
+        # variable-length target here breaks the dataloader. The agent's
+        # forward injects empty placeholders for gt_bboxes_3d / gt_labels_3d
+        # / gt_map_* / gt_agent_fut_* and the corresponding losses get
+        # filtered out for the planning-only first pass.
+        # When we wire real detection supervision, this builder will need to
+        # pad to fixed N (or we'll need a custom collate_fn) — left for the
+        # stage-1 follow-up.
         return {
             "gt_ego_fut_trajs": deltas,
             "gt_ego_fut_masks": torch.ones(cfg.num_future_poses, dtype=torch.float32),
-            "gt_bboxes_3d": torch.from_numpy(boxes_11d),
-            "gt_labels_3d": torch.from_numpy(labels),
         }
