@@ -12,6 +12,12 @@ SPLIT="${1:-navtrain}"
 shift || true
 EXTRA_ARGS="$@"
 
+# By default, expect the cache to already exist (built once via
+# scripts/navsim_cache.sh, which uses Ray-parallel workers and is 5-10x
+# faster than the inline single-threaded Dataset.cache_dataset path). If you
+# *want* the inline cache (e.g. on the very first navmini smoke), pass
+# +use_cache_without_dataset=False explicitly.
+
 # Load env vars (sets OPENSCENE_DATA_ROOT etc.). Allow NAVSIM_EXP_ROOT to fall
 # back to /tmp if the default work_dirs path is unwritable.
 : "${NAVSIM_EXP_ROOT:=/home/trail/workspace/ForeSight/work_dirs/navsim}"
@@ -39,7 +45,7 @@ python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_training.py" \
     experiment_name="${EXP_NAME}" \
     train_test_split="${SPLIT}" \
     split="${DATA_SPLIT}" \
-    cache_path="${NAVSIM_EXP_ROOT}/training_cache/sparsedrive_${SPLIT}/" \
-    use_cache_without_dataset=False \
+    cache_path="${NAVSIM_EXP_ROOT}/training_cache/sparsedrive_${SPLIT}" \
+    use_cache_without_dataset=True \
     force_cache_computation=False \
     ${EXTRA_ARGS}
