@@ -221,11 +221,25 @@ class SparseDriveAgent(AbstractAgent):
     ) -> Dict[str, torch.Tensor]:
         # In training, predictions IS the SparseDrive loss dict. Sum scalars
         # into the canonical 'loss' key the lightning module backprops on.
+        # NOTE on det/map filtering: SparseDrive's det/map heads compute losses
+        # against per-batch GT lists that the navsim path currently injects as
+        # empty placeholders. Empty GT + 900 anchors makes the head try to
+        # classify everything as background, producing massive (~8.5e3 per
+        # decoder layer) loss that overflows fp16 / diverges in fp32. Until
+        # real det/map GT is wired through, exclude their losses from the
+        # backprop total. det/map heads still get gradients via the path
+        # planning_loss -> planning_head -> cross-attn over det features, so
+        # they're learned (just not directly supervised by classifying empty
+        # anchor sets).
         if isinstance(predictions, dict):
             loss_terms = {
                 k: v
                 for k, v in predictions.items()
-                if torch.is_tensor(v) and v.dim() == 0 and v.requires_grad
+                if torch.is_tensor(v)
+                and v.dim() == 0
+                and v.requires_grad
+                and not k.startswith("det_loss")
+                and not k.startswith("map_loss")
             }
             if loss_terms:
                 total = sum(loss_terms.values())
