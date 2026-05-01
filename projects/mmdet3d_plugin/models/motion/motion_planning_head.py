@@ -297,6 +297,8 @@ class MotionPlanningHead(BaseModule):
         relevance_horizon=6,
         skip_perception_kv=False,
         ego_only_planning=False,
+        conflict_input='agent_token',
+        conflict_image_sampler=None,
         planning_temporal_stack=0,
         planning_temporal_egocomp=True,
         plan_anchor_norm_mode='none',
@@ -357,6 +359,18 @@ class MotionPlanningHead(BaseModule):
         self.relevance_horizon = int(relevance_horizon)
         self.skip_perception_kv = skip_perception_kv
         self.ego_only_planning = ego_only_planning
+        self.conflict_input = conflict_input
+        if conflict_input not in ('agent_token', 'image_at_det'):
+            raise ValueError(
+                f"conflict_input must be 'agent_token' or 'image_at_det', got {conflict_input!r}"
+            )
+        if conflict_input == 'image_at_det':
+            assert conflict_image_sampler is not None, (
+                "conflict_input='image_at_det' requires conflict_image_sampler config"
+            )
+            self.conflict_image_sampler = build_from_cfg(conflict_image_sampler, ATTENTION)
+        else:
+            self.conflict_image_sampler = None
         self.planning_temporal_stack = int(planning_temporal_stack)
         self.planning_temporal_egocomp = bool(planning_temporal_egocomp)
         # Anchor normalization variants. 'none' is the default static-meter
@@ -1461,6 +1475,26 @@ class MotionPlanningHead(BaseModule):
         else:
             feature_maps_p = feature_maps
             metas_p = metas
+        # Precompute conflict-head image-feature samples once (shared across refines).
+        # Path: zero queries + det_anchor positions → deformable → image features at
+        # det BEV cells. Tests whether the conflict head needs detection's learned
+        # semantic abstraction (`agent_token`) or raw image content at the agent's
+        # spatial location (`image_at_det`).
+        if self.with_conflict_head and self.conflict_input == 'image_at_det':
+            sampler_anchors = det_anchors
+            sampler_query = sampler_anchors.new_zeros(
+                sampler_anchors.shape[0], sampler_anchors.shape[1], self.embed_dims
+            )
+            sampler_anchor_embed = anchor_encoder(sampler_anchors)
+            conflict_image_features = self.conflict_image_sampler(
+                sampler_query,
+                sampler_anchors,
+                sampler_anchor_embed,
+                feature_maps,
+                metas,
+            )
+        else:
+            conflict_image_features = None
         _deformable_stage_idx = 0
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
@@ -1816,9 +1850,12 @@ class MotionPlanningHead(BaseModule):
                 motion_query = motion_mode_query + (instance_feature + anchor_embed)[:, :num_anchor].unsqueeze(2)
                 # Use only the ego token (index num_anchor), not DN tokens that follow it.
                 plan_query = plan_mode_query.unsqueeze(1) + (instance_feature + anchor_embed)[:, num_anchor:num_anchor+1].unsqueeze(2)
-                agent_features_for_refine = (
-                    instance_feature[:, :num_anchor] if self.with_conflict_head else None
-                )
+                if not self.with_conflict_head:
+                    agent_features_for_refine = None
+                elif self.conflict_input == 'image_at_det':
+                    agent_features_for_refine = conflict_image_features
+                else:
+                    agent_features_for_refine = instance_feature[:, :num_anchor]
                 (
                     motion_cls,
                     motion_reg,
