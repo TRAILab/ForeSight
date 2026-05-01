@@ -24,6 +24,9 @@ from tqdm import tqdm
 
 K = 6
 EPS = 1.0  # meters; floor on ||traj_end|| for normalization
+REFMAG_FLOOR = 1.0  # meters; floor on per-cluster median magnitude. Without
+# this, the cmd=Straight stopped-cluster has median=0, which makes the metric
+# anchor (shape * refmag) the zero vector and degenerates gen_sineembed_for_position.
 FP = "data/infos/nuscenes_infos_train.pkl"
 OUT_ANCHOR = "data/kmeans/kmeans_plan_shape_endptnorm.npy"
 OUT_REFMAG = "data/kmeans/kmeans_plan_shape_endptnorm_refmag.npy"
@@ -67,9 +70,12 @@ for cmd_idx, (trajs, ends) in enumerate(zip(navi_trajs, end_norms_per_cmd)):
     labels = km.labels_                           # (n,)
 
     # Cluster-median raw endpoint magnitude, in cluster-id order matching `centers`.
+    # Floored at REFMAG_FLOOR so the stopped cluster doesn't collapse the metric
+    # anchor to zero (which kills gen_sineembed_for_position downstream).
     median_mag = np.zeros(K, dtype=np.float32)
     for k in range(K):
-        median_mag[k] = float(np.median(end_arr[labels == k])) if (labels == k).any() else 0.0
+        raw = float(np.median(end_arr[labels == k])) if (labels == k).any() else 0.0
+        median_mag[k] = max(raw, REFMAG_FLOOR)
     print(f"cmd {cmd_idx} ({cmd_names[cmd_idx]}): {flat.shape[0]} trajs -> {K} clusters")
     for k in range(K):
         endpt = centers[k, -1]

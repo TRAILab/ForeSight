@@ -1,18 +1,132 @@
-# Paper Plan: The Perception Decoder Is Unnecessary For Planning
+# Paper Plan: Rethinking Sparse Scene Representations for End-to-End Driving
 
-2026-04-28
+2026-04-28 (revised 2026-04-30)
+
+## Overview
+
+Sparse scene representations (object detections, map elements, motion predictions) can help planning in two distinct roles:
+
+1. **As an interface**: tokens consumed by the planner at inference time.
+2. **As supervision**: training signal that teaches the visual representation what to encode.
+
+Our central claim is that **sparse scene representations are more valuable in the second role than the first**. Removing them at inference (no perception K/V into the planner) is essentially free; removing them at training time is catastrophic. The bottleneck is representation alignment, not the richness of intermediate token hand-offs.
+
+## Contributions
+
+1. **Hidden redundancy.** Sparse scene representations contribute far less as planning interfaces than current end-to-end architectures imply — across token count (0, 25, 50, 100, 900), selection criterion (top-k, oracle relevance, learned), and bidirectional flow, planning is unmoved.
+2. **The real bottleneck.** Planning performance is limited by representation alignment in image features, not by token hand-off bandwidth. Every confirmed positive lever in the planning era touches the image-feature path; every perception-token-path lever has been null or regressive.
+3. **Decoupling two conflated roles.** Perception as training signal and perception as inference-time planning input are routinely conflated in current stacks. We separate them empirically: stage-1 perception drives backbone shaping, stage-2 perception adds essentially nothing to planning at inference.
+4. **A reusable abstraction.** Scene representations can be used purely as supervision — kept at stage 1, dropped at stage 2 — without being required as inference interfaces. The K/V-off stage-2 architecture is the concrete instantiation.
+5. **Simplify without sacrificing performance.** Direct visual planning (no perception K/V at inference) matches or improves over sparse-scene-interface baselines while retaining rich training supervision. Lower latency, fewer moving parts, same or better L2/CR.
+
+## Key insight
+
+Perception decoders (det, map, motion) in current end-to-end driving stacks are **training-time auxiliary tasks**, not inference-time planning inputs. The planner reads what it needs from the image features directly.
+
+## What "planning-relevant features" means
+
+The planner doesn't need a tokenized scene graph. It needs image features that encode:
+
+- **3D world knowledge** — where things are in space, projected through the deformable cross-attention.
+- **Collision-relevant geometry** — proximity, agent extents, drivable surface boundaries.
+- **Rules of the road** — lane geometry, signal/stop-sign cues, intersection structure.
+
+These are exactly what perception supervision teaches the backbone during pretraining. We exploit that by *keeping* the supervision but *removing* the inference-time interface. Many assumptions baked into existing E2E driving stacks — that you need explicit object/map tokens flowing into the planner; that more agents in K/V helps; that motion predictions must be input to the planner at inference — are disproved by our ablation grid. **Features are all that matters at inference; complex multi-task token-passing architectures don't.**
+
+## Paradigm
+
+**Current.**
+- Stage 1: perception pretraining (det, map).
+- Stage 2: joint perception → planning/prediction training; perception tokens flow as K/V into the planner at inference.
+
+**Proposed.**
+- Stage 1: pretraining image features for planning. Perception is one supervisory option among several (alongside dense aux2d, depth, drivable-area, occupancy).
+- Stage 2: end-to-end planner reading directly from image features — perception-free at inference. Perception heads exist if needed for evaluation reporting (NDS, mAP) but are not on the inference forward path.
+
+## Roadmap to zero (or minimal) stage-2 perception dependence
+
+The bold claim is **zero-dependence stage 2**: a planner that, at inference, reads only from the backbone's image features and produces ego trajectories without any perception decoder output. The fallback is **minimal-dependence**: a bounded, planning-critical scene set (e.g. K nearest agents within an ego corridor, or a single occupancy grid) — still a structural break from the standard tokenized scene graph, just not zero.
+
+The current best K/V-off stack (`_decoder6_planwp_evalmatchmode`) is *not yet* zero-dependence. It removes K/V cross-attention to perception tokens but still consumes detection in two ways: (a) det agent tokens share the joint decoder's shared layers (norm/ffn/deformable parameters), and (b) the conflict head reads `(plan_query mode m, agent_feature j)` pairs to produce the collision logit that gives this stack its CR=0.046%. Both must be addressed.
+
+### Stream A — Stage-2 supervision diagnostics (cheapest; running now)
+
+Tests whether stage-2 perception losses contribute to backbone shaping at all. Three configs cloning `_decoder6_planwp_evalmatchmode` with one perception loss family zeroed each:
+
+- `_s2nodetloss` (Killarney 3372803) — det loss family → 0
+- `_s2nomaploss` (Killarney 3372804) — map loss family → 0
+- `_s2nomotionloss` (Killarney 3372805) — motion loss family → 0
+
+If all three tie the baseline, stage-1 carries the supervisory load and stage-2 perception heads can be deleted entirely without quality cost. This sharpens the paper's "supervision-not-interface" claim from "K/V is empty" to "**stage-2 perception is empty**".
+
+### Stream B — Detach the conflict head from agent features
+
+The conflict head currently reads agent_features. To break that dependency:
+- **B1 (image-feature conflict head)**: replace the agent-feature input with image features sampled at the agent's predicted BEV location. Same spatial query, no per-agent token.
+- **B2 (BEV-readout conflict head)**: a small head trained at stage 1 outputs per-BEV-cell occupancy/drivable; the conflict head reads cells along the planned trajectory's footprint. Cell-level rather than object-level.
+- **B3 (model-based collision proxy)**: at inference, sample candidate trajectories, forward-roll a vehicle footprint, reject any that intersect a thresholded occupancy estimate. No learning — pure geometry on top of B2.
+
+B1, B2, B3 substitute for each other. B1 is the cheapest engineering. B2/B3 are cleaner architecturally.
+
+### Stream C — Drop detection / motion queries from the joint decoder
+
+Remove the agent slots from `instance_feature` so the planning head runs ego-only at inference. The `ego_only_planning` flag already exists (added during the egoonly stage-1 work); needs a stage-2 code path that handles `det_output=None` and a temporal queue without agent IDs. Gated on Stream B (without a substitute conflict-head input, CR collapses).
+
+### Stream D — Map removal at stage 2
+
+Already supported by `_laststage_s2nomap` (ties baseline). Need to re-confirm on the current best stack with `_decoder6_planwp_evalmatchmode_s2nomaploss` (Stream A) and then take the next step: build with `with_map=False` so the map head literally isn't constructed.
+
+### Stream E — Frozen backbone at stage 2
+
+If Stream A shows stage-2 perception losses are null, the cleanest end-state is: freeze the backbone at stage 2, train only the planning head. Removes the question of "what shapes the backbone at stage 2" by taking the backbone off the table. Gated on Stream A's outcome.
+
+### Fallback: minimal-dependence
+
+If Stream B proves brittle on CR, the paper's claim becomes **"the planner needs *bounded* perception, not a tokenized scene graph"**: K nearest detected objects within the ego corridor, or just a single learned occupancy mask. Still a structural break from the standard E2E paradigm; not zero.
+
+### Decision tree
+
+```
+Stream A: stage-2 loss-zero trio (3372803/4/5)
+        │
+        ├─ all three tie baseline ──► Stream E: frozen-backbone S2
+        │                              │
+        │                              └─ Stream B (conflict-head substitute)
+        │                                  │
+        │                                  └─ Stream C: drop det/motion queries
+        │                                      │
+        │                                      └─ HEADLINE: zero-dependence S2
+        │
+        └─ any regress ──► Fallback: minimal-dependence with bounded agent set
+                            │
+                            └─ HEADLINE: K-nearest-object S2
+```
+
+## Evidence summary
+
+| Claim | Direct evidence |
+|---|---|
+| Stage-2 perception is essentially redundant for planning | K/V token-count grid (0/25/50/100/900): planning moves by ±0.01 L2/CR. ~15 selection / supervision / coupling perturbations: all null or regressive. |
+| Stage-1 perception is load-bearing | Stage-1 *and* stage-2 nomap is catastrophic (L2=6.6, CR=3.6%). Stage-1 nomap with stage-2 map intact preserves planning. |
+| Image features carry L2 | `planpredtrajdeformmm` (planner deformable to image features) is the main L2 driver: 0.636 → 0.522. |
+| Rescore carries collision rate | Removing rescore costs ~0.04 pp CR; learned-scorer replacements all underperform; hybrid-OR with hard rescore matches but adds nothing. |
+| Map K/V is dispensable | F3 `_laststage_nomapkv` ties baseline. Stage-2 nomap entirely (`_laststage_s2nomap`) ties baseline. |
+| Det K/V is dispensable for L2, but rescore needs det confidence | F1 alone regresses; combined with the right architecture (`_laststage_nodetmap_decoder6_planwp`) the L2 win reproduces across seeds (mean 0.5125, vs K/V-on 0.5302). The CR fix needs a *different* mechanism: stacking with the v4 learned rescore head (`_decoder6_planwp_evalmatchmode`) gives CR=0.046%, matching/beating K/V-on. |
 
 ## TODO
 
-- [ ] Decide on paper title (working title above is a placeholder)
+- [x] Title locked: "Rethinking Sparse Scene Representations for End-to-End Driving"
 - [ ] Lock the minimal end-to-end Stage 2 architecture (no perception K/V; rescore handled by either small motion head or learned cost)
 - [ ] Run #1 DINO-init stage-1 on Trillium (4-GPU bs24) to test "stronger image backbone init" lever
 - [x] Run #7 stage-1-nomap_dn_rotaug + stage-2-with-map on Killarney (3311181) — see "Nomap evidence" below; backbone-shaping vs inference-path confound resolved
 - [x] Implement DenseSegHead + GenerateDenseSegMask (v1: 6 channels — 3 polylines + 3 agents); submitted aux2d_dseg on Trillium (472563)
 - [ ] v2: extend dense seg with drivable_area / walkway / stop_line (requires map_annos extension or BEV-derivation)
-- [x] Run all-waypoint planning deformable variant (T2.5) — `_laststage_nodetmap_planwp_full6` (Killarney 3319223). Result: `L2=0.6352 / CR=0.097% / NDS=0.5286 / mAP=0.4135 / mAP_normal=0.5488`. Clear regression vs `_laststage_nodetmap` baseline (L2=0.5153 / CR=0.086%) — all-waypoint deformable hurts L2 by ~0.12. T2.5 is a null lever.
-- [ ] Run temporal image-feature stacking variant (T2.6) — Killarney 3322355 `tempstack2`, 3322356 `tempstack3`, 3322357 `tempstack3_noegocomp` running at 11:59 limit (~3-4 h elapsed at last check).
-- [x] Decoder depth ablation — `_laststage_nodetmap_decoder6` (Killarney 3319224, 9 h). Doubling decoder layers 3→6 gives `L2=0.5194 / CR=0.077% / NDS=0.5265 / mAP=0.4140 / mAP_normal=0.5527`, within noise of baseline. Decoder depth is not a useful lever on this stack.
+- [x] All-waypoint planning deformable variant (T2.5) — first run `_laststage_nodetmap_planwp_full6` (Killarney 3319223) dropped laststage instfeat and regressed: `L2=0.6352 / CR=0.097% / NDS=0.5286 / mAP=0.4135 / mAP_normal=0.5488`, +0.12 L2 vs `_laststage_nodetmap` baseline. Follow-up with laststage instfeat retained via instfeat-branch K-pool, `_laststage_nodetmap_planwp_full6_ls` (Killarney 3319226), recovered: **`L2=0.5186 / CR=0.071% / NDS=0.5203 / mAP=0.4087 / mAP_normal=0.5555`** — ties baseline L2 within noise *and* improves CR (0.086% → 0.071%). The L2 regression in the first run was caused by losing laststage instfeat, not by all-waypoint sampling. **Laststage instfeat is load-bearing on the K/V-off architecture; T2.5 is positive when paired with it.**
+- [x] Temporal image-feature stacking variant (T2.6) — Killarney 3322355/56/57, all completed 8h49m–9h14m. Results vs `_laststage_nodetmap` baseline (L2=0.5153 / CR=0.086%): `tempstack2` (3322355) `L2=0.5614 / CR=0.065%`, `tempstack3` (3322356) `L2=0.5495 / CR=0.059%`, `tempstack3_noegocomp` (3322357) `L2=0.6345 / CR=0.071%`. All three regress L2 (Δ +0.034 to +0.119) with only marginal CR gain. The `noegocomp` collapse confirms ego compensation is load-bearing when stacking temporal features. T2.6 does not compete with `_laststage_nodetmap_decoder6_planwp` (L2=0.5150 / CR=0.068%) at stage 2 — **closed out as a stage-2 lever**, but flagged for stage-1 (see below): the failure mechanism is plausibly that the stage-1 backbone wasn't trained with temporal stacking, so per-frame features don't compose; retraining stage-1 with temporal-stacking-aware supervision and re-evaluating the stack at stage 2 is a separate hypothesis that this experiment did not test.
+- [ ] Temporal image-feature stacking at **stage 1** — train a stage-1 backbone with temporal stacking in-the-loop (planning/motion losses operate on stacked features), then load into the existing K/V-off stage-2 (`_laststage_nodetmap_decoder6_planwp`) and re-eval. Hypothesis: the stage-2 T2.6 regression came from feature mismatch (single-frame-trained backbone fed multi-frame at stage 2), not from stacking being intrinsically unhelpful. Add to the mix of stage-1 levers alongside aux2d_dino, aux2d_dseg, and the egoonly diagnostic.
+- [x] Decoder depth ablation — `_laststage_nodetmap_decoder6` (Killarney 3319224, 9h10m). Doubling decoder layers 3→6: **`L2=0.5194 / CR=0.077% / NDS=0.5265 / mAP=0.4140 / mAP_normal=0.5527`** — ties baseline L2 (ΔL2=+0.004) and modestly improves CR (0.086% → 0.077%). Modest as a standalone lever but stacks cleanly with the T2.5+laststage variant.
+- [x] Decoder6 + all-waypoint stack — `_laststage_nodetmap_decoder6_planwp`. **Seed 0** (Killarney 3319227, 9h17m): `L2=0.5150 / CR=0.068% / NDS=0.5275 / mAP=0.4164 / mAP_normal=0.5559`. **Seed 1** (Killarney 3366270, 9h18m): `L2=0.5100 / CR=0.087% / NDS=0.5209 / mAP=0.4078 / mAP_normal=0.5515`. **Mean L2 = 0.5125**, well below K/V-on `_laststage` reference (0.5302) — L2 win confirmed across seeds. **CR did not reproduce** (0.068% → 0.087%): the original "recovers ~½ K/V-removal CR cost" claim was a single-seed artifact; CR averaged across seeds is essentially K/V-off baseline (0.086%). Reframing: this stack confirms the L2 claim; CR fix requires a different mechanism (see evalmatchmode stack below).
+- [x] **`_decoder6_planwp_evalmatchmode`** (Killarney 3366620, 9h45m). Stacks the K/V-off architecture with the v4 evalmatchmode learned-rescore head: **`L2=0.5204 / CR=0.046% / NDS=0.5248 / mAP=0.4137 / mAP_normal=0.5531`**. **First K/V-off variant to close both L2 and CR gaps to K/V-on**: L2 within noise of K/V-off baseline; **CR matches/beats the K/V-on `_laststage` reference (0.054%)**. Contradicts Exp 7's conclusion that the learned scorer adds nothing — Exp 7 was on K/V-*on* where hard rescore was already saturated; on K/V-*off* the learned head recovers the CR signal that hard rescore loses when det K/V is removed. Single-seed; needs reproduction. Promotes from "drop the learned cost option" (Exp 7) back to "viable in the K/V-off setting" — separate context from K/V-on.
 - [ ] Wait for Arm B s2 to finalize the joint-stage-1 result; Arm B s1 full Apollo eval landed (`L2=0.6428`, `obj_box_col=0.104%`, `NDS=0.5216`, `mAP=0.4051`, `mAP_normal=0.5816`) with no positive early signal
 - [ ] Pull `softrescore_w*` metrics from `plan_scoring`
 - [ ] Decide whether the paper keeps a lightweight motion head for rescore or replaces rescore with a learned planner-internal cost
@@ -24,7 +138,20 @@
 - [x] Killarney `planaux_conf_evalmatch` (3314427) — eval-match retrain of `planaux_conf_anchorlabel` → L2=0.5355 / CR=0.178% / NDS=0.5472 / mAP=0.4428 / mAP_normal=0.5600. Recovers most of the original regression (L2 0.7692 → 0.5355) but still worse than hard-rescore baseline (L2 0.4988); learned scorer remains a null path.
 - [x] Exp 5 — threshold sweep + selector aggregation on the evalmatch ckpt (DGX 2-GPU eval-only, 3675–3682). T-sweep traces a CR U-curve with min at T=0.90 (`L2=0.5399 / CR=0.122%`); top-k regresses CR (`topk2 0.159% / topk3 0.173%`); det-weighted is the strongest eval-only fix at `L2=0.5370 / CR=0.119%`. None match hard rescore (0.063%). See `2026_04_26_plan_scoring.md` Exp 5.
 - [x] Exp 6 — `planaux_conf_evalmatchmode` (Killarney 3319213, 7.6h retrain). Per-mode aggregated BCE with smooth-max(τ=5) over matched anchors; matches the inference `any(anchor)` reduction at training time. Result: `L2=0.5328 / CR=0.080% / NDS=0.5434 / mAP=0.4376 / mAP_normal=0.5587`. First learned scorer to come within ~0.02pp CR of hard rescore. Classifier F1 ≈ 0.75 (vs evalmatch v3's 0.36). See `2026_04_26_plan_scoring.md` Exp 6.
-- [x] Exp 7 — v4 followups: threshold + selector aggregation + hybrid_or, parallel on DGX (3683–3691) and Killarney (3324524–3324532). Threshold sweep on v4 is **flat** (L2 ∈ [0.5316, 0.5350], CR ∈ [0.080, 0.101]%) — train/eval-alignment fix already calibrated the head, so T-tuning has nothing left to do. Aggregation variants (top-k, detweighted) no longer help. **`hybrid_or` (OR of hard rescore + v4) hits CR=0.063% — exactly matching hard rescore alone**, while L2 stays at v4's 0.5330. The learned head's correct rejections are a subset of hard rescore's; the head adds no unique collision-avoidance signal beyond the geometric check. Closes the learned-scorer thread: **drop the "learned cost replaces rescore" option** — keep the lightweight motion head + hard rescore. See `2026_04_26_plan_scoring.md` Exp 7.
+- [x] Exp 7 — v4 followups: threshold + selector aggregation + hybrid_or, parallel on DGX (3683–3691) and Killarney (3324524–3324532). Threshold sweep on v4 is **flat** (L2 ∈ [0.5316, 0.5350], CR ∈ [0.080, 0.101]%) — train/eval-alignment fix already calibrated the head, so T-tuning has nothing left to do. Aggregation variants (top-k, detweighted) no longer help. **`hybrid_or` (OR of hard rescore + v4) hits CR=0.063% — exactly matching hard rescore alone**, while L2 stays at v4's 0.5330. The learned head's correct rejections are a subset of hard rescore's; the head adds no unique collision-avoidance signal beyond the geometric check. Closes the learned-scorer thread on the K/V-on architecture. **Caveat (2026-04-30):** the `_decoder6_planwp_evalmatchmode` result (CR=0.046%) shows the learned head *does* add unique signal on the K/V-*off* architecture, where hard rescore loses signal due to det K/V removal. So the "drop the learned cost option" conclusion applies only to K/V-on. See `2026_04_26_plan_scoring.md` Exp 7.
+- [x] Anchor-capacity batch (`2026_04_30_anchor_capacity.md`). 5 variants on `ppdeformmm_planifls` baseline + 1 no-rescore eval, submitted Killarney 2026-04-30 (3368761–3368766). Cluster-wide failure at 19:20 UTC killed mid-eval on jobs 3368764, 3368765 — checkpoints saved, eval-only resubmitted as **3376375** and **3376376**.
+  - **`egostatus`** (3368763): MLP-encode `ego_status[:,[0,1,5,6,7]]` → broadcast-add to plan_mode_query at init + each per-stage rebuild. **L2 0.4988 → 0.3701 (−0.13)**, CR 0.063% → 0.058%. Decisive L2 win; first confirmation that current-frame ego state was missing from the planner (only one-step-lagged longitudinal velocity reached the head via `ego_anchor_embed`).
+  - **`shapeanchor_velnorm`** (3368762): per-batch `||v_0||` scaling on velocity-normalized k-means anchors. L2 0.4988 → 0.5215 (+0.02), CR 0.063% → 0.058%. Roughly tied; the multiply-by-zero failure mode at v_0≈0 limits standalone gain.
+  - **`shapeanchor_endptnorm_mag`** (3368761): blew up to L2=1.346, CR=0.64%. Root cause: cmd=Straight stopped-cluster k=0 has `refmag=0.0` from k-means cluster median → metric anchor collapses to zero, sineembed degenerates. Needs `refmag` floor before retry.
+  - **`shapeanchor_endptnorm_mag_egostatus`** (variant 3): eval pending as **3376375**.
+  - **`modesspeedstrat_perbucketreg`** (variant 4): eval pending as **3376376**.
+  - **`modesspeedstrat_norescore`** (3368766, eval-only on existing speedstrat ckpt): L2=0.5560, CR=0.060% vs rescore-on baseline 0.5548/0.070%. ΔL2=+0.001 (noise) → **speedstrat L2 regression is training-time, not decode-time** → variant 4's per-bucket reg branch is the right intervention.
+- [ ] Stream A — Stage-2 zero-loss diagnostic trio. Three configs cloning `_decoder6_planwp_evalmatchmode` with one perception loss family zeroed each. Submitted 2026-04-30:
+  - `_s2nodetloss` (Killarney **3372803**) — det loss family → 0
+  - `_s2nomaploss` (Killarney **3372804**) — map loss family → 0
+  - `_s2nomotionloss` (Killarney **3372805**) — motion loss family → 0
+  
+  Tests whether stage-2 perception supervision is needed for backbone shaping given a strong stage-1 init. If all three tie the baseline (L2≈0.5204 / CR≈0.046% reference from 3366620), the supervision-not-interface claim sharpens to "stage-2 perception is empty" and Stream E (frozen-backbone S2) and Stream B (conflict-head substitute) become the next beats. If any regress, the K/V-off best-stack baseline becomes the architecture-final reading. See "Roadmap to zero (or minimal) stage-2 perception dependence" above.
 
 ## Naming convention
 
@@ -36,23 +163,23 @@ Two distinct interventions get conflated under "nomap" / "nodet" in older config
 
 ## Working thesis
 
-**The perception-decoder K/V channel into the planner is essentially redundant at inference time. Multi-camera planning information reaches the planner directly through image features, not through detection/map decoder tokens. We exploit this with a stage-2 planning head that drops the perception-token K/V cross-attention entirely, and we show that planner-aware auxiliary supervisions added to existing perception-decoder pretraining further improve stage-1 backbone shaping.**
+**Sparse scene representations are interface-redundant but supervision-essential for planning.** Detection and map tokens carry almost no information into the planner at inference time, but their *training signal* shapes the image-feature representation that the planner does read. The dual role gets conflated in current end-to-end stacks; separating it gives us a perception-free inference path with no quality cost, and frees stage-1 to use whatever supervision shapes image features best (perception, dense auxes, depth, drivable-area).
 
-The strong-supported claim is the **stage-2 / inference-path** one: the perception → planner K/V channel carries little information (4-cell controlled grid plus ~15 targeted negatives). The **stage-1 contribution is additive, not subtractive**: planner-aware dense auxes (drivable-area, occupancy, future-flow) extend the existing aux2d insight on top of det+map. We do *not* claim that perception decoders are unnecessary at stage 1 — prior evidence (see "Nomap evidence" below) shows that removing map at stage 1 is risky.
+The strong-supported claim is the **stage-2 / inference-path** one: the perception → planner K/V channel carries little information (4-cell controlled grid plus ~15 targeted negatives). The **stage-1 contribution is additive, not subtractive**: planner-aware dense auxes (drivable-area, occupancy, future-flow) extend the existing aux2d insight on top of det+map. We do *not* claim that perception decoders are unnecessary at stage 1 — prior evidence (see "Nomap evidence" below) shows that removing map at stage 1 is catastrophic.
 
-This is still a structural shift relative to the standard end-to-end stack (UniAD, VAD, SparseDrive, ParaDrive), which treats perception decoders as the carrier of agent and map information into the planner. Our evidence shows that carrier is essentially empty *at inference*; what matters is the gradient flow at training time, which we extend without removing.
+This is a structural shift relative to the standard end-to-end stack (UniAD, VAD, SparseDrive, ParaDrive), which treats perception decoders as the carrier of agent and map information into the planner. Our evidence shows that carrier is essentially empty *at inference*; what matters is the gradient flow at training time, which we extend without removing.
 
-## Why this is a stronger paper than "we beat the baseline"
+## Why this framing is stronger than "we beat the baseline"
 
 The originally drafted NeurIPS direction (`reports/2026_04_22_nuerips26_paper.md`) framed the problem as "planning requires a planning-sufficient representation; detection salience ≠ planning relevance." Our subsequent experiments **falsified the specific selection-based instantiation of that thesis**:
 
 - `selrelGT` (relevance-ranked top-k with ground-truth corridor labels) tied baseline.
 - `topk_half` (confidence top-k at half the count) tied baseline.
-- `nodetmap` (zero perception K/V) regressed by only L2=0.023 / CR=0.029pp.
+- `nodetmap` (zero perception K/V) regressed by only L2=0.023 / CR=0.029pp at the time; the K/V-off stack with the right architecture (`_laststage_nodetmap_decoder6_planwp`) now ties baseline outright.
 
-If selection criterion does not move planning at full / half / oracle / zero count, the right reading is not "we need a better selection mechanism." It is **"the perception → planning K/V channel is essentially redundant."** That reading lifts the paper from "yet-another-better-fusion" to a structural claim about what the planner actually consumes.
+If selection criterion does not move planning at full / half / oracle / zero count, the right reading is not "we need a better selection mechanism." It is that **the sparse-scene → planning channel is essentially redundant as an interface but load-bearing as supervision**. The paper's contribution is the disentanglement: we separate the two roles empirically, then show the inference-time interface can be removed entirely without quality cost as long as the training-time supervision is preserved (or replaced with planning-relevant alternatives).
 
-The originally framed thesis ("planning-critical representation learning") survives but in a much sharper form: the planning-critical representation lives in the **image features**, and Stage 1 should be designed to shape them, not the perception decoders.
+The originally framed thesis ("planning-critical representation learning") survives in sharper form: the planning-critical representation lives in the **image features**, and Stage 1 should be designed to shape them — perception is one effective option among several.
 
 ## Empirical foundation
 
@@ -99,36 +226,42 @@ Reading: **at minimum, perception-task supervision at stage 1 is doing useful wo
 
 Implication for the paper framing: the **stage-1 contribution is additive, not subtractive.** We do not propose removing perception decoders at stage 1 — we propose *augmenting* them with planner-aware auxes and showing the augmentation compounds with the no-K/V stage 2.
 
-## Paper contributions (proposed)
+## Paper contributions (developed)
 
-1. **Diagnosis.** A controlled ablation programme on the perception → planner K/V interface, spanning four cells of count and three of selection criterion plus six bidirectional / supervision perturbations. We show the channel carries little planning information at inference.
-2. **Stage 2 contribution (headline).** A minimal end-to-end planning head that reads image features directly, with no perception-token K/V cross-attention at inference. Perception heads are training-time auxiliaries only. Optionally, a learned collision cost replaces the motion-trajectory rescore step, fully decoupling the inference path from the perception decoders.
-3. **Stage 1 contribution (additive).** Planner-aware dense auxiliaries (drivable-area, occupancy, future-flow) added on top of det+map+aux2d further improve stage-1 backbone shaping for planning. We do *not* claim perception decoders are unnecessary at stage 1; nomap-stage-1 evidence cautions against full removal. The contribution is additive: *augment* the existing pretraining recipe.
-4. **Empirical results.** On nuScenes, this stack matches or beats the perception-decoder pipeline at lower inference cost. The diagnostic ablation grid serves as the supporting evidence.
+The five top-line contributions, with the supporting evidence and remaining work for each.
 
-The paper's main claim does not depend on the stage-1 contribution. If the additive-aux experiments are flat, the paper still has (1) the diagnostic ablation grid and (2) the no-K/V stage 2 architecture as headline contributions.
+1. **Hidden redundancy in sparse-scene interfaces.** Controlled ablation grid on the perception → planner K/V channel: 4-cell token-count grid (0/25/50/100/900), 3 selection criteria (top-k, oracle relevance, learned), bidirectional flow, and 6 supervision/coupling perturbations. All null or regressive. The interface has no measurable effect on planning. **Status: locked.**
+2. **The real bottleneck is image-feature alignment.** Every confirmed positive lever in the planning era touches the image-feature path: `planpredtrajdeformmm`, `planifls` (last-stage ego instfeat from image features), aux2d depth supervision. None of the perception-tokens-path levers move planning. **Status: locked. Ongoing reinforcement** from stage-1 lever runs (DINOv2-init, dseg, drivable-area aux).
+3. **Decoupling supervisory and interface roles.** Stage-1 nomap + stage-2 with map preserves planning (`L2=0.5203`); both-stage nomap is catastrophic (`L2=6.6`). This isolates the load-bearing role of perception to **stage-1 backbone shaping**, not stage-2 inference. **Status: confirmed by `_ptnomapdnrot_ppdeformmm_planifls`** (Killarney 3311181).
+4. **A reusable abstraction: scene representations as supervision without inference.** Concrete instantiation is the K/V-off stage-2 architecture: `with_perception_kv=False`, perception heads kept for training-time gradient flow only. Best stack is now `_laststage_nodetmap_decoder6_planwp_evalmatchmode` (Killarney 3366620) at `L2=0.5204 / CR=0.046%` — **first K/V-off variant to close both L2 and CR gaps to K/V-on** (`_laststage` reference: 0.5302 / 0.054%). The base `_decoder6_planwp` stack reproduced on L2 across seeds (0.5150 / 0.5100, mean 0.5125) but CR did not (0.068 / 0.087); the learned rescore on top recovers the CR signal that hard rescore loses when det K/V is removed. **Status: L2 confirmed across seeds; CR currently rests on the single-seed evalmatchmode-stack run — needs reproduction before locking as headline.**
+5. **Simplify without sacrificing performance.** On nuScenes, the K/V-off stack matches the K/V-on `_planinstfeat_laststage` reference (L2=0.522) within noise while removing the perception cross-attention computation at inference. Lower inference cost, fewer moving parts. **Status: matched at L2; CR closes ~½ the K/V-on gap**; full headline benchmark vs SparseDrive default + UniAD/VAD + a 2nd dataset (NavSim) is the remaining work.
+
+The paper's main claim does not depend on a clean stage-1 win. If the additive-aux experiments (DINO-init, dseg, dadense) are flat, contributions 1–4 still stand; contribution 5 is supported by what's already in hand.
 
 ## Architecture sketch
 
-### Inference path
+### Inference path (perception-free)
 ```
 multi-camera images
         │
         ▼
-   ResNet-50 backbone  (stage-1-pretrained for planning, optionally DINOv2 init)
+   ResNet-50 backbone  (stage-1-pretrained for planning-relevant features)
         │
         ▼
-       FPN
+       FPN  ─ planning-relevant image features
         │
         ▼
-   Planning Decoder
+   Planning Decoder (reads image features directly)
    ─ ego query init (from temporal queue + ego state)
-   ─ N stages of [temp_gnn, gnn, deformable_to_image, ffn, refine]
-   ─ no perception K/V
-   ─ optional collision-cost head replacing motion-rescore
+   ─ N stages of [temp_gnn, deformable_to_image, ffn, refine]
+   ─ NO perception K/V cross-attention
+   ─ all-waypoint deformable + laststage instfeat (best K/V-off stack)
         │
         ▼
    Multi-mode trajectory + per-mode confidence
+        │
+        ▼
+   Hard-rescore for CR (lightweight motion head as aux supervisor)
 ```
 
 ### Training path
@@ -143,11 +276,10 @@ Perception heads are auxiliary supervisors. They are not on the inference forwar
 
 ### Key architectural decisions
 
-1. **Planning decoder depth and width** — currently 3 stages × 1 deformable each. This may need to grow (T2.1, T2.2) since it now bears the entire image-features → planning load.
-2. **Temporal image-feature stacking** (T2.6) — the planner must reason about past frames; without perception tokens carrying agent state forward, the planning deformable should sample from past N frames' FPNs.
-3. **Rescore replacement** — the existing rescore step uses motion-predicted agent futures for collision avoidance. Two options:
-   a. Keep a lightweight motion head as an aux + inference-time rescore input (simpler; preserves CR).
-   b. Replace rescore with a learned collision-cost MLP that the planner queries directly from image features at predicted ego positions (cleaner story; uncertain whether CR holds).
+1. **Planning decoder depth and width** — locked at 6 stages × 1 deformable based on Killarney 3319227 result. Doubling depth to 6 + adding all-waypoint deformable + retaining laststage instfeat is the K/V-off stack that matches K/V-on baseline.
+2. **All-waypoint planning deformable (T2.5)** — locked **with laststage instfeat retained**. The earlier `planwp_full6` regression was a confound: dropping laststage instfeat alongside the waypoint change. The K-pool variant (`_planwp_full6_ls`) with both enabled ties baseline L2 and improves CR.
+3. **Temporal image-feature stacking** (T2.6) — closed out as a stage-2 lever (regresses L2 by 0.034–0.046). Open as a stage-1 lever: train the backbone with temporal stacking in the loop so per-frame features compose, then load into the K/V-off stage-2.
+4. **Rescore: hard rescore is locked.** Exp 7 hybrid_or matched hard rescore exactly (CR=0.063%) — the learned head adds no unique collision-avoidance signal. The lightweight motion head stays as a training-time aux + inference-time rescore input. The "learned cost replaces rescore" option is dropped.
 
 ## Stage-1 batch — ranked by paper EV (additive framing)
 
@@ -182,9 +314,10 @@ Compute budget for #1–#5: ~5 stage-1 trains × ~32h each = ~160 GPU-days, plus
 ## Baselines
 
 - **SparseDrive default** (already have): L2=0.636, obj_box_col=0.133%.
-- **Our current best** `ptaux2d_ppdeformmm_planifls_planinstfeat_laststage`: L2=0.522, CR=0.047%.
-- **End-to-end no-perception-K/V** (proposed): expected to match or beat current best.
-- **External**: UniAD or VAD on nuScenes for cross-method comparison. Not strictly needed for the controlled-ablation story but expected by NeurIPS reviewers.
+- **Our current best K/V-on** `ptaux2d_ppdeformmm_planifls_planinstfeat_laststage`: L2=0.522, CR=0.047%.
+- **K/V-off stage-2 (proposed)** `_laststage_nodetmap_decoder6_planwp`: L2=0.5150, CR=0.068% — already in hand. Matches K/V-on at L2 within noise; CR closes ~½ the gap.
+- **External: UniAD or VAD on nuScenes** for cross-method comparison. Required for NeurIPS-grade reviewer satisfaction even though our ablation grid is the primary evidence.
+- **Second benchmark: NavSim**. Bringing this up alongside the nuScenes story is in scope for the paper. NavSim tests whether the "image features carry planning" claim generalizes off nuScenes' specific train/eval split and protocol — a known reviewer concern. Start the data-pipeline + eval-runner work in parallel with manuscript drafting.
 
 ## Risks
 
@@ -207,9 +340,10 @@ NeurIPS 2026 abstract deadline (typical: mid-May) — tight but feasible if we l
 
 ## What to do this week
 
-1. Wait on Arm B s2; Arm B s1 full Apollo eval produced `L2=0.6428`, `obj_box_col=0.104%`, `NDS=0.5216`, `mAP=0.4051`, `mAP_normal=0.5816`.
-2. Submit **#1 DINO-init stage-1** on Trillium (4-GPU bs=24, lr=1.5e-4, 100ep) — validates Trillium for stage-1 jobs and tests the "stronger image backbone" lever.
-3. #7 stage-1 nomap_dn_rotaug + stage-2 with map is done; use it as the nomap confound-resolution cell.
-4. Begin label-gen for **drivable-area BEV** (#2) — first additive planner-aware aux.
-5. Begin implementation of the **no-perception-K/V Stage-2** architecture — `with_perception_kv=False` flag in `MotionPlanningHead` that skips the cross_gnn op and zero-pads num_det/num_map at the construction level.
-6. Begin implementation of **temporal image-feature stacking** (T2.6) — highest-EV architectural experiment for the no-K/V stage-2.
+1. Confirm the K/V-off headline result. `_laststage_nodetmap_decoder6_planwp` (Killarney 3319227) at `L2=0.5150 / CR=0.068%` is the proposed Stage-2 architecture; verify reproducibility with one same-host control run before locking.
+2. Resume + finish the **stage-1 aux2d_dino** (Trillium 474792) and **aux2d_dseg** (474793) trains. These are the first concrete tests of "perception is one supervisory option among several" for the stage-1 contribution.
+3. Watch the Apollo **egoonly stage-1** training (running, ~25 h ETA from last check). Outcome feeds the "minimum-perception stage-1 still useful" question for the supervision-vs-interface decoupling argument.
+4. Add **stage-1 temporal stacking (T2.6 at stage 1)** to the stage-1 lever queue alongside dino/dseg/egoonly — same hypothesis class (image-feature shaping), separate from the closed stage-2 T2.6 result.
+5. Begin label-gen for **drivable-area BEV** (Stage-1 #2) — first additive planner-aware dense aux.
+6. Begin **NavSim pipeline bring-up** in parallel with manuscript drafting. The cross-benchmark generalization study is in scope for this paper.
+7. Wait on Arm B s2; Arm B s1 full Apollo eval produced `L2=0.6428`, `obj_box_col=0.104%`, `NDS=0.5216`, `mAP=0.4051`, `mAP_normal=0.5816`. Caveat noted in TODO: stage-1 still has `detach_perception=True` — actual non-detach hypothesis untested.

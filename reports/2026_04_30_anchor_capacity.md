@@ -4,15 +4,21 @@
 
 ## TODO
 
-- Histogram `||gt_endpoint||` and `||v_0||` over the train split; pick ε per normalization variant at the elbow.
-- Generate `kmeans_plan_shape_endptnorm.npy` and `kmeans_plan_shape_velnorm.npy` (plus inspection plots).
-- Add per-mode magnitude head (`Linear(D, 1)` per decoder stage) + smooth-L1 magnitude loss for variant 1a/3.
-- Refactor `MotionPlanningHead.plan_anchor` from static buffer to per-batch tensor (needed for both 1a and 1b).
-- Add `plan_ego_status_encoder` MLP (`ego_status[:, [0,1,5,6,7]]` → `plan_mode_query` additive injection) for variants 2/3.
-- Add per-bucket `plan_reg_branch` for variant 4 (anchor index 0-5 → branch_low, 6-11 → branch_high on speedstrat anchors).
-- Submit the 5-experiment parallel batch on Killarney `ptaux2d_ppdeformmm_planifls` baseline (12h target each).
-- No-rescore eval on existing `modesspeedstrat` checkpoint (Killarney 3302034) — single config flip + re-eval, run concurrently.
-- Cheap follow-up: `plan_yaw` config (`plan_reg ts*2 → ts*3`, supervise yaw from `gt_ego_fut_yaw`) — independent lever.
+- [x] Histogram `||gt_endpoint||` and `||v_0||` (`reports/anchor_norm_histograms*.png`) — picked ε=1.0m / ε_v=1.0m/s.
+- [x] Generate `kmeans_plan_shape_endptnorm.npy` + refmag and `kmeans_plan_shape_velnorm.npy` (`reports/kmeans_plan_shape_*.png`).
+- [x] Add per-mode magnitude head (`Linear(D, 1)` per decoder stage) + smooth-L1 magnitude loss for variant 1a/3.
+- [x] Refactor `MotionPlanningHead.plan_anchor` from static buffer to per-batch tensor (`_get_initial_plan_anchor` helper).
+- [x] Add `plan_ego_status_encoder` MLP (`ego_status[:, [0,1,5,6,7]]` → `plan_mode_query` additive injection) for variants 2/3.
+- [x] Add per-bucket `plan_reg_branch` for variant 4 (modes 0-5 → low, 6-11 → high on speedstrat anchors).
+- [x] Submit the 5-experiment parallel batch on Killarney `ptaux2d_ppdeformmm_planifls` baseline (3368761–3368765).
+- [x] No-rescore eval on existing `modesspeedstrat` checkpoint (3368766) → L2=0.5560 vs 0.5548 with rescore: regression is **training-time**, not decode-time.
+- [ ] Resubmitted eval (3376375 variant 3, 3376376 variant 4) — cluster-wide failure killed first eval phase mid-run.
+- [ ] **Variant 1a refmag bug**: cmd=Straight stopped-cluster k=0 has `refmag=0.0` from k-means cluster median, which collapses the metric anchor to zero and degenerates `gen_sineembed_for_position`. Fix: clamp `refmag = max(refmag, 1.0)` in `gen_kmeans_plan_shape_endptnorm.py` (or at load time in `motion_planning_head.py:_get_initial_plan_anchor`), regenerate refmag, retry 1a + 3 if needed.
+- Cheap follow-up: `plan_yaw` config (`plan_reg ts*2 → ts*3`, supervise yaw from `gt_ego_fut_yaw`) — independent lever, stackable with `egostatus`.
+
+## Headline result (2026-04-30)
+
+`egostatus` is the win: **L2 0.4988 → 0.3701 (−0.13, ~26 noise-floor units)**, CR 0.063% → 0.058% (Killarney 3368763). Confirms the "missing current-frame ego state" diagnosis from the integration audit above. Velnorm anchors alone are tied with baseline; endpt-norm with mag head needs a refmag floor before retry. Variant 3 (stack) and variant 4 (per-bucket speedstrat reg) eval pending.
 
 ## Abstract
 
