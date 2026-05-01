@@ -50,6 +50,17 @@ class SparseDriveAgent(AbstractAgent):
         if checkpoint_path:
             self._load_pretrained(checkpoint_path)
 
+        # Planning-only first pass: det/map heads run forward (motion_plan_head
+        # still consumes their outputs via cross-attn) but are FROZEN so their
+        # weights don't drift under gradients from planning_loss. With empty
+        # det/map GT, their unfrozen weights diverge to NaN within ~500 steps.
+        # When real det/map GT is wired through, drop this freeze.
+        head = self._sparsedrive_model.head
+        for name in ("det_head", "map_head"):
+            if hasattr(head, name):
+                for p in getattr(head, name).parameters():
+                    p.requires_grad = False
+
     # ------------------------------------------------------------------ build
     def _build_model_from_foresight_config(self) -> nn.Module:
         """Construct the SparseDrive nn.Module via mmcv's registry."""
