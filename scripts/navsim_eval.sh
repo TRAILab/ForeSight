@@ -22,7 +22,7 @@ EXP_NAME="sparsedrive_${SPLIT}_eval_$(date +%Y%m%d_%H%M%S)"
 python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_pdm_score.py" \
     train_test_split="${SPLIT}" \
     agent=sparsedrive_agent \
-    agent.checkpoint_path="${CKPT}" \
+    "agent.checkpoint_path='${CKPT}'" \
     worker=single_machine_thread_pool \
     metric_cache_path="${NAVSIM_EXP_ROOT}/metric_cache" \
     experiment_name="${EXP_NAME}" \
