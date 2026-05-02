@@ -42,6 +42,7 @@ CONTAINER_CMD="singularity exec --nv -e --pwd /workspace/ForeSight/ \
 --env FORESIGHT_ROOT=/workspace/ForeSight \
 --env NAVSIM_DEVKIT_ROOT=/workspace/ForeSight/navsim \
 --env NAVSIM_EXP_ROOT=/workspace/ForeSight/work_dirs/navsim \
+--env NAVSIM_DATA_ROOT=/workspace/ForeSight/data/navsim \
 --env OPENSCENE_DATA_ROOT=/workspace/ForeSight/data/openscene \
 --env NUPLAN_MAPS_ROOT=/workspace/ForeSight/data/nuplan-maps-v1.0 \
 --bind=${CODE_DIR}:/workspace/ForeSight/ \

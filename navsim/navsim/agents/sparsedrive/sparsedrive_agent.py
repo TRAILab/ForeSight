@@ -308,12 +308,9 @@ class SparseDriveAgent(AbstractAgent):
 
     def get_training_callbacks(self) -> List[pl.Callback]:
         import os
-        # Explicit dirpath so the checkpoint is always findable regardless of
-        # Hydra's cwd changes. save_top_k=0 + save_last=True saves last.ckpt
-        # unconditionally at each epoch end without needing a monitor metric.
-        ckpt_dir = os.path.join(
-            os.environ.get("NAVSIM_EXP_ROOT", "work_dirs/navsim"), "checkpoints"
-        )
+        # Hydra cds into the experiment output dir before training; checkpoints
+        # go there so each run's ckpts are co-located with its logs/config.
+        ckpt_dir = os.path.join(os.getcwd(), "checkpoints")
         return [
             pl.callbacks.ModelCheckpoint(
                 dirpath=ckpt_dir,

@@ -24,6 +24,6 @@ python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_pdm_score.py" \
     agent=sparsedrive_agent \
     "agent.checkpoint_path='${CKPT}'" \
     worker=single_machine_thread_pool \
-    metric_cache_path="${NAVSIM_EXP_ROOT}/metric_cache" \
+    metric_cache_path="${NAVSIM_DATA_ROOT}/metric_cache" \
     experiment_name="${EXP_NAME}" \
     ${EXTRA_ARGS}

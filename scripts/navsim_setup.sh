@@ -26,13 +26,14 @@ _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 : "${FORESIGHT_ROOT:=$(dirname "${_SCRIPT_DIR}")}"
 : "${NAVSIM_DEVKIT_ROOT:=${FORESIGHT_ROOT}/navsim}"
 : "${NAVSIM_EXP_ROOT:=${FORESIGHT_ROOT}/work_dirs/navsim}"
+: "${NAVSIM_DATA_ROOT:=${FORESIGHT_ROOT}/data/navsim}"
 : "${OPENSCENE_DATA_ROOT:=${FORESIGHT_ROOT}/data/openscene}"
 : "${NUPLAN_MAPS_ROOT:=${FORESIGHT_ROOT}/data/nuplan-maps-v1.0}"
 
-export FORESIGHT_ROOT NAVSIM_DEVKIT_ROOT NAVSIM_EXP_ROOT OPENSCENE_DATA_ROOT NUPLAN_MAPS_ROOT
+export FORESIGHT_ROOT NAVSIM_DEVKIT_ROOT NAVSIM_EXP_ROOT NAVSIM_DATA_ROOT OPENSCENE_DATA_ROOT NUPLAN_MAPS_ROOT
 export PYTHONPATH="${NAVSIM_DEVKIT_ROOT}:${PYTHONPATH:-}"
 
-mkdir -p "${OPENSCENE_DATA_ROOT}" "${NUPLAN_MAPS_ROOT}" "${NAVSIM_EXP_ROOT}"
+mkdir -p "${OPENSCENE_DATA_ROOT}" "${NUPLAN_MAPS_ROOT}" "${NAVSIM_EXP_ROOT}" "${NAVSIM_DATA_ROOT}"
 
 # ----- Sub-commands -----
 download_maps() {
@@ -119,7 +120,7 @@ metric_cache() {
     local split="${1:-navtest}"
     python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_metric_caching.py" \
         train_test_split="${split}" \
-        cache.cache_path="${NAVSIM_EXP_ROOT}/metric_cache"
+        cache.cache_path="${NAVSIM_DATA_ROOT}/metric_cache"
 }
 
 cmd="${1:-}"

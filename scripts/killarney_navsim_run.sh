@@ -28,6 +28,7 @@ TMP_DATA_DIR=$SLURM_TMPDIR/data
 OPENSCENE_HOST_DIR=${OPENSCENE_HOST_DIR:-/home/spapais/projects/aip-swasland/datasets/openscene}
 NUPLAN_MAPS_HOST_DIR=${NUPLAN_MAPS_HOST_DIR:-/home/spapais/projects/aip-swasland/datasets/nuplan-maps-v1.0}
 WORK_DIR=/scratch/spapais/ForeSight/work_dirs
+NAVSIM_DATA_HOST_DIR=/scratch/spapais/ForeSight/data/navsim
 WANDB_PERSIST_DIR=/scratch/spapais/ForeSight/wandb
 CMD=${@:-bash}
 
@@ -50,6 +51,7 @@ CONTAINER_CMD="$APPTAINER exec --nv -c -e --pwd /workspace/ForeSight/ \
 --env FORESIGHT_ROOT=/workspace/ForeSight \
 --env NAVSIM_DEVKIT_ROOT=/workspace/ForeSight/navsim \
 --env NAVSIM_EXP_ROOT=/workspace/ForeSight/work_dirs/navsim \
+--env NAVSIM_DATA_ROOT=/workspace/ForeSight/data/navsim \
 --env OPENSCENE_DATA_ROOT=/workspace/ForeSight/data/openscene \
 --env NUPLAN_MAPS_ROOT=/workspace/ForeSight/data/nuplan-maps-v1.0 \
 --bind=$TMP_DIR:/tmp \
@@ -57,10 +59,11 @@ CONTAINER_CMD="$APPTAINER exec --nv -c -e --pwd /workspace/ForeSight/ \
 --bind=/home/spapais/ForeSight:/workspace/ForeSight/ \
 $DATA_BINDS \
 --bind=$WORK_DIR:/workspace/ForeSight/work_dirs \
+--bind=$NAVSIM_DATA_HOST_DIR:/workspace/ForeSight/data/navsim \
 $SIF_PATH"
 CONTAINER_CMD="$CONTAINER_CMD bash -c 'export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:\$LD_LIBRARY_PATH && $CMD'"
 
-mkdir -p $TMP_DATA_DIR $TMP_DIR $WORK_DIR $WANDB_PERSIST_DIR
+mkdir -p $TMP_DATA_DIR $TMP_DIR $WORK_DIR $WANDB_PERSIST_DIR $NAVSIM_DATA_HOST_DIR
 
 source /etc/profile.d/modules.sh
 module load slurm/killarney/24.05.7
