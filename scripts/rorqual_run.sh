@@ -44,7 +44,7 @@ SECONDS=0
 echo "Extracting data"
 mkdir -p $TMP_DATA_DIR $TMP_DIR $WORK_DIR $WANDB_PERSIST_DIR
 for file in $DATA_DIR/*.zip; do
-    [[ "$file" == *sweeps* ]] && echo "Skipping $file (not needed for camera-only model)" && continue
+    [[ "$file" != *samples* && "$file" != *maps* ]] && echo "Skipping $file (only samples + maps needed)" && continue
     duration=$SECONDS
     echo "[$((duration/3600))h$((duration%3600/60))m]: Unzipping $file to $TMP_DATA_DIR"
     unzip -qq $file -d $TMP_DATA_DIR
