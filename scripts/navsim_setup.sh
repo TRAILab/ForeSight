@@ -7,7 +7,7 @@
 #   bash scripts/navsim_setup.sh download_test      # navtest sensor data
 #   bash scripts/navsim_setup.sh download_navtrain  # ~500 GB, takes hours
 #   bash scripts/navsim_setup.sh download_navmini   # small sanity split
-#   bash scripts/navsim_setup.sh metric_cache       # build navtest metric cache
+#   bash scripts/navsim_setup.sh metric_cache [split]  # build metric cache (default: navtest)
 #   bash scripts/navsim_setup.sh all                # everything (NOT recommended)
 #
 # Layout produced under $OPENSCENE_DATA_ROOT (matches upstream navsim Hydra
@@ -116,8 +116,9 @@ download_navmini() {
 }
 
 metric_cache() {
+    local split="${1:-navtest}"
     python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_metric_caching.py" \
-        train_test_split=navtest \
+        train_test_split="${split}" \
         cache.cache_path="${NAVSIM_EXP_ROOT}/metric_cache"
 }
 
@@ -128,7 +129,7 @@ case "${cmd}" in
     download_test)       download_test ;;
     download_navtrain)   download_navtrain ;;
     download_navmini)    download_navmini ;;
-    metric_cache)        metric_cache ;;
+    metric_cache)        metric_cache "${2:-}" ;;
     all)                 download_maps && download_test && download_navtrain && metric_cache ;;
     *)                   echo "Unknown subcommand: ${cmd}" && exit 1 ;;
 esac
