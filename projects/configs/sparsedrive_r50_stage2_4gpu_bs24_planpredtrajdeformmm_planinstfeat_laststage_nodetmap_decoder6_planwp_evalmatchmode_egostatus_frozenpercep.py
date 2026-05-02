@@ -27,7 +27,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='ForeSight',
-                name='sparsedrive_r50_stage2_4gpu_bs24_planpredtrajdeformmm_planinstfeat_laststage_nodetmap_decoder6_planwp_evalmatchmode_streamc',),
+                name='sparsedrive_r50_stage2_4gpu_bs24_planpredtrajdeformmm_planinstfeat_laststage_nodetmap_decoder6_planwp_evalmatchmode_egostatus',),
             interval=50)
     ],
 )
@@ -411,7 +411,6 @@ model = dict(
             plan_anchor=f'data/kmeans/kmeans_plan_{ego_fut_mode}.npy',
             plan_ego_status_encode_enable=True,
             plan_ego_status_indices=(0, 1, 5, 6, 7),
-            ego_only_planning=True,
             embed_dims=embed_dims,
             decouple_attn=decouple_attn_motion,
             instance_queue=dict(
@@ -556,35 +555,6 @@ model = dict(
             conflict_label_source='evalmatch_mode',
             conflict_loss_weight=0.10,
             conflict_smooth_max_tau=5.0,
-            # Approach 4: replace the conflict head's agent_token input with
-            # raw image features sampled at det_anchor BEV positions. Tests
-            # whether the conflict head needs detection's learned semantic
-            # abstraction or just spatial image content at the agent location.
-            conflict_input='image_at_det',
-            conflict_image_sampler=dict(
-                type="DeformableFeatureAggregation",
-                embed_dims=embed_dims,
-                num_groups=num_groups,
-                num_levels=num_levels,
-                num_cams=6,
-                attn_drop=0.15,
-                use_deformable_func=use_deformable_func,
-                use_camera_embed=True,
-                residual_mode="add",
-                kps_generator=dict(
-                    type="SparseBox3DKeyPointsGenerator",
-                    num_learnable_pts=6,
-                    fix_scale=[
-                        [0, 0, 0],
-                        [0.45, 0, 0],
-                        [-0.45, 0, 0],
-                        [0, 0.45, 0],
-                        [0, -0.45, 0],
-                        [0, 0, 0.45],
-                        [0, 0, -0.45],
-                    ],
-                ),
-            ),
         ),
     ),
 )
@@ -770,7 +740,10 @@ optimizer = dict(
     weight_decay=0.001,
     paramwise_cfg=dict(
         custom_keys={
-            "img_backbone": dict(lr_mult=0.1),
+            "img_backbone": dict(lr_mult=0.0),
+            "img_neck": dict(lr_mult=0.0),
+            "head.det_head": dict(lr_mult=0.0),
+            "head.map_head": dict(lr_mult=0.0),
         }
     ),
 )
@@ -792,7 +765,7 @@ eval_mode = dict(
     with_det=True,
     with_tracking=True,
     with_map=True,
-    with_motion=False,  # ego_only_planning=True drops agent slots, no trajs to evaluate
+    with_motion=True,
     with_planning=True,
     tracking_threshold=0.2,
     motion_threshhold=0.2,

@@ -798,11 +798,8 @@ class NuScenes3DDataset(Dataset):
                             tracking_id=str(box.token),
                         )
                     )
-                nusc_anno.update(
-                    dict(
-                        trajs=det['img_bbox']['trajs_3d'][i].numpy(),
-                    )
-                )
+                if 'trajs_3d' in det['img_bbox']:
+                    nusc_anno['trajs'] = det['img_bbox']['trajs_3d'][i].numpy()
                 if 'trajs_score' in det['img_bbox']:
                     nusc_anno['trajs_score'] = det['img_bbox']['trajs_score'][i].numpy()
                 annos.append(nusc_anno)

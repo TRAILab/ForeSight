@@ -148,9 +148,13 @@ To implement (Exp 3 — joint):
 | DGX | `ptaux2d_ppdeformmm_planifls_planaux_conf_anchorlabel` (learned scorer, anchor label, λ=0.05) | 3659 | SUBMITTED |
 | Trillium | `ptaux2d_ppdeformmm_planifls_planaux_conf_anchorlabel` (replicate of DGX 3659) | 472465 | COMPLETED — Exp learned-scorer |
 | TBD | `..._planinstfeat_laststage_softcost` with soft-cost rescore (joint) | — | DEPRIORITIZED — Exp 1 v1 didn't land |
-| Killarney | `_laststage_nodetmap_decoder6_planwp_evalmatchmode` (Exp 8 Option 1: K/V-off + v4) | 3366620 | COMPLETED — **L2=0.5203 / CR=0.046%** |
+| Killarney | `_laststage_nodetmap_decoder6_planwp_evalmatchmode` (Exp 8 Option 1: K/V-off + v4, seed 0) | 3366620 | COMPLETED — **L2=0.5203 / CR=0.046%** |
+| Killarney | `_laststage_nodetmap_decoder6_planwp_evalmatchmode` (seed 1 reproduction) | 3377724 | COMPLETED — **L2=0.5087 / CR=0.053%** — mean across seeds **L2=0.5145 / CR=0.0495%** — CR survives reproduction |
+| Killarney | `_laststage_nodetmap_decoder6_planwp_evalmatchmode_egostatus` (egostatus fold-in, seed 0) | 3376689 | COMPLETED — **L2=0.3720 / CR=0.044%** — **NEW HEADLINE** (egostatus transfers cleanly across architectures, ΔL2=−0.148) |
+| Killarney | `_laststage_nodetmap_decoder6_planwp_evalmatchmode_egostatus` (seed 1 reproduction) | 3386471 | COMPLETED — **L2=0.3695 / CR=0.037%** — mean across seeds **L2=0.3708 / CR=0.0405%** — **headline locked across seeds** (ΔL2=0.0025 < noise, ΔCR=0.007 pp < noise) |
 | Killarney | `_laststage_nodetmap_decoder6_planwp_distillrescore` (Exp 8 Option 2 attempt 1) | 3366621 | TIMEOUT at iter 10863/11720 (93%, 11h59m); no ckpt saved before SLURM kill |
-| Killarney | `_laststage_nodetmap_decoder6_planwp_distillrescore` (Exp 8 Option 2 attempt 2, last-stage-only distill, --time=23:59:00) | 3377533 | SUBMITTED |
+| Killarney | `_laststage_nodetmap_decoder6_planwp_distillrescore` (Exp 8 Option 2 attempt 2, last-stage-only distill, --time=23:59:00) | 3377533 | CANCELLED — 24h wall-clock unnecessarily de-prioritized in queue; resubmitted at 14h |
+| Killarney | `_laststage_nodetmap_decoder6_planwp_distillrescore` (Exp 8 Option 2 attempt 3, --time=13:59:00) | 3377547 | COMPLETED — **L2=0.5091 / CR=0.098%** — Option 2 lands but loses to Option 1 on CR (see outcome below) |
 
 | Config | L2 | obj_box_col | car_ade | ped_ade | car_epa | ped_epa | NDS | mAP | Notes |
 |--------|-----|-------------|---------|---------|---------|---------|-----|-----|-------|
@@ -468,8 +472,22 @@ This is also the first viable rescore-removal route across the entire `plan_scor
 
 ### Option 2 outcome (Killarney 3366621, TIMEOUT at iter 10863/11720)
 
-Job hit the 11:59:00 wall-clock limit at ~93% completion. Per-iter time was ~3.84s vs the v4 reference's ~2.33s/iter (1.65× slowdown), driven by `compute_rescore_collision_mask` running at all 6 decoder stages in `_loss_planning_distill_rescore`. SLURM killed the job before the final checkpoint save and val pass, so no metrics. Resubmitting with two changes:
+Job hit the 11:59:00 wall-clock limit at ~93% completion. Per-iter time was ~3.84s vs the v4 reference's ~2.33s/iter (1.65× slowdown), driven by `compute_rescore_collision_mask` running at all 6 decoder stages in `_loss_planning_distill_rescore`. SLURM killed the job before the final checkpoint save and val pass, so no metrics. Resubmitted with two changes:
 - Cut distill loss to last decoder stage only (matches the inference selector — only the last stage's `plan_cls` is consumed at inference). Drops `compute_rescore_collision_mask` calls 6× per training step → ~1.5× expected speedup.
-- `--time=23:59:00` wall-clock for safety margin.
+- `--time=13:59:00` wall-clock for safety margin (after a 24h attempt was de-prioritized in queue).
 
-Tracked under `Exp 8 Option 2 retry` once submitted.
+### Option 2 outcome (Killarney 3377547, attempt 3, completed 10h13m): **lands but loses to Option 1 on CR.**
+
+Final metrics: `L2=0.5091, CR=0.098%, NDS=0.5226, mAP=0.4096, mAP_normal=0.5544`. Versus the same reference points used for Option 1:
+
+| Architecture | Selector | L2 | CR | ΔL2 vs Opt1 | ΔCR vs Opt1 |
+|---|---|---|---|---|---|
+| K/V-off `_decoder6_planwp` | hard rescore | 0.5150 | 0.068% | -0.005 | -0.030 pp |
+| K/V-off `_decoder6_planwp` | **v4 (Opt 1, 3366620)** | 0.5203 | **0.046%** | (ref) | (ref) |
+| K/V-off `_decoder6_planwp` | **distillrescore (Opt 2, 3377547)** | **0.5091** | 0.098% | **−0.011** | +0.052 pp |
+
+L2 actually beats Option 1 by 0.011 (within run-to-run noise but real-direction). CR is **0.052 pp worse** than Option 1 — distillation does not match the v4 learned-hard's collision-avoidance signal at inference. This is expected from the mechanism: Opt 1 explicitly produces collision logits at inference, while Opt 2 leans entirely on the planner's `plan_cls` to encode "this mode would collide" via training-time distillation; the planner's logits can do imitation well but cannot perfectly replace a dedicated rejection signal.
+
+**Decision tree branch matched: "Only Option 1 lands."** Distillation is *viable* (this is the first inference-rescore-free K/V-off run that doesn't catastrophically regress) but the v4 evalmatchmode learned head is strictly better. The paper architecture stays at `_evalmatchmode` (Option 1), now extended with `egostatus` (Killarney 3376689 → L2=0.3720 / CR=0.044%) as the new headline.
+
+**For the paper:** Exp 8 Option 2 is appendix material — proves distillation can replace inference-time rescore in principle, but doesn't beat the active-rescore baseline on the metric that matters. Closes the rescore-removal thread on K/V-off.
