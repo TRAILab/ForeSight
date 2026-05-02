@@ -13,6 +13,7 @@ rsync -av ForeSight/ apollo:/home/spapais/ForeSight/
 docker build -f docker/Dockerfile -t foresight:latest .
 sudo singularity build docker/foresight.sif docker-daemon://foresight:latest
 sudo singularity build docker/foresight_cuda118.sif docker-daemon://foresight:latest
+sudo singularity build docker/foresight_navsim.sif docker-daemon://foresight_navsim:cuda118pytorch21
 singularity sif list docker/foresight_cuda118.sif # find squashfs partition ID                                           
 singularity sif dump <id> docker/foresight_cuda118.sif > docker/foresight_cuda118.sqsh
 
