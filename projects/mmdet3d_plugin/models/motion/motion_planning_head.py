@@ -299,6 +299,11 @@ class MotionPlanningHead(BaseModule):
         ego_only_planning=False,
         conflict_input='agent_token',
         conflict_image_sampler=None,
+        # Detection/map-free conflict-sampler variants (B1.5/B1.6/B1.7).
+        # init_anchor_path: path to a fixed anchor file (e.g. kmeans det 900);
+        # init_topk: per-scene top-K-nearest-to-ego selection from that file.
+        conflict_init_anchor_path=None,
+        conflict_init_topk=50,
         planning_temporal_stack=0,
         planning_temporal_egocomp=True,
         plan_anchor_norm_mode='none',
@@ -361,17 +366,42 @@ class MotionPlanningHead(BaseModule):
         self.skip_perception_kv = skip_perception_kv
         self.ego_only_planning = ego_only_planning
         self.conflict_input = conflict_input
-        if conflict_input not in ('agent_token', 'image_at_det'):
+        _valid_conflict_inputs = (
+            'agent_token', 'image_at_det', 'image_at_plan', 'image_at_init_topk'
+        )
+        if conflict_input not in _valid_conflict_inputs:
             raise ValueError(
-                f"conflict_input must be 'agent_token' or 'image_at_det', got {conflict_input!r}"
+                f"conflict_input must be one of {_valid_conflict_inputs}, got {conflict_input!r}"
             )
-        if conflict_input == 'image_at_det':
+        if conflict_input.startswith('image_at_'):
             assert conflict_image_sampler is not None, (
-                "conflict_input='image_at_det' requires conflict_image_sampler config"
+                f"conflict_input={conflict_input!r} requires conflict_image_sampler config"
             )
             self.conflict_image_sampler = build_from_cfg(conflict_image_sampler, ATTENTION)
         else:
             self.conflict_image_sampler = None
+        # Per-mode-restricted aggregation: image_at_plan / image_at_init_topk
+        # build a per-(plan-mode, K) anchor pool, and per-mode collision logits
+        # should read only from that mode's K samples (smooth-max over K), not
+        # over all M*K. Track sample count K so the loss can reshape correctly.
+        self._conflict_per_mode_K = None  # set in forward when applicable
+        self.conflict_init_topk = int(conflict_init_topk)
+        if conflict_input == 'image_at_init_topk':
+            assert conflict_init_anchor_path is not None, (
+                "conflict_input='image_at_init_topk' requires conflict_init_anchor_path"
+            )
+            init_anchors = np.load(conflict_init_anchor_path)
+            # Expect shape (N, 11) — full SparseDrive anchor format.
+            assert init_anchors.shape[-1] == 11, (
+                f"init anchors must be 11-dim, got shape {init_anchors.shape}"
+            )
+            self.register_buffer(
+                'conflict_init_anchors',
+                torch.from_numpy(init_anchors).float(),
+                persistent=False,
+            )
+        else:
+            self.conflict_init_anchors = None
         self.planning_temporal_stack = int(planning_temporal_stack)
         self.planning_temporal_egocomp = bool(planning_temporal_egocomp)
         # Anchor normalization variants. 'none' is the default static-meter
@@ -1539,8 +1569,57 @@ class MotionPlanningHead(BaseModule):
         # det BEV cells. Tests whether the conflict head needs detection's learned
         # semantic abstraction (`agent_token`) or raw image content at the agent's
         # spatial location (`image_at_det`).
-        if self.with_conflict_head and self.conflict_input == 'image_at_det':
-            sampler_anchors = det_anchors
+        if self.with_conflict_head and self.conflict_input.startswith('image_at_'):
+            if self.conflict_input == 'image_at_det':
+                sampler_anchors = det_anchors
+                # No per-mode partition; flat pool. K = num_det_anchor.
+                self._conflict_per_mode_K = None
+            elif self.conflict_input == 'image_at_plan':
+                # Plan-trajectory waypoints in lidar frame as the spatial query.
+                # plan_anchor: (num_cmd, ego_fut_mode, ego_fut_ts, 2). Flatten
+                # cmd × mode → M; cumsum over time gives BEV positions per
+                # waypoint in lidar frame.
+                plan_xy = self.plan_anchor.detach()  # (cmd, mode, T, 2)
+                M_total = plan_xy.shape[0] * plan_xy.shape[1]
+                T = plan_xy.shape[2]
+                plan_xy = plan_xy.reshape(M_total, T, 2)
+                plan_xy = plan_xy.cumsum(dim=-2)  # waypoint absolute positions
+                # Build full 11-dim anchors: [X,Y,Z=0, log_W=0, log_L=0, log_H=0,
+                # SIN_YAW=0, COS_YAW=1, VX=0, VY=0, VZ=0]
+                K = M_total * T
+                anc = plan_xy.new_zeros(K, 11)
+                anc[:, 0:2] = plan_xy.reshape(K, 2)
+                anc[:, 7] = 1.0  # cos(yaw=0)
+                bs_local = det_anchors.shape[0]
+                sampler_anchors = anc.unsqueeze(0).expand(bs_local, -1, -1).contiguous().to(
+                    det_anchors.device, dtype=det_anchors.dtype
+                )
+                self._conflict_per_mode_K = T  # K samples per plan mode (= waypoints)
+            elif self.conflict_input == 'image_at_init_topk':
+                # Per-(scene, plan-mode) top-K nearest fixed init anchors.
+                # plan_anchor cumulative XY → (M_total, T, 2). For each plan
+                # mode m and scene b, distance(anchor_n) = min_t ||a_n.xy - traj_m_t||,
+                # then top-K smallest distances → K anchors per (b, m).
+                init_anchors = self.conflict_init_anchors  # (N, 11)
+                N_init = init_anchors.shape[0]
+                K_topk = min(self.conflict_init_topk, N_init)
+                plan_xy = self.plan_anchor.detach()  # (cmd, mode, T, 2)
+                M_total = plan_xy.shape[0] * plan_xy.shape[1]
+                plan_xy = plan_xy.reshape(M_total, -1, 2).cumsum(dim=-2)  # (M, T, 2)
+                anc_xy = init_anchors[:, 0:2]  # (N, 2)
+                # diff: (M, T, N, 2) → d2: (M, T, N) → min over T: (M, N)
+                d2 = ((plan_xy.to(anc_xy.device).unsqueeze(2) - anc_xy.unsqueeze(0).unsqueeze(0)) ** 2).sum(-1)
+                d2_min = d2.min(dim=1).values  # (M, N)
+                topk_idx = d2_min.topk(K_topk, dim=-1, largest=False).indices  # (M, K)
+                topk_anchors = init_anchors[topk_idx]  # (M, K, 11)
+                topk_anchors = topk_anchors.reshape(M_total * K_topk, 11)
+                bs_local = det_anchors.shape[0]
+                sampler_anchors = topk_anchors.unsqueeze(0).expand(bs_local, -1, -1).contiguous().to(
+                    det_anchors.device, dtype=det_anchors.dtype
+                )
+                self._conflict_per_mode_K = K_topk
+            else:
+                raise NotImplementedError(self.conflict_input)
             sampler_query = sampler_anchors.new_zeros(
                 sampler_anchors.shape[0], sampler_anchors.shape[1], self.embed_dims
             )
@@ -1554,6 +1633,7 @@ class MotionPlanningHead(BaseModule):
             )
         else:
             conflict_image_features = None
+            self._conflict_per_mode_K = None
         _deformable_stage_idx = 0
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
@@ -1911,7 +1991,7 @@ class MotionPlanningHead(BaseModule):
                 plan_query = plan_mode_query.unsqueeze(1) + (instance_feature + anchor_embed)[:, num_anchor:num_anchor+1].unsqueeze(2)
                 if not self.with_conflict_head:
                     agent_features_for_refine = None
-                elif self.conflict_input == 'image_at_det':
+                elif self.conflict_input.startswith('image_at_'):
                     agent_features_for_refine = conflict_image_features
                 else:
                     agent_features_for_refine = instance_feature[:, :num_anchor]
@@ -2600,6 +2680,139 @@ class MotionPlanningHead(BaseModule):
             target[b, pidx] = label_per_pair.t().to(target.dtype)
             weight[b, pidx] = 1.0
 
+    def _loss_planning_conflict_per_mode(self, conf_logits, reg, data):
+        """Per-mode-restricted aggregation for image_at_plan / image_at_init_topk.
+
+        conf_logits: (bs, M_anc * K, M_pred) where M_anc = M_pred = M plan modes
+        and K = self._conflict_per_mode_K samples per mode.
+
+        For each output mode m, smooth-max over the K samples that BELONG to
+        mode m (anchor indices [m*K : (m+1)*K]) for the m-th conflict logit.
+        Per-mode label via evalmatch geometry, no Hungarian needed.
+        """
+        bs, total, M_pred = conf_logits.shape
+        K = self._conflict_per_mode_K
+        if K is None or total != M_pred * K:
+            return None, None
+        device = conf_logits.device
+        # Reshape: (bs, M_anc, K, M_pred). Diagonal-mode read gives (bs, K, M).
+        logits_per_mode = conf_logits.reshape(bs, M_pred, K, M_pred)
+        diag_logits = logits_per_mode.diagonal(dim1=1, dim2=3)  # (bs, K, M)
+        tau = self.conflict_smooth_max_tau
+        per_mode_logit = (1.0 / tau) * torch.logsumexp(tau * diag_logits, dim=1)  # (bs, M)
+
+        # Per-mode label via evalmatch geometry: for each m, did predicted ego
+        # trajectory reg[m] collide with any visible GT agent at any timestep?
+        gt_boxes = data.get('gt_bboxes_3d')
+        gt_traj = data.get('gt_agent_fut_trajs')
+        gt_traj_mask = data.get('gt_agent_fut_masks')
+        gt_ego_traj = data.get('gt_ego_fut_trajs')
+        gt_ego_mask = data.get('gt_ego_fut_masks')
+        if gt_boxes is None or gt_traj is None or gt_ego_traj is None:
+            return None, None
+
+        T_ego = reg.shape[-2]
+        ego_xy_full = reg.detach().squeeze(1).cumsum(dim=-2)  # (bs, M, T_ego, 2)
+        ego_box_W = ego_xy_full.new_tensor(4.084)
+        ego_box_L = ego_xy_full.new_tensor(1.85)
+        forward_offset = 0.5
+
+        target = per_mode_logit.new_zeros(bs, M_pred)
+        weight = per_mode_logit.new_zeros(bs, M_pred)
+
+        for b in range(bs):
+            boxes_b = gt_boxes[b].to(device).float()
+            trajs_b = gt_traj[b].to(device).float()
+            ego_traj_b = gt_ego_traj[b].to(device).float()
+            if trajs_b.shape[0] == 0 or ego_traj_b.shape[0] == 0:
+                continue
+            T = min(trajs_b.shape[1], T_ego, ego_traj_b.shape[0])
+            if T == 0:
+                continue
+            n_agents = trajs_b.shape[0]
+
+            # Predicted ego corners (M, T, 4, 2)
+            pred_ego_xy = ego_xy_full[b, :, :T, :]
+            pred_ego_yaw = _eval_get_yaw(pred_ego_xy)
+            pred_cx = pred_ego_xy[..., 0] + forward_offset * torch.cos(pred_ego_yaw)
+            pred_cy = pred_ego_xy[..., 1] + forward_offset * torch.sin(pred_ego_yaw)
+            pred_corners = _make_rect_corners_topdown(
+                pred_cx, pred_cy,
+                ego_box_W.expand_as(pred_cx),
+                ego_box_L.expand_as(pred_cx),
+                pred_ego_yaw,
+            )
+
+            # GT ego corners (T, 4, 2)
+            gt_ego_xy = ego_traj_b[:T].cumsum(dim=0)
+            gt_ego_yaw = _eval_get_yaw(gt_ego_xy)
+            gt_ego_cx = gt_ego_xy[..., 0] + forward_offset * torch.cos(gt_ego_yaw)
+            gt_ego_cy = gt_ego_xy[..., 1] + forward_offset * torch.sin(gt_ego_yaw)
+            gt_ego_corners = _make_rect_corners_topdown(
+                gt_ego_cx, gt_ego_cy,
+                ego_box_W.expand_as(gt_ego_cx),
+                ego_box_L.expand_as(gt_ego_cx),
+                gt_ego_yaw,
+            )
+
+            # GT agent corners (n_agents, T, 4, 2) — full agent set, no Hungarian
+            agent_xy0 = boxes_b[:, :2]
+            agent_traj = trajs_b[:, :T]
+            agent_pos = agent_xy0.unsqueeze(1) + agent_traj.cumsum(dim=1)
+            agent_W = boxes_b[:, W]
+            agent_L = boxes_b[:, L]
+            agent_yaw_t0 = boxes_b[:, YAW]
+            agent_yaw_t = _agent_get_yaw(agent_pos, agent_yaw_t0)
+            agent_corners = _make_rect_corners_topdown(
+                agent_pos[..., 0], agent_pos[..., 1],
+                agent_W.unsqueeze(-1).expand(-1, T),
+                agent_L.unsqueeze(-1).expand(-1, T),
+                agent_yaw_t,
+            )
+
+            # Pred ego (M, n_agents, T) collisions
+            pred_b = pred_corners.unsqueeze(1).expand(M_pred, n_agents, T, 4, 2)
+            agent_b = agent_corners.unsqueeze(0).expand(M_pred, n_agents, T, 4, 2)
+            pred_coll = _rect_intersects_sat(pred_b, agent_b)
+            gt_ego_b = gt_ego_corners.unsqueeze(0).expand(n_agents, T, 4, 2)
+            gt_coll = _rect_intersects_sat(gt_ego_b, agent_corners)
+            if gt_traj_mask is not None:
+                tmask = gt_traj_mask[b].to(device)[:, :T].bool()
+                pred_coll = pred_coll & tmask.unsqueeze(0)
+                gt_coll = gt_coll & tmask
+            if gt_ego_mask is not None:
+                em = gt_ego_mask[b].to(device)[:T].bool()
+                pred_coll = pred_coll & em.view(1, 1, T)
+                gt_coll = gt_coll & em.view(1, T)
+            attributable = pred_coll & ~gt_coll.unsqueeze(0)  # (M, n_agents, T)
+            target[b] = attributable.any(dim=-1).any(dim=-1).to(target.dtype)
+            weight[b] = 1.0
+
+        valid = weight.sum() > 0
+        if not valid:
+            return None, None
+        loss = F.binary_cross_entropy_with_logits(
+            per_mode_logit, target, weight=weight, reduction='sum'
+        ) / weight.sum().clamp_min(1.0)
+        loss = loss * float(self.conflict_loss_weight)
+
+        with torch.no_grad():
+            wm = weight > 0
+            pos = wm & (target > 0.5)
+            neg = wm & (target < 0.5)
+            pred = (per_mode_logit > 0).float()
+            pos_logit_mean = per_mode_logit[pos].mean() if pos.any() else per_mode_logit.new_zeros(())
+            neg_logit_mean = per_mode_logit[neg].mean() if neg.any() else per_mode_logit.new_zeros(())
+            acc_05 = (pred[wm] == target[wm]).float().mean() if wm.any() else per_mode_logit.new_zeros(())
+            pos_rate = (target[wm] > 0.5).float().mean() if wm.any() else per_mode_logit.new_zeros(())
+        diag = dict(
+            plan_conf_pos_logit_mean=pos_logit_mean.detach(),
+            plan_conf_neg_logit_mean=neg_logit_mean.detach(),
+            plan_conf_acc_05=acc_05.detach(),
+            plan_conf_pos_rate=pos_rate.detach(),
+        )
+        return loss, diag
+
     def _loss_planning_conflict(self, conf_logits, reg, data, motion_loss_cache):
         """Object-conflict BCE on (matched-anchor, plan-mode) pairs.
 
@@ -2632,6 +2845,10 @@ class MotionPlanningHead(BaseModule):
         `neg_logit_mean`, `acc_05`, `pos_rate` over the labelled (anchor, mode)
         entries, or None if no valid samples in the batch.
         """
+        # Per-mode-restricted aggregation path (image_at_plan / image_at_init_topk)
+        # bypasses Hungarian matching and uses per-mode evalmatch labels directly.
+        if self.conflict_input in ('image_at_plan', 'image_at_init_topk'):
+            return self._loss_planning_conflict_per_mode(conf_logits, reg, data)
         if motion_loss_cache is None:
             return None, None
         gt_boxes = data.get('gt_bboxes_3d')

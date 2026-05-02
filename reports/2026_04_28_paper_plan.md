@@ -6,7 +6,17 @@
 
 **Single goal: shortest path to a stage-2 architecture where everything is OFF except ego queries and the planning task/loss.**
 
-Concretely: at stage 2 the model trains only the planner head on top of a stage-1-shaped backbone. Detection, map, and motion heads exist for evaluation reporting only — they are not read by the planner, not updated by gradients, and their losses are zero. The planner reads ego state + image features (via deformable attention); the conflict head reads image features at det-anchor BEV positions. No agent tokens enter the planner's instance_feature.
+Concretely: at stage 2 the model trains only the planner head on top of a stage-1-shaped backbone. Detection, map, and motion heads should be removable from the inference path entirely — they exist only for evaluation reporting (NDS/mAP) and contribute no gradient, no loss, and no spatial information to the planner or conflict head.
+
+**The current minS2 config (3397346) is K/V-off + Stream A + Stream E + Stream B1, which closes most of the perception dependency but leaves a residual: the conflict head's `image_at_det` sampler still uses detection anchor BEV positions as its spatial query, so the detection head still runs forward at inference (just frozen, supervisionless, and unread by the planner). The next batch removes this last dependency** by sourcing the conflict sampler's spatial query from places that don't require any perception forward pass:
+
+| Variant | Spatial source for conflict sampler | Closes |
+|---|---|---|
+| **B1.5** (`image_at_plan` single-point) | Plan trajectory waypoints (M×T points) | Det forward pass |
+| **B1.6** (`image_at_init_topk`) | Top-K nearest fixed init det anchors to ego | Det forward pass; falls back to broad fixed coverage |
+| **B1.7** (`image_at_plan` + footprint) | Plan trajectory waypoints + 7-point ±0.45 m footprint expansion | Det forward pass; covers ego-corridor properly |
+
+If any of B1.5 / B1.6 / B1.7 ties the headline within noise, **the paper architecture is fully detection/map-free at inference** — perception heads can be deleted from the model entirely (kept only as eval-reporting hooks against the stage-1 frozen weights). This is the strongest possible form of the supervision-vs-interface decoupling claim.
 
 Every stream below feeds this north star:
 - **Stream A** kills perception losses at stage 2 (det/map/motion = 0).

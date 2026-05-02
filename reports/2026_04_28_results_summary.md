@@ -9,6 +9,8 @@ Primary metrics are planning `L2` and `CR=obj_box_col` (lower is better).
 
 Reference comparator throughout: K/V-off paper headline (`_decoder6_planwp_evalmatchmode_egostatus`) at **L2=0.3708 / CR=0.0405%** (mean of seeds 0+1; seed 2 in flight as 3394849).
 
+**Refinement (2026-05-02 PM):** the `image_at_det` conflict head used by the headline + minS2 (3397346) still consults detection anchor BEV positions to know where to sample image features — so the detection head's forward pass still happens at inference even when its outputs feed nothing else. Three new conflict-sampler variants close this last dependency by sourcing spatial keypoints from non-perception signals: **B1.5** (plan trajectory waypoints), **B1.6** (top-K fixed init anchors closest to ego), **B1.7** (plan trajectory + 7-point footprint). If any ties the headline, the paper claim becomes **fully detection/map-free at inference**.
+
 **Path to minS2** combines four components, each demonstrated individually but never (until 3397346) together:
 
 | Component | Closes at | Result | Source |
