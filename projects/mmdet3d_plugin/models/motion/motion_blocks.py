@@ -187,7 +187,7 @@ class MotionPlanningRefinementModule(BaseModule):
             M = plan_query.shape[2]
             plan_q_flat = plan_query.squeeze(1)  # (bs, M, D)
             agents_exp = agent_features.unsqueeze(2).expand(-1, -1, M, -1)
-            plan_exp = plan_q_flat.unsqueeze(1).expand(-1, num_anchor, -1, -1)
+            plan_exp = plan_q_flat.unsqueeze(1).expand(-1, agent_features.shape[1], -1, -1)
             pair = torch.cat([agents_exp, plan_exp], dim=-1)
             plan_conflict = self.plan_conflict_branch(pair).squeeze(-1)  # (bs, num_anchor, M)
 
