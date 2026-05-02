@@ -310,8 +310,8 @@ class SparseDriveAgent(AbstractAgent):
         return [
             pl.callbacks.ModelCheckpoint(
                 dirpath=ckpt_dir,
-                save_last=True,
-                save_top_k=0,
+                every_n_epochs=1,
+                save_top_k=-1,
                 filename="sparsedrive-{epoch:02d}-{step:08d}",
             ),
         ]
