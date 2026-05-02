@@ -25,7 +25,7 @@ CMD=${@:-bash}
 APPTAINER=/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/Core/apptainer/1.3.5/bin/apptainer
 
 # Command
-CONTAINER_CMD="$APPTAINER exec --nv -c -e --pwd /workspace/ForeSight/ \
+CONTAINER_CMD="$APPTAINER exec --nv --writable-tmpfs -c -e --pwd /workspace/ForeSight/ \
 --env WANDB_API_KEY=$WANDB_API_KEY \
 --env WANDB_MODE=offline \
 --env WANDB_DIR=/wandb \
