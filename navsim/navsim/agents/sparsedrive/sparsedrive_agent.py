@@ -141,9 +141,16 @@ class SparseDriveAgent(AbstractAgent):
         targets: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Dict[str, torch.Tensor]:
         img = features["img"]
+        device = img.device
         data = {k: v for k, v in features.items() if k != "img"}
         if targets is not None:
             data.update(targets)
+        # Targets from compute_targets() are CPU tensors; move them to match img.
+        for k, v in list(data.items()):
+            if isinstance(v, torch.Tensor):
+                data[k] = v.to(device)
+            elif isinstance(v, list) and v and isinstance(v[0], torch.Tensor):
+                data[k] = [x.to(device) for x in v]
 
         # SparseDrive expects mmcv-style metas. Until the feature builder ships
         # T_global, timestamps, and detection GT from the scene, inject
