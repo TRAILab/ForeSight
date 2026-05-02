@@ -9,35 +9,90 @@ Parse from: `$ARGUMENTS`
 
 Use the host and VPN rules from `.claude/CLAUDE.md` as needed.
 
+## Approach
+
+1. Run all server queries **in parallel** (single message with multiple Bash calls). Each call must wrap the SSH command with `timeout 15` so a downed server fails fast instead of stalling.
+2. For SLURM servers, parse `squeue` output to get job IDs, then in a follow-up parallel batch fetch the **first line** of the matching `logs/foresight-<jobid>.log` file to extract config name and train/eval mode (`Running: bash ./tools/dist_{train,test}.sh <config> ...`).
+3. For Apollo, list docker containers; for each running container with the `foresight` image, find the most recent log under `~/ForeSight/logs/` (or `~/ForeSight/work_dirs/<config>/`) modified since the container started and grep for the latest `Iter [N/Total]` or `Epoch [N/Total]` line to estimate ETA.
+4. Always emit one section per server. If SSH fails (timeout, no route to host, refused, auth), print `<server>: unreachable (<short reason>)` and continue. Never abort the whole skill on one failure.
+
 ## Commands
 
-### DGX
-```bash
-ssh trail_dgx "source ~/.bashrc && squeue -u spapais --format='%.10i %.20j %.8T %.10M %.6D %R' 2>/dev/null"
+### SLURM squeue (DGX / Narval / Trillium / Killarney)
+
+Use a single format string everywhere so parsing is uniform:
+
+```
+SQFMT='%.10i|%.8T|%.10M|%.10L|%.6D|%.20b|%R'
 ```
 
-### Narval
+Fields: JobID | State | TimeUsed | TimeLeft | Nodes | TRES (gpu spec) | Reason/NodeList.
+
 ```bash
-ssh narval "source ~/.bashrc && squeue -u spapais --format='%.10i %.20j %.8T %.10M %.6D %R' 2>/dev/null"
+# DGX
+timeout 15 ssh trail_dgx "source ~/.bashrc && squeue -u spapais --noheader --format='%.10i|%.8T|%.10M|%.10L|%.6D|%.20b|%R'" 2>&1
+
+# Narval
+timeout 15 ssh narval "source ~/.bashrc && squeue -u spapais --noheader --format='%.10i|%.8T|%.10M|%.10L|%.6D|%.20b|%R'" 2>&1
+
+# Trillium (must use GPU login node)
+timeout 15 ssh trillium_gpu "source ~/.bashrc && squeue -u spapais --noheader --format='%.10i|%.8T|%.10M|%.10L|%.6D|%.20b|%R'" 2>&1
+
+# Killarney (needs module load)
+timeout 15 ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && squeue -u spapais --noheader --format='%.10i|%.8T|%.10M|%.10L|%.6D|%.20b|%R'" 2>&1
 ```
 
-### Trillium
+### Per-job config + mode (SLURM)
+
+For each job ID returned above, run **in parallel**:
+
 ```bash
-ssh trillium_gpu "source ~/.bashrc && squeue -u spapais --format='%.10i %.20j %.8T %.10M %.6D %R' 2>/dev/null"
+# DGX repo path
+timeout 10 ssh trail_dgx "head -1 /raid/home/spapais/ForeSight/logs/foresight-<JOBID>.log 2>/dev/null"
+# Other servers: /home/spapais/ForeSight/logs/foresight-<JOBID>.log
 ```
 
-### Killarney
+Parse the first line `Running: bash ./tools/dist_<train|test>.sh projects/configs/<config>.py <ngpus> ...`:
+- mode = `train` if `dist_train.sh`, `eval` if `dist_test.sh`
+- config = basename of the `.py` path, stripped of `.py` and `projects/configs/`
+- gpus = the integer following the config path (training/eval scripts both take it as positional arg)
+
+If the log file does not exist yet (PENDING job), set config = `-`, mode = `pending`, gpus from the squeue TRES field (`gres/gpu=N` or `gpu:N`).
+
+### Apollo (docker)
+
 ```bash
-ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && squeue -u spapais --format='%.10i %.20j %.8T %.10M %.6D %R' 2>/dev/null"
+timeout 15 ssh apollo "docker ps --format '{{.ID}}|{{.Image}}|{{.Status}}|{{.Names}}|{{.RunningFor}}'" 2>&1
 ```
 
-### Apollo
+For each container whose image starts with `foresight`:
+
 ```bash
-ssh apollo "docker ps --format 'table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Names}}' 2>/dev/null"
+# Find the active log (most recent foresight*.log written to since container start)
+timeout 10 ssh apollo "ls -t /home/spapais/ForeSight/logs/*.log 2>/dev/null | head -1"
+
+# Pull the launch line + last iter line for ETA
+timeout 10 ssh apollo "f=\$(ls -t /home/spapais/ForeSight/logs/*.log | head -1); head -1 \$f; tac \$f | grep -m1 -E 'Iter \[[0-9]+/[0-9]+\]|Epoch \[[0-9]+\]\[[0-9]+/[0-9]+\]'"
 ```
+
+Extract:
+- config + mode from the launch line (same parser as SLURM).
+- iter progress from the `Iter [N/Total] ... eta: H:MM:SS` line — mmcv prints `eta` directly; use that as the ETA. If only `Epoch [E][N/T]` is present and no eta token, fall back to `~unknown`.
+
+If multiple containers run different jobs, match each container to its log via `docker inspect <id> --format '{{.State.StartedAt}}'` and pick the log whose mtime is closest to (but ≥) that timestamp.
 
 ## Output
-- Print one table per server.
-- Include job ID, name, state, runtime, and queue reason when available.
-- If no jobs are active, print `No active jobs.`
-- For SLURM servers, include `%R` for `PENDING` jobs.
+
+Single combined markdown table sorted by server then by state (RUNNING before PENDING):
+
+```
+| Server   | JobID | Mode  | GPUs | State    | Elapsed | ETA       | Config                                              |
+```
+
+- `Config`: truncate to 60 chars with `…` if longer.
+- `ETA`:
+  - SLURM RUNNING: `TimeLeft` from squeue.
+  - SLURM PENDING: the queue reason in parens, e.g. `(Priority)`, `(Resources)`.
+  - Apollo: parsed `eta:` from the latest iter line, or `~unknown`.
+- After the table, list any unreachable servers under a `Unreachable:` heading with the short reason (e.g. `narval: no route to host`, `apollo: connection refused`).
+- If every queryable server returns nothing, print `No active jobs anywhere.`
