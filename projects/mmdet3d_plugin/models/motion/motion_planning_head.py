@@ -304,6 +304,18 @@ class MotionPlanningHead(BaseModule):
         # init_topk: per-scene top-K-nearest-to-ego selection from that file.
         conflict_init_anchor_path=None,
         conflict_init_topk=50,
+        # Option 2a: learned scene-query decoder (image_at_scene_query). Refines
+        # K BEV anchors via image features; conflict head reads at refined positions.
+        conflict_scene_query_decoder=None,
+        # Optional aux loss on scene queries (Option 2a-aux): Hungarian match
+        # against ego-interacting GT subset (within X m of ego in next Y s),
+        # focal cls + L1 box on (x, y).
+        scene_query_aux_loss_enable=False,
+        scene_query_aux_loss_weight=1.0,
+        scene_query_aux_dist_thresh=20.0,
+        scene_query_aux_time_steps=6,
+        scene_query_aux_cls_weight=1.0,
+        scene_query_aux_box_weight=2.0,
         planning_temporal_stack=0,
         planning_temporal_egocomp=True,
         plan_anchor_norm_mode='none',
@@ -367,7 +379,8 @@ class MotionPlanningHead(BaseModule):
         self.ego_only_planning = ego_only_planning
         self.conflict_input = conflict_input
         _valid_conflict_inputs = (
-            'agent_token', 'image_at_det', 'image_at_plan', 'image_at_init_topk'
+            'agent_token', 'image_at_det', 'image_at_plan', 'image_at_init_topk',
+            'image_at_scene_query',
         )
         if conflict_input not in _valid_conflict_inputs:
             raise ValueError(
@@ -380,6 +393,31 @@ class MotionPlanningHead(BaseModule):
             self.conflict_image_sampler = build_from_cfg(conflict_image_sampler, ATTENTION)
         else:
             self.conflict_image_sampler = None
+        if conflict_input == 'image_at_scene_query':
+            assert conflict_scene_query_decoder is not None, (
+                "conflict_input='image_at_scene_query' requires conflict_scene_query_decoder"
+            )
+            self.scene_query_decoder = build_from_cfg(
+                conflict_scene_query_decoder, ATTENTION
+            )
+        else:
+            self.scene_query_decoder = None
+        # Aux loss config (active only when scene_query_aux_loss_enable=True
+        # AND conflict_input == 'image_at_scene_query').
+        self.scene_query_aux_loss_enable = bool(scene_query_aux_loss_enable)
+        self.scene_query_aux_loss_weight = float(scene_query_aux_loss_weight)
+        self.scene_query_aux_dist_thresh = float(scene_query_aux_dist_thresh)
+        self.scene_query_aux_time_steps = int(scene_query_aux_time_steps)
+        self.scene_query_aux_cls_weight = float(scene_query_aux_cls_weight)
+        self.scene_query_aux_box_weight = float(scene_query_aux_box_weight)
+        if self.scene_query_aux_loss_enable:
+            assert conflict_input == 'image_at_scene_query', (
+                "scene_query_aux_loss_enable requires conflict_input='image_at_scene_query'"
+            )
+            self.scene_query_cls_head = nn.Linear(embed_dims, 1)
+            nn.init.constant_(self.scene_query_cls_head.bias, -2.0)  # rare-positive prior
+        else:
+            self.scene_query_cls_head = None
         # Per-mode-restricted aggregation: image_at_plan / image_at_init_topk
         # build a per-(plan-mode, K) anchor pool, and per-mode collision logits
         # should read only from that mode's K samples (smooth-max over K), not
@@ -1595,6 +1633,22 @@ class MotionPlanningHead(BaseModule):
                     det_anchors.device, dtype=det_anchors.dtype
                 )
                 self._conflict_per_mode_K = T  # K samples per plan mode (= waypoints)
+            elif self.conflict_input == 'image_at_scene_query':
+                # Run the scene-query decoder (image-feature-refined K BEV anchors).
+                # Cache refined anchors + features for downstream conflict aggregation
+                # and (optional) aux loss.
+                sqd_out = self.scene_query_decoder(feature_maps, metas)
+                sampler_anchors = sqd_out['anchors']  # (B, K, 11)
+                self._scene_query_features = sqd_out['features']  # (B, K, D)
+                self._scene_query_anchors = sampler_anchors
+                # Global K queries: per-mode-restricted aggregation reuses the
+                # diagonal mode read with K = num_queries; conf_logits shape
+                # will be (B, K, M_pred). To keep the per-mode-restricted path
+                # working, we set _conflict_per_mode_K=K and treat each mode's
+                # logit as reading from all K queries — _loss_planning_conflict
+                # routes scene_query through a special path that aggregates
+                # per-mode without diagonal restriction (queries are global).
+                self._conflict_per_mode_K = sampler_anchors.shape[1]
             elif self.conflict_input == 'image_at_init_topk':
                 # Per-(scene, plan-mode) top-K nearest fixed init anchors.
                 # plan_anchor cumulative XY → (M_total, T, 2). For each plan
@@ -1620,20 +1674,27 @@ class MotionPlanningHead(BaseModule):
                 self._conflict_per_mode_K = K_topk
             else:
                 raise NotImplementedError(self.conflict_input)
-            sampler_query = sampler_anchors.new_zeros(
-                sampler_anchors.shape[0], sampler_anchors.shape[1], self.embed_dims
-            )
-            sampler_anchor_embed = anchor_encoder(sampler_anchors)
-            conflict_image_features = self.conflict_image_sampler(
-                sampler_query,
-                sampler_anchors,
-                sampler_anchor_embed,
-                feature_maps,
-                metas,
-            )
+            if self.conflict_input == 'image_at_scene_query':
+                # Decoder already produced features via internal deformable
+                # attention; skip the standalone conflict_image_sampler pass.
+                conflict_image_features = self._scene_query_features
+            else:
+                sampler_query = sampler_anchors.new_zeros(
+                    sampler_anchors.shape[0], sampler_anchors.shape[1], self.embed_dims
+                )
+                sampler_anchor_embed = anchor_encoder(sampler_anchors)
+                conflict_image_features = self.conflict_image_sampler(
+                    sampler_query,
+                    sampler_anchors,
+                    sampler_anchor_embed,
+                    feature_maps,
+                    metas,
+                )
         else:
             conflict_image_features = None
             self._conflict_per_mode_K = None
+            self._scene_query_features = None
+            self._scene_query_anchors = None
         _deformable_stage_idx = 0
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
@@ -2423,6 +2484,19 @@ class MotionPlanningHead(BaseModule):
                         for k, v in conf_diag.items():
                             output[f"plan_conf_{k}"] = v
 
+            if (
+                self.scene_query_aux_loss_enable
+                and decoder_idx == len(reg_preds) - 1
+            ):
+                aux_ret = self._loss_scene_query_aux(data)
+                if aux_ret is not None:
+                    aux_loss, aux_diag = aux_ret
+                    if aux_loss is not None:
+                        output['planning_loss_scene_query_aux'] = aux_loss
+                    if aux_diag is not None:
+                        for k, v in aux_diag.items():
+                            output[k] = v
+
             if self.plan_softcost_collision_enable:
                 softcost_col = self._loss_planning_softcost_collision(reg, data)
                 if softcost_col is not None:
@@ -2680,26 +2754,144 @@ class MotionPlanningHead(BaseModule):
             target[b, pidx] = label_per_pair.t().to(target.dtype)
             weight[b, pidx] = 1.0
 
+    def _loss_scene_query_aux(self, data):
+        """Detection-like aux loss on scene queries against ego-interacting GT.
+
+        Filter: GT agents whose absolute position comes within
+        ``self.scene_query_aux_dist_thresh`` meters of ego at any timestep
+        within ``self.scene_query_aux_time_steps`` future steps.
+
+        Hungarian-match scene queries to filtered GT by L2 distance on (x, y);
+        focal cls (1=matched, 0=unmatched) on a per-query head, plus L1 on
+        (x, y) for matched queries.
+        """
+        from scipy.optimize import linear_sum_assignment
+        if self.scene_query_cls_head is None:
+            return None, None
+        feats = self._scene_query_features
+        anchors = self._scene_query_anchors
+        if feats is None or anchors is None:
+            return None, None
+        gt_boxes = data.get('gt_bboxes_3d')
+        gt_traj = data.get('gt_agent_fut_trajs')
+        gt_traj_mask = data.get('gt_agent_fut_masks')
+        gt_ego_traj = data.get('gt_ego_fut_trajs')
+        if gt_boxes is None or gt_traj is None or gt_ego_traj is None:
+            return None, None
+
+        bs, K, D = feats.shape
+        device = feats.device
+        cls_logits = self.scene_query_cls_head(feats).squeeze(-1)  # (bs, K)
+        target = cls_logits.new_zeros(bs, K)
+        weight = cls_logits.new_ones(bs, K)  # all queries get cls signal
+        box_target = anchors.new_zeros(bs, K, 2)
+        box_weight = anchors.new_zeros(bs, K)
+
+        thr = self.scene_query_aux_dist_thresh
+        T_h = self.scene_query_aux_time_steps
+
+        for b in range(bs):
+            boxes_b = gt_boxes[b].to(device).float()
+            trajs_b = gt_traj[b].to(device).float()
+            ego_b = gt_ego_traj[b].to(device).float()
+            n_agents = boxes_b.shape[0]
+            if n_agents == 0 or trajs_b.shape[0] == 0 or ego_b.shape[0] == 0:
+                continue
+            T = min(T_h, trajs_b.shape[1], ego_b.shape[0])
+            if T == 0:
+                continue
+            # Ego absolute pos at t in [0..T]
+            ego_pos = torch.cat(
+                [ego_b.new_zeros(1, 2), ego_b[:T].cumsum(dim=0)], dim=0
+            )  # (T+1, 2)
+            # Agent absolute pos at t in [0..T]
+            agent_xy0 = boxes_b[:, :2]
+            agent_cum = torch.cat(
+                [trajs_b.new_zeros(n_agents, 1, 2), trajs_b[:, :T].cumsum(dim=1)],
+                dim=1,
+            )
+            agent_pos = agent_xy0[:, None, :] + agent_cum  # (N, T+1, 2)
+            d = torch.norm(agent_pos - ego_pos[None, :, :], dim=-1)  # (N, T+1)
+            valid_t = torch.cat(
+                [torch.ones(n_agents, 1, dtype=torch.bool, device=device),
+                 (gt_traj_mask[b].to(device)[:, :T].bool() if gt_traj_mask is not None else torch.ones(n_agents, T, dtype=torch.bool, device=device))],
+                dim=1,
+            )
+            d_masked = torch.where(valid_t, d, d.new_full((), float('inf')))
+            keep = (d_masked < thr).any(dim=1)
+            if not keep.any():
+                continue
+            kept_xy = agent_xy0[keep]  # (n_kept, 2)
+            # Hungarian match scene query positions ↔ kept GT positions by L2
+            q_xy = anchors[b, :, :2]  # (K, 2)
+            cost = torch.cdist(q_xy, kept_xy)  # (K, n_kept)
+            cost_np = cost.detach().cpu().numpy()
+            q_idx, g_idx = linear_sum_assignment(cost_np)
+            q_idx = torch.as_tensor(q_idx, device=device, dtype=torch.long)
+            g_idx = torch.as_tensor(g_idx, device=device, dtype=torch.long)
+            target[b, q_idx] = 1.0
+            box_target[b, q_idx] = kept_xy[g_idx]
+            box_weight[b, q_idx] = 1.0
+
+        # Focal-style cls loss (use BCE with positive bias prior)
+        valid = weight.sum() > 0
+        if not valid:
+            return None, None
+        cls_loss = F.binary_cross_entropy_with_logits(
+            cls_logits, target, weight=weight, reduction='sum'
+        ) / weight.sum().clamp_min(1.0)
+        cls_loss = cls_loss * self.scene_query_aux_cls_weight
+
+        if box_weight.sum() > 0:
+            box_loss = F.l1_loss(
+                anchors[..., :2] * box_weight.unsqueeze(-1),
+                box_target * box_weight.unsqueeze(-1),
+                reduction='sum',
+            ) / (box_weight.sum() * 2).clamp_min(1.0)
+            box_loss = box_loss * self.scene_query_aux_box_weight
+        else:
+            box_loss = cls_loss.new_zeros(())
+
+        loss = (cls_loss + box_loss) * self.scene_query_aux_loss_weight
+        with torch.no_grad():
+            n_pos = (target > 0.5).float().sum()
+            n_total = weight.sum()
+        diag = dict(
+            scene_query_aux_pos_rate=(n_pos / n_total.clamp_min(1.0)).detach(),
+            scene_query_aux_cls=cls_loss.detach(),
+            scene_query_aux_box=box_loss.detach(),
+        )
+        return loss, diag
+
     def _loss_planning_conflict_per_mode(self, conf_logits, reg, data):
-        """Per-mode-restricted aggregation for image_at_plan / image_at_init_topk.
+        """Per-mode aggregation for det-free conflict samplers.
 
-        conf_logits: (bs, M_anc * K, M_pred) where M_anc = M_pred = M plan modes
-        and K = self._conflict_per_mode_K samples per mode.
-
-        For each output mode m, smooth-max over the K samples that BELONG to
-        mode m (anchor indices [m*K : (m+1)*K]) for the m-th conflict logit.
+        Two layouts supported:
+          - Per-mode pool (image_at_plan / image_at_init_topk):
+            conf_logits.shape == (bs, M_anc * K, M_pred), where M_anc = M_pred.
+            For each output mode m, smooth-max over the K samples that BELONG
+            to mode m (anchor indices [m*K : (m+1)*K]) — diagonal mode read.
+          - Global pool (image_at_scene_query):
+            conf_logits.shape == (bs, K, M_pred), K queries shared across modes.
+            For each mode m, smooth-max over all K queries.
         Per-mode label via evalmatch geometry, no Hungarian needed.
         """
         bs, total, M_pred = conf_logits.shape
         K = self._conflict_per_mode_K
-        if K is None or total != M_pred * K:
+        if K is None:
             return None, None
         device = conf_logits.device
-        # Reshape: (bs, M_anc, K, M_pred). Diagonal-mode read gives (bs, K, M).
-        logits_per_mode = conf_logits.reshape(bs, M_pred, K, M_pred)
-        diag_logits = logits_per_mode.diagonal(dim1=1, dim2=3)  # (bs, K, M)
         tau = self.conflict_smooth_max_tau
-        per_mode_logit = (1.0 / tau) * torch.logsumexp(tau * diag_logits, dim=1)  # (bs, M)
+        if total == M_pred * K:
+            # Per-mode pool: diagonal mode read
+            logits_per_mode = conf_logits.reshape(bs, M_pred, K, M_pred)
+            diag_logits = logits_per_mode.diagonal(dim1=1, dim2=3)  # (bs, K, M)
+            per_mode_logit = (1.0 / tau) * torch.logsumexp(tau * diag_logits, dim=1)
+        elif total == K:
+            # Global pool: smooth-max over all K queries per mode
+            per_mode_logit = (1.0 / tau) * torch.logsumexp(tau * conf_logits, dim=1)
+        else:
+            return None, None
 
         # Per-mode label via evalmatch geometry: for each m, did predicted ego
         # trajectory reg[m] collide with any visible GT agent at any timestep?
@@ -2794,7 +2986,7 @@ class MotionPlanningHead(BaseModule):
         loss = F.binary_cross_entropy_with_logits(
             per_mode_logit, target, weight=weight, reduction='sum'
         ) / weight.sum().clamp_min(1.0)
-        loss = loss * float(self.conflict_loss_weight)
+        # Note: caller multiplies by self.conflict_loss_weight; do NOT scale here.
 
         with torch.no_grad():
             wm = weight > 0
@@ -2845,9 +3037,12 @@ class MotionPlanningHead(BaseModule):
         `neg_logit_mean`, `acc_05`, `pos_rate` over the labelled (anchor, mode)
         entries, or None if no valid samples in the batch.
         """
-        # Per-mode-restricted aggregation path (image_at_plan / image_at_init_topk)
-        # bypasses Hungarian matching and uses per-mode evalmatch labels directly.
-        if self.conflict_input in ('image_at_plan', 'image_at_init_topk'):
+        # Per-mode aggregation path for det-free conflict samplers
+        # (image_at_plan, image_at_init_topk, image_at_scene_query). Bypasses
+        # Hungarian matching and uses per-mode evalmatch labels directly.
+        if self.conflict_input in (
+            'image_at_plan', 'image_at_init_topk', 'image_at_scene_query'
+        ):
             return self._loss_planning_conflict_per_mode(conf_logits, reg, data)
         if motion_loss_cache is None:
             return None, None
