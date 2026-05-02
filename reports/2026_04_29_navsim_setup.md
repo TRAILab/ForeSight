@@ -196,7 +196,13 @@ Files under `navsim/navsim/agents/sparsedrive/`:
 | local | navmini Hydra multi-step training (5 steps, loss decreases) | n/a | COMPLETED |
 | killarney | navsim 7/7 smoke (.sif on /scratch, ops rebuilt) | 3365954 | COMPLETED |
 | killarney | navmini 5-step Hydra training | 3365958 | COMPLETED |
-| killarney | sparsedrive navtrain training | n/a | PENDING |
+| killarney + dgx | navtrain + navtest data download (~700 GB) | n/a | COMPLETED |
+| killarney | navtest metric_cache build (12,146 entries) | 3371101 | COMPLETED |
+| killarney | navtrain k-means anchors (real, plan-side only) | 3372479 | COMPLETED |
+| killarney | navtrain dataset_cache (Ray-parallel, 103k entries) | 3386610 | COMPLETED |
+| dgx | navtrain training, fp32, 500 batches | 3705 | COMPLETED (clean: loss 1.29 → 0.21) |
+| dgx | navtrain training, fp32, 5000 batches | 3706 | NaN at step 4233/5000 (**blocker — see below**) |
+| killarney | navtrain training, fp32, 2000 batches (in flight) | 3387639 cache | RUNNING |
 
 ### Smoke test (2026-04-29, local, GPU)
 
@@ -412,32 +418,103 @@ untouched.
 | ForeSight SparseDrive (planning-only) | — | — | — | — | — | — | — | TBD |
 | ForeSight SparseDrive (full) | — | — | — | — | — | — | — | TBD |
 
+## Current State (2026-05-01, end of session)
+
+Everything from Phase 0 → Phase 4 first-checkpoint is in place except the
+training itself produces NaN before completing a useful run.
+
+**Working:**
+- Image, .sif on DGX + Killarney, smoke 7/7 on both
+- Full navtrain (700 GB) + navtest (220 GB) + nuplan-maps on DGX `/raid/home/spapais/datasets/` and Killarney `/home/spapais/projects/aip-swasland/datasets/`
+- Apollo has data too but is unusable (V100s, no flash-attn 2.x support)
+- Ray-parallel dataset_caching builds in ~46 min (vs 5 hr serial)
+- navtest metric_cache built (Killarney, 12k entries, 3 GB) — ready for PDM-Score eval
+- Real navtrain plan-side k-means anchors generated
+- 500-batch training (`3705`) clean: loss 1.29 → 0.21, no NaN
+
+**Broken / blocker:**
+- Training NaN's around step 4000–4500 even with fp32 + grad_clip=1.0 + frozen
+  det/map weights + det/map losses excluded from backprop. See diagnosis in
+  the next section.
+
+## NaN Diagnosis (2026-05-01)
+
+The empty-GT det/map heads compute massive (~50k summed) classification
+losses that overflow fp16 immediately. fp32 sidesteps that, but a different
+NaN appears around step 4233/5000 even with the head weights frozen and
+their losses dropped from backprop.
+
+Root cause is structural: `motion_plan_head` reaches into
+`SparseDriveHead.det_head.anchor_encoder` and `.instance_bank`, so we
+**must** keep `with_det=True` (head builds + runs forward) even though we
+have no detection supervision. The det/map heads run forward against the
+backbone (which is still updating), and their outputs feed motion_plan_head
+via cross-attention. With no supervision, those features drift; eventually
+some batch produces extreme cross-attention values and the planning loss
+spikes through gradient clip into NaN.
+
+**Decision (with user, 2026-05-01):** Adopt **Option 2** — load a stage-1
+nuScenes checkpoint to give det/map meaningful pretrained weights, freeze
+them, skip their losses. Cross-attention then sees real (frozen) detection
+features instead of noise.
+
+## Next Steps (clean session pickup)
+
+1. **Wire stage-1 warm-start.** The local repo has
+   `ckpt/sparsedrive_stage1.pth` (per CLAUDE.md the standard stage-2 init).
+   - scp to DGX `/raid/home/spapais/ForeSight/ckpt/sparsedrive_stage1.pth`
+     and Killarney `/home/spapais/ForeSight/ckpt/sparsedrive_stage1.pth`
+   - Update `navsim/navsim/planning/script/config/common/agent/sparsedrive_agent.yaml`:
+     ```
+     foresight_pretrained: ${oc.env:FORESIGHT_ROOT}/ckpt/sparsedrive_stage1.pth
+     ```
+   - `SparseDriveAgent._load_pretrained` already does `strict=False`, so the
+     `ego_fut_ts=8` / `num_driving_cmds=4` planning-head dim mismatches
+     fall through and that head trains from scratch as intended.
+
+2. **Confirm freeze logic still applies.** `SparseDriveAgent.__init__`
+   already sets `requires_grad=False` on `head.det_head` + `head.map_head`.
+   This combined with the warm-started weights means det/map are frozen at
+   their stage-1-trained state — exactly what we want for stage-2 navsim.
+
+3. **Resubmit training on DGX or Killarney**, same precision/strategy as
+   `3705` (`fp32`, `grad_clip=1.0`, `bs=2`, single GPU). Now expect:
+   - det/map cross-attention features are meaningful (not noise)
+   - planning loss should stay stable past 5000 steps
+   - Land a real ckpt via the `ModelCheckpoint` callback already wired into
+     `SparseDriveAgent.get_training_callbacks`
+
+4. **First navtest PDM-Score eval** once a ckpt exists:
+   `bash scripts/navsim_eval.sh /path/to/ckpt navtest`. metric_cache is
+   already built on Killarney at
+   `/scratch/spapais/ForeSight/work_dirs/navsim/metric_cache`.
+
+5. **If NaN still appears** after stage-1 warm-start: drop to LR=1e-5,
+   grad_clip=0.5, OR fall back to **Option 1** (refactor `SparseDriveHead`
+   to hoist `anchor_encoder` + `instance_bank` out of `det_head` so we can
+   actually skip det/map forward).
+
+## Future Work (deferred)
+
+- Multi-GPU DDP: `find_unused_parameters_true` conflicts with gradient
+  checkpointing. Need `DDPStrategy(static_graph=True, find_unused_parameters=True)`
+  via custom strategy build. Single GPU works for now.
+- Real `T_global` from `scene.frames[i].ego_status.ego_pose` in the feature
+  builder (currently identity placeholders kill the temporal cache benefit).
+- nuPlan `gt_agent_fut_trajs` from per-track futures across frames, so
+  motion head loss is non-zero. Same path needed for the per-class
+  motion-side k-means anchors.
+- Padded variable-length detection GT or custom collate — to actually
+  supervise det/map on navsim. Stage-1 navsim is the natural follow-up.
+- Joint nuScenes + navtrain training (shared backbone, separate heads).
+- Extend SparseDrive to consume all 8 NavSim cameras instead of dropping
+  the side cams.
+- Closed-loop fine-tuning using the PDM scorer as a reward.
+
 ## Discussion
 
 Pending experiments. The expected default after Phase 4 will be the
-planning-only SparseDrive agent on navtrain, which gives us a NavSim-comparable
-PDMS number while keeping the rest of the codebase on its existing nuScenes
+stage-2 SparseDrive agent on navtrain (stage-1 nuScenes warm-start, frozen
+det/map, planning supervision), which gives us a NavSim-comparable PDMS
+number while keeping the rest of the codebase on its existing nuScenes
 trajectory.
-
-## Future Work
-
-- Real navtrain k-means anchors via `tools/gen_navsim_kmeans.py` once
-  navtrain lands on Killarney. Plan-side clustering wired; motion-side
-  per-class clustering still needs per-track future aggregation.
-- Real `T_global` from `scene.frames[i].ego_status.ego_pose` in the feature
-  builder (currently the agent injects identity placeholders, which kills
-  the temporal cache benefit but doesn't break training).
-- nuPlan `gt_agent_fut_trajs` extraction (per-track future trajectories
-  via `track_tokens` across frames) so the motion head sees real
-  supervision instead of empty placeholders.
-- Killarney submission via `scripts/killarney_navsim_run.sh` once the
-  navsim apptainer .sif lands at
-  `/home/spapais/ForeSight/docker/foresight_navsim_cuda118pytorch21.sif`.
-  Build it with
-  `docker save foresight_navsim:cuda118pytorch21 | gzip > foresight_navsim.tar.gz`
-  on local, scp to Killarney, then
-  `apptainer build foresight_navsim_cuda118pytorch21.sif docker-archive://foresight_navsim.tar.gz`.
-- Joint nuScenes + navtrain training (shared backbone, separate heads).
-- Extend the SparseDrive head to consume all 8 NavSim cameras instead of
-  dropping the side cams.
-- Closed-loop fine-tuning using the PDM scorer as a reward.
