@@ -9,8 +9,8 @@ class SparseDriveConfig:
     # Which ForeSight mmcv config to load (relative to the ForeSight repo root).
     # The agent will read this file via mmcv.Config.fromfile to build the head.
     foresight_config: str = "projects/configs/sparsedrive_r50_stage2_4gpu_bs24.py"
-    # Optional path to a stage-2 checkpoint to warm-start from. None to train from scratch.
-    foresight_pretrained: str = "ckpt/sparsedrive_stage2.pth"
+    # Optional path to a stage-1/stage-2 checkpoint to warm-start from. Empty string = random init.
+    foresight_pretrained: str = ""
 
     # NavSim-side data shape
     num_history_frames: int = 4         # NavSim default

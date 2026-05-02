@@ -47,6 +47,11 @@ class SparseDriveAgent(AbstractAgent):
 
         self._sparsedrive_model: nn.Module = self._build_model_from_foresight_config()
 
+        # Load stage-1 / pretrained backbone+det+map weights first so those
+        # heads start from a meaningful state. A Lightning checkpoint_path
+        # (resume) overwrites this, so order matters: pretrained → checkpoint.
+        if config.foresight_pretrained:
+            self._load_pretrained(config.foresight_pretrained)
         if checkpoint_path:
             self._load_pretrained(checkpoint_path)
 
