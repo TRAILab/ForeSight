@@ -13,7 +13,7 @@
 # Parameters
 TMP_DIR=$SLURM_TMPDIR/tmp
 TMP_DATA_DIR=$SLURM_TMPDIR/data
-DATA_DIR=/project/def-swasland-ab/datasets/nuscenes/
+DATA_DIR=/project/def-swasland-ab/datasets/nuscenes2/
 WORK_DIR=/scratch/spapais/ForeSight/work_dirs
 WANDB_PERSIST_DIR=/scratch/spapais/ForeSight/wandb
 CMD=${@:-bash}
