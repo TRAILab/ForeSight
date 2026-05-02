@@ -10,6 +10,7 @@ The detection / motion / map heads are constructed but their losses are masked
 off via SparseDriveConfig flags until the nuPlan annotation conversion lands.
 """
 
+import threading
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -17,6 +18,11 @@ import torch.nn as nn
 import pytorch_lightning as pl
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
+
+# mmcv's Config.fromfile uses sys.path.insert/pop which is not thread-safe when
+# run_pdm_score dispatches 64 worker threads each instantiating SparseDriveAgent
+# concurrently. Serialise model construction globally.
+_MODEL_BUILD_LOCK = threading.Lock()
 
 from navsim.agents.abstract_agent import AbstractAgent
 from navsim.agents.sparsedrive.sparsedrive_config import SparseDriveConfig
@@ -75,20 +81,21 @@ class SparseDriveAgent(AbstractAgent):
         from mmcv import Config
         from mmdet.models import build_detector  # type: ignore
 
-        # Hydra cd's into its output dir at training time, so the foresight root
-        # is no longer in cwd. Add it explicitly so the plugin import resolves.
-        foresight_root = os.environ.get("FORESIGHT_ROOT", "/workspace/ForeSight")
-        if foresight_root not in sys.path:
-            sys.path.insert(0, foresight_root)
+        # mmcv Config.fromfile uses sys.path.insert/pop which races when 64 eval
+        # worker threads each build the model concurrently. Serialise here.
+        with _MODEL_BUILD_LOCK:
+            # Hydra cd's into its output dir at training time, so the foresight
+            # root is no longer in cwd. Add it explicitly so the plugin resolves.
+            foresight_root = os.environ.get("FORESIGHT_ROOT", "/workspace/ForeSight")
+            if foresight_root not in sys.path:
+                sys.path.insert(0, foresight_root)
 
-        # Importing the plugin registers SparseDriveHead, MotionPlanningHead, etc.
-        import projects.mmdet3d_plugin  # noqa: F401
+            # Importing the plugin registers SparseDriveHead, MotionPlanningHead, etc.
+            import projects.mmdet3d_plugin  # noqa: F401
 
-        cfg = Config.fromfile(self._config.foresight_config)
-        model = build_detector(cfg.model)
-        # Mute ForeSight head losses we don't want at this phase.
-        # The actual masking lives inside loss flags read on the head; for now we
-        # only call self._sparsedrive_model.head.planning_head subpath at loss time.
+            cfg = Config.fromfile(self._config.foresight_config)
+            model = build_detector(cfg.model)
+
         return model
 
     def _load_pretrained(self, path: str) -> None:
