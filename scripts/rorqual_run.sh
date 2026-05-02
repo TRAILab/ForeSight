@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=foresight
 #SBATCH --account=def-swasland-ab_gpu
-#SBATCH --partition=gpubase_bynode_b2
+#SBATCH --partition=gpubase_bynode_b2 # b2=12h, b3=1d, b4=3d, b5=7d
 #SBATCH --ntasks=1
 #SBATCH --mem=120gb
 #SBATCH --time=11:59:00 # 3 hours or 12 hours max recommended

@@ -33,8 +33,22 @@ CACHE_DIR = Path(
     )
 )
 DEFAULT_CLUSTERS = ("narval", "trillium", "killarney", "killarney_h100")
+ADDITIONAL_QUEUE_HEATMAP_CLUSTERS = ("tamia", "rorqual", "fir")
+SACCT_CLUSTERS = tuple(dict.fromkeys((*DEFAULT_CLUSTERS, *ADDITIONAL_QUEUE_HEATMAP_CLUSTERS)))
+PENDING_HEATMAP_CLUSTERS = tuple(dict.fromkeys((*DEFAULT_CLUSTERS, *ADDITIONAL_QUEUE_HEATMAP_CLUSTERS)))
+QUEUE_HEATMAP_CLUSTERS = PENDING_HEATMAP_CLUSTERS
 TERMINAL_CLUSTERS = ("narval", "trillium", "killarney", "killarney_h100")
+DRAC_ALLOCATED_SUMMARY_CLUSTERS = ("narval", "trillium")
+OTHER_SUMMARY_CLUSTERS = ("killarney", "killarney_h100", "tamia", "fir", "rorqual")
+CLUSTER_LOCATION = {
+    "killarney": "Vector, Toronto",
+    "killarney_h100": "Vector, Toronto",
+    "tamia": "Mila, Montreal",
+    "fir": "SFU, Vancouver",
+    "rorqual": "ETS, Montreal",
+}
 TRAIL_CLUSTERS = ("dgx", "apollo", "turing", "lovelace", "ums", "um1", "um2", "um3")
+DASHBOARD_STALE_CLUSTERS = tuple(dict.fromkeys((*SACCT_CLUSTERS, *TRAIL_CLUSTERS)))
 SECONDS_PER_DAY = 24 * 60 * 60
 SACCT_FIELDS = (
     "JobIDRaw",
@@ -59,6 +73,7 @@ CLUSTER_INFO: dict[str, dict[str, str]] = {
         "sbatch_opts": "--account=rrg-swasland --ntasks=1 --cpus-per-task=12 --mem=120gb --time=11:59:00 --gres=gpu:a100:4",
         "sbatch_opts_short": "--account=rrg-swasland --ntasks=1 --cpus-per-task=12 --mem=120gb --time=2:59:00 --gres=gpu:a100:4",
         "sbatch_opts_24h": "--account=rrg-swasland --ntasks=1 --cpus-per-task=12 --mem=120gb --time=23:59:00 --gres=gpu:a100:4",
+        "sbatch_opts_24h_1gpu": "--account=rrg-swasland --ntasks=1 --cpus-per-task=3 --mem=30gb --time=23:59:00 --gres=gpu:a100:1",
         "sacct_account": "rrg-swasland",
         "probe_cwd": "",
         "lab_users_dir": "$HOME/projects/rrg-swasland",
@@ -80,6 +95,7 @@ CLUSTER_INFO: dict[str, dict[str, str]] = {
         "probe_cwd": "",
         "lab_users_dir": "$HOME/links/projects/rrg-swasland",
         "weekly_gpu_hrs_target": "103",
+        "pending_gpu_groups": (4, 1),
     },
     "killarney": {
         "kind": "slurm",
@@ -145,8 +161,10 @@ CLUSTER_INFO: dict[str, dict[str, str]] = {
         "sbatch_opts_24h": "--account=def-swasland-ab --ntasks=1 --cpus-per-task=12 --mem=200gb --time=23:59:00 --gres=gpu:h100:4",
         "sacct_account": "def-swasland-ab",
         "probe_cwd": "",
-        "lab_users_dir": "$HOME/projects/def-swasland-ab",
-        "gres_filter": "h100",
+        "lab_users_dir": "/project/def-swasland-ab",
+        "partition": "gpubase_bynode_b1,gpubase_bynode_b2,gpubase_bynode_b3,gpubase_bynode_b4,gpubase_bynode_b5,gpubase_bygpu_b1,gpubase_bygpu_b2,gpubase_bygpu_b3,gpubase_bygpu_b4,gpubase_bygpu_b5",
+        "snapshot_gres_filter": "gpu:h100:4",
+        "snapshot_node_filter": "h100",
     },
     "nibi": {
         "kind": "slurm",
@@ -177,8 +195,10 @@ CLUSTER_INFO: dict[str, dict[str, str]] = {
         "sbatch_opts_24h": "--account=def-swasland-ab_gpu --ntasks=1 --cpus-per-task=16 --mem=120gb --time=23:59:00 --partition=gpubase_bynode_b3 --gres=gpu:h100:4",
         "sacct_account": "def-swasland-ab_gpu",
         "probe_cwd": "",
-        "lab_users_dir": "$HOME/projects/def-swasland-ab",
-        "gres_filter": "h100",
+        "lab_users_dir": "$HOME/links/projects/def-swasland-ab",
+        "partition": "gpubase_bynode_b1,gpubase_bynode_b2,gpubase_bynode_b3,gpubase_bynode_b4,gpubase_bynode_b5,gpubase_bygpu_b1,gpubase_bygpu_b2,gpubase_bygpu_b3,gpubase_bygpu_b4,gpubase_bygpu_b5",
+        "snapshot_gres_filter": "gpu:h100:4",
+        "snapshot_node_filter": "h100",
     },
     "tamia": {
         "kind": "slurm",
@@ -194,8 +214,11 @@ CLUSTER_INFO: dict[str, dict[str, str]] = {
         "sbatch_opts_24h": "--account=aip-swasland --ntasks=1 --cpus-per-task=12 --mem=120gb --time=23:59:00 --gpus-per-node=h100:4",
         "sacct_account": "aip-swasland",
         "probe_cwd": "",
-        "lab_users_dir": "$HOME/projects/aip-swasland",
-        "gres_filter": "h100",
+        "lab_users_dir": "$HOME/links/projects/aip-swasland",
+        "partition": "gpubase_bynode_b1,gpubase_bynode_b2,gpubase_bynode_b3",
+        "snapshot_gres_filter": "gpu:h100:4",
+        "snapshot_node_filter": "gpu:h100",
+        "pending_gpu_groups": (4,),
     },
     "dgx": {
         "kind": "slurm",
@@ -297,6 +320,12 @@ TIME_BUCKETS: tuple[tuple[str, int, int | None], ...] = (
     ("7d",  72 * 3600 + 1,     None),
 )
 GPU_GROUPS = (4, 2, 1)
+
+
+def _heatmap_gpu_groups(cluster: str) -> tuple[int, ...]:
+    info = CLUSTER_INFO[cluster]
+    groups = info.get("pending_gpu_groups", info.get("gpu_groups", GPU_GROUPS))
+    return tuple(groups) if not isinstance(groups, tuple) else groups
 TABLE_LOOKBACK_HOURS = 24
 
 
@@ -308,8 +337,8 @@ def parse_args() -> argparse.Namespace:
         "-w",
         "--window",
         type=int,
-        default=7,
-        help="display window in days for plot/CSV (default: 7)",
+        default=14,
+        help="display window in days for plot/CSV (default: 14)",
     )
     parser.add_argument(
         "--all",
@@ -494,9 +523,8 @@ def _load_cache(kind: str, cluster: str) -> tuple[object, int] | None:
 
 
 TRAIL_HISTORY_RETENTION_DAYS = 30
-# Window used for the "7D ..." columns, the timeline plot, and the
-# `_trail_*` aggregation helpers. Swap to 14 to switch the dashboard to a
-# 14-day view in one edit; column headers re-render automatically.
+# Window used for the lookback columns, the timeline plot, and the
+# `_trail_*` aggregation helpers; column headers re-render automatically.
 TRAIL_LOOKBACK_DAYS = 14
 
 
@@ -508,7 +536,7 @@ def _append_trail_history(cluster: str, snap: dict[str, object]) -> None:
     """Append a single utilisation sample to per-cluster JSONL history.
 
     Captures used/total GPUs, the user list, and a job count so we can
-    aggregate 7-day stats. Pruning happens lazily once the file grows.
+    aggregate lookback-window stats. Pruning happens lazily once the file grows.
     """
     used = snap.get("gpus_used")
     total = snap.get("gpus_total")
@@ -818,7 +846,7 @@ def query_all_clusters(
     # sacct history is meaningful only for the external clusters that drive the
     # queue-time plots; TRAIL hosts (DGX/Apollo) are summarised live, not
     # retrospectively.
-    sacct_clusters = {c: CLUSTER_INFO[c] for c in DEFAULT_CLUSTERS}
+    sacct_clusters = {c: CLUSTER_INFO[c] for c in SACCT_CLUSTERS}
     with ThreadPoolExecutor(max_workers=len(sacct_clusters)) as executor:
         futures = {
             executor.submit(
@@ -878,17 +906,30 @@ def query_snapshot(cluster: str, info: dict[str, str], timeout: int) -> dict[str
         "levelfs": None,
         "gpus_total": None,
         "gpus_used": None,
+        "gpu_nodes_total": None,
+        "gpu_nodes_mig": None,
         "mem_total_bytes": None,
         "mem_used_bytes": None,
         "pending_by_bucket": {},
     }
     partition = shlex.quote(info["partition"])
+    gres_filter = shlex.quote(info.get("snapshot_gres_filter", ""))
+    node_filter = shlex.quote(
+        info.get("snapshot_node_filter", info.get("snapshot_gres_filter", "gpu:"))
+    )
     parts = [
         info["init"],
-        f'sinfo -p {partition} --noheader -o "%n %t" 2>/dev/null | sort -k1,1 -u | '
+        f'sinfo -p {partition} --noheader -o "%n %t %G" 2>/dev/null | '
+        f'awk -v gf={gres_filter} \'gf=="" || index($3, gf) > 0 {{print $1, $2}}\' | '
+        'sort -k1,1 -u | '
         'awk \'{st=$2; gsub(/[^a-z]/,"",st); '
         'if(st=="idle") i++; else if(st=="mix") m++; else if(st=="alloc") a++; else d++} '
         'END{printf "STATES %d %d %d %d\\n", i+0, m+0, a+0, d+0}\'',
+        f'sinfo -p {partition} --noheader -o "%n %G" 2>/dev/null | '
+        f'awk -v nf={node_filter} \'nf=="" || index($2, nf) > 0 {{print $1, $2}}\' | '
+        'sort -k1,1 -u | '
+        'awk \'{total++; if(index($2, "nvidia_") > 0) mig++} '
+        'END{printf "GPU_NODES %d %d\\n", total+0, mig+0}\'',
         f'echo "PENDING $(squeue -p {partition} -t PENDING --noheader 2>/dev/null | wc -l)"',
         'echo "PEND_JOBS_BEGIN"',
         # Use -O (long format) for tres-per-node and tres-per-job; awk joins into
@@ -999,7 +1040,10 @@ def query_snapshot(cluster: str, info: dict[str, str], timeout: int) -> dict[str
                     if g > 0:
                         gpus = g
                         break
-            cluster_gpu_groups = info.get("gpu_groups", GPU_GROUPS)
+            cluster_gpu_groups = info.get(
+                "pending_gpu_groups",
+                info.get("gpu_groups", GPU_GROUPS),
+            )
             if gpus is None or gpus not in cluster_gpu_groups:
                 continue
             pending_by_bucket[(gpus, bucket)] += 1
@@ -1029,6 +1073,12 @@ def query_snapshot(cluster: str, info: dict[str, str], timeout: int) -> dict[str
             try:
                 snapshot["gpus_used"] = int(tokens[1])
                 snapshot["gpus_total"] = int(tokens[2])
+            except ValueError:
+                pass
+        elif tokens[0] == "GPU_NODES" and len(tokens) == 3:
+            try:
+                snapshot["gpu_nodes_total"] = int(tokens[1])
+                snapshot["gpu_nodes_mig"] = int(tokens[2])
             except ValueError:
                 pass
         elif tokens[0] == "RUNNING" and len(tokens) == 2:
@@ -1390,6 +1440,7 @@ def compute_cluster_snapshot_rows(
     rows: list[dict[str, object]] | None = None,
     now: int | None = None,
     stale_acct: dict[str, int | None] | None = None,
+    clusters: tuple[str, ...] = TERMINAL_CLUSTERS,
 ) -> list[dict[str, object]]:
     if now is None:
         now = int(datetime.now().timestamp())
@@ -1416,14 +1467,21 @@ def compute_cluster_snapshot_rows(
                 users_by_cluster[cluster_name].add(u)
 
     result: list[dict[str, object]] = []
-    for cluster in TERMINAL_CLUSTERS:
+    for cluster in clusters:
         info = CLUSTER_INFO[cluster]
         snap = snapshots.get(cluster, {})
-        idle, mix, alloc = snap.get("idle"), snap.get("mix"), snap.get("alloc")
-        if None not in (idle, mix, alloc):
-            active_str = str(int(idle) + int(mix) + int(alloc))  # type: ignore[arg-type]
+        gpu_nodes_total = snap.get("gpu_nodes_total")
+        gpu_nodes_mig = snap.get("gpu_nodes_mig")
+        if isinstance(gpu_nodes_total, int):
+            active_str = str(gpu_nodes_total)
+            if isinstance(gpu_nodes_mig, int) and gpu_nodes_mig > 0:
+                active_str = f"{gpu_nodes_total} ({gpu_nodes_mig} MIG)"
         else:
-            active_str = "N/A"
+            idle, mix, alloc = snap.get("idle"), snap.get("mix"), snap.get("alloc")
+            if None not in (idle, mix, alloc):
+                active_str = str(int(idle) + int(mix) + int(alloc))  # type: ignore[arg-type]
+            else:
+                active_str = "N/A"
         pending = snap.get("pending")
         pending_str = "N/A" if pending is None else str(pending)
         lfs = snap.get("levelfs")
@@ -1469,6 +1527,7 @@ def compute_cluster_snapshot_rows(
         result.append(
             {
                 "cluster": _CLUSTER_ABBR.get(cluster, cluster),
+                "location": CLUSTER_LOCATION.get(cluster, "DRAC"),
                 "node_type": info["node_type"],
                 "active_nodes": active_str,
                 "levelfs": lfs_str,
@@ -1864,12 +1923,9 @@ def _hours_label(time_limit: str) -> str:
 
 
 def plot_series(
-    series: dict[str, list[dict[str, object]]],
     rows: list[dict[str, object]],
     plot_path: Path,
     window_days: int,
-    time_limit: str,
-    gpus: int,
 ) -> None:
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
     import matplotlib
@@ -1880,16 +1936,125 @@ def plot_series(
     import matplotlib.ticker as mticker
     import numpy as np
 
-    colors = {
-        "narval": "#1f77b4",
-        "trillium": "#2ca02c",
-        "killarney": "#d62728",
-    }
-    cluster_labels = {
-        "narval": f"Narval {gpus}xA100",
-        "trillium": f"Trillium {gpus}xH100",
-        "killarney": f"Killarney {gpus}xL40S",
-    }
+    def _bucket_label(cluster: str, gpus: int, bucket: str) -> str:
+        return f"{_CLUSTER_ABBR.get(cluster, cluster)} {bucket} {gpus} GPU"
+
+    def _top_bucket_keys(
+        rows: list[dict[str, object]],
+        window_days: int,
+        limit: int = 5,
+    ) -> list[tuple[str, int, str]]:
+        latest = latest_epoch(rows)
+        if latest is None:
+            return []
+        cutoff = latest - window_days * SECONDS_PER_DAY
+        counts: dict[tuple[str, int, str], int] = defaultdict(int)
+        last_seen: dict[tuple[str, int, str], int] = defaultdict(int)
+        queue_vals: dict[tuple[str, int, str], list[int]] = defaultdict(list)
+        for row in rows:
+            submit_epoch = int(row["submit_epoch"])
+            if submit_epoch < cutoff:
+                continue
+            cluster = str(row["cluster"])
+            gpus = int(row["gpus"])
+            if cluster not in DEFAULT_CLUSTERS or gpus not in GPU_GROUPS:
+                continue
+            bucket = bucket_for_time_limit(int(row["time_limit_seconds"]))
+            if bucket is None:
+                continue
+            key = (cluster, gpus, bucket)
+            counts[key] += 1
+            queue_vals[key].append(int(row["queue_seconds"]))
+            if submit_epoch > last_seen[key]:
+                last_seen[key] = submit_epoch
+
+        # Exclude combinations whose median queue time is near-zero — they
+        # start immediately and produce an invisible line at y=0.
+        MIN_MEDIAN_SECONDS = 60
+        eligible = {k for k, vals in queue_vals.items() if percentile(vals, 50) >= MIN_MEDIAN_SECONDS}
+
+        cluster_order = {cluster: idx for idx, cluster in enumerate(DEFAULT_CLUSTERS)}
+        gpu_order = {gpus: idx for idx, gpus in enumerate(GPU_GROUPS)}
+        bucket_order = {label: idx for idx, (label, _, _) in enumerate(TIME_BUCKETS)}
+        ordered = sorted(
+            (k for k in counts if k in eligible),
+            key=lambda key: (
+                -counts[key],
+                cluster_order.get(key[0], len(cluster_order)),
+                bucket_order.get(key[2], len(bucket_order)),
+                gpu_order.get(key[1], len(gpu_order)),
+                -last_seen.get(key, 0),
+            ),
+        )
+        return ordered[:limit]
+
+    def _bucket_series(
+        rows: list[dict[str, object]],
+        selected_keys: list[tuple[str, int, str]],
+        window_days: int,
+    ) -> tuple[
+        dict[tuple[str, int, str], list[dict[str, object]]],
+        dict[tuple[str, int, str], list[int]],
+    ]:
+        if not rows or not selected_keys:
+            return {}, {}
+        latest = latest_epoch(rows)
+        if latest is None:
+            return {}, {}
+
+        earliest_day = day_start(min(int(row["submit_epoch"]) for row in rows))
+        max_day = day_start(latest)
+        plot_start_day = max(earliest_day, max_day - (window_days - 1) * SECONDS_PER_DAY)
+        cutoff = latest - window_days * SECONDS_PER_DAY
+        selected = set(selected_keys)
+        values_by_key_day: dict[tuple[str, int, str], dict[int, list[int]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        values_by_key: dict[tuple[str, int, str], list[int]] = defaultdict(list)
+
+        for row in rows:
+            submit_epoch = int(row["submit_epoch"])
+            if submit_epoch < cutoff:
+                continue
+            cluster = str(row["cluster"])
+            gpus = int(row["gpus"])
+            if cluster not in DEFAULT_CLUSTERS or gpus not in GPU_GROUPS:
+                continue
+            bucket = bucket_for_time_limit(int(row["time_limit_seconds"]))
+            if bucket is None:
+                continue
+            key = (cluster, gpus, bucket)
+            if key not in selected:
+                continue
+            queue_seconds = int(row["queue_seconds"])
+            values_by_key_day[key][day_start(submit_epoch)].append(queue_seconds)
+            values_by_key[key].append(queue_seconds)
+
+        series: dict[tuple[str, int, str], list[dict[str, object]]] = {}
+        for key in selected_keys:
+            per_day = values_by_key_day.get(key, {})
+            days: list[dict[str, object]] = []
+            day = plot_start_day
+            while day <= max_day:
+                day_values = per_day.get(day, [])
+                days.append(
+                    {
+                        "day": day,
+                        "daily_median": percentile(day_values, 50.0),
+                        "daily_low": percentile(day_values, PERCENTILE_LOW),
+                        "daily_high": percentile(day_values, PERCENTILE_HIGH),
+                        "samples": len(day_values),
+                    }
+                )
+                day += SECONDS_PER_DAY
+            series[key] = days
+        return series, values_by_key
+
+    top_keys = _top_bucket_keys(rows, window_days, limit=5)
+    series, bucket_values = _bucket_series(rows, top_keys, window_days)
+    _latest = latest_epoch(rows)
+    _max_day = day_start(_latest) if _latest is not None else int(datetime.now().timestamp())
+
     plot_path.parent.mkdir(parents=True, exist_ok=True)
     fig, (ax_trend, ax_dist) = plt.subplots(
         1,
@@ -1899,67 +2064,73 @@ def plot_series(
         gridspec_kw={"width_ratios": [3, 1]},
     )
 
-    latest = latest_epoch(rows)
-    cutoff = None if latest is None else latest - window_days * SECONDS_PER_DAY
-    cluster_window_values: dict[str, list[int]] = {}
-    for cluster in DEFAULT_CLUSTERS:
-        cluster_window_values[cluster] = [
-            int(row["queue_seconds"])
-            for row in rows
-            if str(row["cluster"]) == cluster
-            and (cutoff is None or int(row["submit_epoch"]) >= cutoff)
-        ]
+    if not top_keys:
+        ax_trend.text(
+            0.5,
+            0.5,
+            "no data",
+            ha="center",
+            va="center",
+            transform=ax_trend.transAxes,
+            color="#9ca3af",
+            fontsize=13,
+        )
+        ax_trend.axis("off")
+        ax_dist.axis("off")
+        fig.tight_layout()
+        fig.savefig(plot_path, dpi=160)
+        plt.close(fig)
+        return
 
-    cap_hours = 5
+    import math as _math
+    all_medians = [
+        float(row["daily_median"])
+        for key in top_keys
+        for row in series.get(key, [])
+        if row["daily_median"] is not None
+    ]
+    max_median = max(all_medians) if all_medians else 3600
+    cap_hours = min(max(1, _math.ceil(max_median / 3600)), 12)
     cap = cap_hours * 3600
+    cmap = plt.get_cmap("tab10")
 
-    for cluster in DEFAULT_CLUSTERS:
-        if cluster not in colors:
-            continue
-        cluster_series = series.get(cluster, [])
+    for idx, key in enumerate(top_keys):
+        cluster, gpus, bucket = key
+        cluster_series = series.get(key, [])
         if not cluster_series:
             continue
         days = [day_label(int(row["day"])) for row in cluster_series]
         daily_median = _to_floats([row["daily_median"] for row in cluster_series])
         daily_low = _to_floats([row["daily_low"] for row in cluster_series])
         daily_high = _to_floats([row["daily_high"] for row in cluster_series])
-        color = colors[cluster]
-        display_name = cluster_labels[cluster]
-        short_name = display_name.split()[0]
+        color = cmap(idx % 10)
+        display_name = _bucket_label(cluster, gpus, bucket)
+        sample_count = len(bucket_values.get(key, []))
+
+        # Drop days with no data so the line connects across gaps instead of breaking.
+        valid = [i for i, v in enumerate(daily_median) if not np.isnan(v)]
+        vdays = [days[i] for i in valid]
+        vmedian = [daily_median[i] for i in valid]
+        vlow = [daily_low[i] if not np.isnan(daily_low[i]) else daily_median[i] for i in valid]
+        vhigh = [daily_high[i] if not np.isnan(daily_high[i]) else daily_median[i] for i in valid]
 
         ax_trend.fill_between(
-            days,
-            daily_low,
-            daily_high,
+            vdays,
+            vlow,
+            vhigh,
             color=color,
             alpha=0.18,
             linewidth=0,
-            label=f"{short_name} IQR",
+            label="_nolegend_",
         )
         ax_trend.plot(
-            days,
-            daily_low,
-            color=color,
-            linewidth=1.0,
-            linestyle="--",
-            alpha=0.85,
-        )
-        ax_trend.plot(
-            days,
-            daily_high,
-            color=color,
-            linewidth=1.0,
-            linestyle="--",
-            alpha=0.85,
-        )
-        ax_trend.plot(
-            days,
-            daily_median,
+            vdays,
+            vmedian,
             color=color,
             linewidth=2.0,
             marker="o",
             markersize=4,
-            label=display_name,
+            label=f"{display_name} (n={sample_count})",
         )
 
     ax_trend.set_title("")
@@ -1974,37 +2145,35 @@ def plot_series(
     )
     ax_trend.tick_params(axis="both", labelsize=14)
     ax_trend.grid(True, linewidth=0.5, alpha=0.35)
+    ax_trend.set_xlim(
+        day_label(_max_day - (window_days - 1) * SECONDS_PER_DAY),
+        day_label(_max_day + SECONDS_PER_DAY),
+    )
     handles, labels = ax_trend.get_legend_handles_labels()
     handle_for_label = dict(zip(labels, handles))
     ordered: list[tuple[object, str]] = []
-    for cluster in DEFAULT_CLUSTERS:
-        if cluster not in cluster_labels:
-            continue
-        line_label = cluster_labels[cluster]
-        band_label = f"{line_label.split()[0]} IQR"
+    for key in top_keys:
+        cluster, gpus, bucket = key
+        line_label = f"{_bucket_label(cluster, gpus, bucket)} (n={len(bucket_values.get(key, []))})"
         if line_label in handle_for_label:
             ordered.append((handle_for_label[line_label], line_label))
-        if band_label in handle_for_label:
-            ordered.append((handle_for_label[band_label], band_label))
     ax_trend.legend(
         [h for h, _ in ordered],
         [l for _, l in ordered],
-        ncol=3,
+        ncol=2,
         fontsize=13,
         loc="upper right",
     )
 
     bin_edges = np.linspace(0, cap, 21)
-    for cluster in DEFAULT_CLUSTERS:
-        if cluster not in colors:
-            continue
-        values = cluster_window_values.get(cluster, [])
+    for idx, key in enumerate(top_keys):
+        cluster, gpus, bucket = key
+        values = bucket_values.get(key, [])
         if not values:
             continue
         over = sum(1 for v in values if v > cap)
-        color = colors[cluster]
-        display_name = cluster_labels[cluster]
-        label = display_name
+        color = cmap(idx % 10)
+        label = _bucket_label(cluster, gpus, bucket)
         if over:
             label += f" (>{cap_hours}h: {over})"
         ax_dist.hist(
@@ -2024,7 +2193,7 @@ def plot_series(
     ax_dist.set_xlabel("Density", fontsize=15)
     ax_dist.tick_params(axis="both", labelsize=14)
     ax_dist.grid(True, linewidth=0.5, alpha=0.35)
-    ax_dist.legend(fontsize=12, loc="upper right")
+    ax_dist.legend(fontsize=11, loc="upper right")
 
     fig.tight_layout()
     fig.savefig(plot_path, dpi=160)
@@ -2087,6 +2256,10 @@ def plot_daily_gpu_hours(
     ax.set_xlabel("Day", fontsize=15)
     ax.set_ylabel("GPU hours", fontsize=15)
     ax.set_ylim(bottom=0)
+    ax.set_xlim(
+        day_label(max_day - (window_days - 1) * SECONDS_PER_DAY),
+        day_label(max_day + SECONDS_PER_DAY),
+    )
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ax.xaxis.get_major_locator()))
     ax.tick_params(axis="both", labelsize=14)
@@ -2101,8 +2274,8 @@ def plot_daily_gpu_hours(
     return buf.read()
 
 
-_CLUSTER_ABBR = {"narval": "Narval", "trillium": "Trillium", "killarney": "Killarney-L40S", "killarney_h100": "Killarney-H100", "dgx": "DGX", "apollo": "Apollo", "turing": "Turing", "lovelace": "Lovelace", "ums": "UMS", "um1": "UM1", "um2": "UM2", "um3": "UM3"}
-_CLUSTER_COLOR = {"narval": "#1f77b4", "trillium": "#2ca02c", "killarney": "#d62728", "killarney_h100": "#ff7f0e"}
+_CLUSTER_ABBR = {"narval": "Narval", "trillium": "Trillium", "killarney": "Killarney-L40S", "killarney_h100": "Killarney-H100", "fir": "Fir", "rorqual": "Rorqual", "tamia": "TamIA", "dgx": "DGX", "apollo": "Apollo", "turing": "Turing", "lovelace": "Lovelace", "ums": "UMS", "um1": "UM1", "um2": "UM2", "um3": "UM3"}
+_CLUSTER_COLOR = {"narval": "#1f77b4", "trillium": "#2ca02c", "killarney": "#d62728", "killarney_h100": "#ff7f0e", "fir": "#9467bd", "rorqual": "#17becf", "tamia": "#8c564b"}
 
 
 def _fmt_queue(seconds: float | None) -> str:
@@ -2111,16 +2284,17 @@ def _fmt_queue(seconds: float | None) -> str:
     h = seconds / 3600
     if h < 1:
         return f"{h * 60:.0f}m"
-    return f"{h:.1f}h"
+    return f"{int(round(h))}h"
 
 
 def plot_split_queue_heatmap(
     rows: list[dict[str, object]],
     title: str,
     now: int | None = None,
-    median_lookback_hours: int = 7 * 24,
+    median_lookback_hours: int = 14 * 24,
+    clusters: tuple[str, ...] = DEFAULT_CLUSTERS,
 ) -> bytes:
-    """PNG heatmap with split-triangle cells: upper-left = last observed, lower-right = 7d median.
+    """PNG heatmap with split-triangle cells: upper-left = last observed, lower-right = 14d median.
 
     Each cell's diagonal divides it into:
       - upper-left triangle (↖): most-recent completed-job queue time, OR longest current pending
@@ -2146,7 +2320,7 @@ def plot_split_queue_heatmap(
     for row in rows:
         cluster = str(row["cluster"])
         gpus = int(row["gpus"])
-        if gpus not in GPU_GROUPS:
+        if gpus not in _heatmap_gpu_groups(cluster):
             continue
         bucket = bucket_for_time_limit(int(row["time_limit_seconds"]))
         if bucket is None:
@@ -2164,8 +2338,12 @@ def plot_split_queue_heatmap(
 
     aggregates = aggregate_bucket_stats(rows, now=now, lookback_hours=median_lookback_hours)
 
-    col_keys = [(c, g) for c in DEFAULT_CLUSTERS for g in GPU_GROUPS]
-    col_labels = [f"{_CLUSTER_ABBR[c]}\n{g}GPU" for c, g in col_keys]
+    cluster_col_start: dict[str, int] = {}
+    col_keys: list[tuple[str, int]] = []
+    for cluster in clusters:
+        cluster_col_start[cluster] = len(col_keys)
+        col_keys.extend((cluster, g) for g in _heatmap_gpu_groups(cluster))
+    col_labels = [f"{g}GPU" for _, g in col_keys]
     row_labels = [label for label, _, _ in TIME_BUCKETS]
     n_rows, n_cols = len(TIME_BUCKETS), len(col_keys)
 
@@ -2208,7 +2386,7 @@ def plot_split_queue_heatmap(
         luma = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
         return "black" if luma > 0.45 else "white"
 
-    fig, ax = plt.subplots(figsize=(15, 4.6))
+    fig, ax = plt.subplots(figsize=(max(12.5, 1.35 * n_cols), 5.3))
     for ri in range(n_rows):
         for ci in range(n_cols):
             ul_tri = [(ci - 0.5, ri - 0.5), (ci - 0.5, ri + 0.5), (ci + 0.5, ri + 0.5)]
@@ -2218,13 +2396,13 @@ def plot_split_queue_heatmap(
             if np.isnan(ul_val):
                 ax.add_patch(Polygon(ul_tri, closed=True, color="#e5e7eb", zorder=0))
                 ax.text(ci - 0.20, ri + 0.20, "–",
-                        ha="center", va="center", fontsize=10, color="#9ca3af")
+                        ha="center", va="center", fontsize=13, color="#9ca3af")
             else:
                 color = cmap(norm(max(ul_val, vmin)))
                 ax.add_patch(Polygon(ul_tri, closed=True, color=color, zorder=0))
                 tc = _txt_color(color)
                 ax.text(ci - 0.18, ri + 0.26, _fmt_queue(ul_val * 3600),
-                        ha="center", va="center", fontsize=9, fontweight="bold", color=tc)
+                        ha="center", va="center", fontsize=13, fontweight="bold", color=tc)
                 d = last_age_d[ri, ci]
                 if last_is_now[ri, ci]:
                     age_str = "now"
@@ -2233,45 +2411,47 @@ def plot_split_queue_heatmap(
                 elif d < 1:
                     age_str = f"{d * 24:.0f}h"
                 else:
-                    age_str = f"{d:.1f}d"
+                    age_str = f"{int(round(d))}d"
                 ax.text(ci - 0.27, ri + 0.07, age_str,
-                        ha="center", va="center", fontsize=6.5, color=tc)
+                        ha="center", va="center", fontsize=11.5, color=tc)
 
             lr_val = med_h[ri, ci]
             if np.isnan(lr_val):
                 ax.add_patch(Polygon(lr_tri, closed=True, color="#e5e7eb", zorder=0))
                 ax.text(ci + 0.20, ri - 0.20, "–",
-                        ha="center", va="center", fontsize=10, color="#9ca3af")
+                        ha="center", va="center", fontsize=13, color="#9ca3af")
             else:
                 color = cmap(norm(max(lr_val, vmin)))
                 ax.add_patch(Polygon(lr_tri, closed=True, color=color, zorder=0))
                 tc = _txt_color(color)
                 ax.text(ci + 0.18, ri - 0.18, _fmt_queue(lr_val * 3600),
-                        ha="center", va="center", fontsize=9, fontweight="bold", color=tc)
+                        ha="center", va="center", fontsize=13, fontweight="bold", color=tc)
                 ax.text(ci + 0.27, ri - 0.36, f"n={med_n[ri, ci]}",
-                        ha="center", va="center", fontsize=6.5, color=tc)
+                        ha="center", va="center", fontsize=11.5, color=tc)
 
-    for i in range(1, len(DEFAULT_CLUSTERS)):
-        ax.axvline(i * len(GPU_GROUPS) - 0.5, color="#374151", linewidth=2)
-    for gi, cluster in enumerate(DEFAULT_CLUSTERS):
-        cx = gi * len(GPU_GROUPS) + (len(GPU_GROUPS) - 1) / 2
+    for cluster in list(clusters)[1:]:
+        ax.axvline(cluster_col_start[cluster] - 0.5, color="#374151", linewidth=2)
+    for gi, cluster in enumerate(clusters):
+        n_g = len(_heatmap_gpu_groups(cluster))
+        cx = cluster_col_start[cluster] + (n_g - 1) / 2
         ax.text(cx, n_rows - 0.5 + 0.10, _CLUSTER_ABBR[cluster].upper(),
-                ha="center", va="bottom", fontsize=10, fontweight="bold",
+                ha="center", va="bottom", fontsize=17, fontweight="bold",
                 color=_CLUSTER_COLOR[cluster], transform=ax.transData)
 
     ax.set_xlim(-0.5, n_cols - 0.5)
     ax.set_ylim(-0.5, n_rows - 0.5 + 0.45)
     ax.set_xticks(range(n_cols))
-    ax.set_xticklabels(col_labels, fontsize=8.5)
+    ax.set_xticklabels(col_labels, fontsize=14)
     ax.set_yticks(range(n_rows))
-    ax.set_yticklabels(row_labels, fontsize=10)
-    ax.set_ylabel("max time limit", fontsize=9, color="#6b7280")
+    ax.set_yticklabels(row_labels, fontsize=15)
+    ax.set_ylabel("max time limit", fontsize=14, color="#6b7280")
     ax.tick_params(top=False, bottom=False, left=False, right=False)
 
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)  # type: ignore[attr-defined]
     sm.set_array([])
     cb = fig.colorbar(sm, ax=ax, shrink=0.85, pad=0.01)
-    cb.set_label("Queue time (h)", fontsize=9)
+    cb.set_label("Queue time (h)", fontsize=14)
+    cb.ax.tick_params(labelsize=12)
 
     fig.tight_layout()
     buf = _io.BytesIO()
@@ -2602,6 +2782,7 @@ def plot_trail_utilization_timeline(
 def plot_pending_heatmap(
     snapshots: dict[str, dict[str, object]],
     title: str = "Current Pending Jobs — All Cluster Users (live squeue)",
+    clusters: tuple[str, ...] = DEFAULT_CLUSTERS,
 ) -> bytes:
     """PNG heatmap of pending job counts from squeue (all users, all groups)."""
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
@@ -2612,11 +2793,8 @@ def plot_pending_heatmap(
     import matplotlib.pyplot as plt
     import numpy as np
 
-    def _cluster_gpu_groups(c: str) -> tuple:
-        return CLUSTER_INFO[c].get("gpu_groups", GPU_GROUPS)
-
-    col_keys = [(c, g) for c in DEFAULT_CLUSTERS for g in _cluster_gpu_groups(c)]
-    col_labels = [f"{_CLUSTER_ABBR[c]}\n{g}GPU" for c, g in col_keys]
+    col_keys = [(c, g) for c in clusters for g in _heatmap_gpu_groups(c)]
+    col_labels = [f"{g}GPU" for _, g in col_keys]
     row_labels = [label for label, _, _ in TIME_BUCKETS]
     n_rows, n_cols = len(TIME_BUCKETS), len(col_keys)
 
@@ -2636,48 +2814,49 @@ def plot_pending_heatmap(
     # Pre-compute per-cluster column start indices for separators and labels.
     cluster_col_start: dict[str, int] = {}
     ci = 0
-    for c in DEFAULT_CLUSTERS:
+    for c in clusters:
         cluster_col_start[c] = ci
-        ci += len(_cluster_gpu_groups(c))
+        ci += len(_heatmap_gpu_groups(c))
 
-    fig, ax = plt.subplots(figsize=(15, 4.2))
+    fig, ax = plt.subplots(figsize=(max(13.5, 1.45 * n_cols), 5.5))
     for ri in range(n_rows):
         for ci in range(n_cols):
             count = int(data[ri, ci])
             if count == 0:
                 ax.add_patch(plt.Rectangle((ci - 0.5, ri - 0.5), 1, 1, color="#e5e7eb", zorder=0))
-                ax.text(ci, ri, "0", ha="center", va="center", fontsize=11, color="#9ca3af")
+                ax.text(ci, ri, "0", ha="center", va="center", fontsize=20, color="#9ca3af")
             else:
                 color = cmap(norm(count))
                 ax.add_patch(plt.Rectangle((ci - 0.5, ri - 0.5), 1, 1, color=color, zorder=0))
                 luma = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
                 txt_color = "black" if luma > 0.45 else "white"
                 ax.text(ci, ri, str(count), ha="center", va="center",
-                        fontsize=12, fontweight="bold", color=txt_color)
+                        fontsize=20, fontweight="bold", color=txt_color)
 
-    for cluster in list(DEFAULT_CLUSTERS)[1:]:
+    for cluster in list(clusters)[1:]:
         ax.axvline(cluster_col_start[cluster] - 0.5, color="#374151", linewidth=2)
-    for cluster in DEFAULT_CLUSTERS:
-        n_g = len(_cluster_gpu_groups(cluster))
+    for cluster in clusters:
+        n_g = len(_heatmap_gpu_groups(cluster))
         cx = cluster_col_start[cluster] + (n_g - 1) / 2
         ax.text(cx, n_rows - 0.5 + 0.10, _CLUSTER_ABBR[cluster].upper(),
-                ha="center", va="bottom", fontsize=10, fontweight="bold",
+                ha="center", va="bottom", fontsize=17, fontweight="bold",
                 color=_CLUSTER_COLOR[cluster], transform=ax.transData)
 
     ax.set_xlim(-0.5, n_cols - 0.5)
     ax.set_ylim(-0.5, n_rows - 0.5 + 0.45)
     ax.set_xticks(range(n_cols))
-    ax.set_xticklabels(col_labels, fontsize=8.5)
+    ax.set_xticklabels(col_labels, fontsize=15)
     ax.set_yticks(range(n_rows))
-    ax.set_yticklabels(row_labels, fontsize=10)
-    ax.set_ylabel("max time limit", fontsize=9, color="#6b7280")
+    ax.set_yticklabels(row_labels, fontsize=16)
+    ax.set_ylabel("max time limit", fontsize=14, color="#6b7280")
     ax.tick_params(top=False, bottom=False, left=False, right=False)
     ax.set_title("")
 
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)  # type: ignore[attr-defined]
     sm.set_array([])
     cb = fig.colorbar(sm, ax=ax, shrink=0.85, pad=0.01)
-    cb.set_label("# pending jobs", fontsize=9)
+    cb.set_label("# pending jobs", fontsize=14)
+    cb.ax.tick_params(labelsize=12)
 
     fig.tight_layout()
     buf = _io.BytesIO()
@@ -2724,42 +2903,66 @@ def write_html(
     stale_by_abbr = {
         _CLUSTER_ABBR.get(c, c): age for c, age in stale.items()
     }
-    snap_rows = compute_cluster_snapshot_rows(
-        snapshots, rows=rows, stale_acct=stale_acct,
-    )
-    snapshot_html_rows = []
-    for r in snap_rows:
-        cluster_label = str(r["cluster"])
-        row_class = ""
-        cluster_cell = f'<td class="cluster">{html.escape(cluster_label)}</td>'
-        if cluster_label in stale_by_abbr:
-            age = stale_by_abbr[cluster_label]
-            tag_text = "outage; no cache" if age is None else f"stale · {format_staleness(age)}"
-            row_class = ' class="stale"'
-            cluster_cell = (
-                '<td class="cluster">'
-                f"{html.escape(cluster_label)} "
-                f'<span class="stale-tag">({html.escape(tag_text)})</span>'
-                "</td>"
+    def _cluster_summary_table_html(
+        clusters: tuple[str, ...],
+        *,
+        include_location: bool = False,
+        location_last: bool = False,
+        include_levelfs: bool = True,
+        include_users: bool = True,
+    ) -> str:
+        snap_rows = compute_cluster_snapshot_rows(
+            snapshots, rows=rows, stale_acct=stale_acct, clusters=clusters,
+        )
+        html_rows = []
+        for r in snap_rows:
+            cluster_label = str(r["cluster"])
+            row_class = ""
+            cluster_cell = f'<td class="cluster">{html.escape(cluster_label)}</td>'
+            if cluster_label in stale_by_abbr:
+                age = stale_by_abbr[cluster_label]
+                tag_text = "outage; no cache" if age is None else f"stale · {format_staleness(age)}"
+                row_class = ' class="stale"'
+                cluster_cell = (
+                    '<td class="cluster">'
+                    f"{html.escape(cluster_label)} "
+                    f'<span class="stale-tag">({html.escape(tag_text)})</span>'
+                    "</td>"
+                )
+            qcolor = _color_for_queue_seconds(r.get("trail_qtime_7d_secs"))  # type: ignore[arg-type]
+            qtime_cell = (
+                f'<td style="color:{qcolor}; font-weight:600;">{html.escape(str(r["trail_qtime_7d"]))}</td>'
+                if qcolor
+                else f'<td>{html.escape(str(r["trail_qtime_7d"]))}</td>'
             )
-        qcolor = _color_for_queue_seconds(r.get("trail_qtime_7d_secs"))  # type: ignore[arg-type]
-        qtime_cell = (
-            f'<td style="color:{qcolor}; font-weight:600;">{html.escape(str(r["trail_qtime_7d"]))}</td>'
-            if qcolor
-            else f'<td>{html.escape(str(r["trail_qtime_7d"]))}</td>'
-        )
-        snapshot_html_rows.append(
-            f"        <tr{row_class}>"
-            f"{cluster_cell}"
-            f'<td>{html.escape(str(r["node_type"]))}</td>'
-            f'<td>{html.escape(str(r["active_nodes"]))}</td>'
-            f'<td>{html.escape(str(r["levelfs"]))}</td>'
-            f'<td>{html.escape(str(r["trail_gpu_hrs_7d"]))}</td>'
-            f'{qtime_cell}'
-            f'<td>{html.escape(str(r["trail_users_7d"]))}</td>'
-            "</tr>"
-        )
-    snapshot_table_html = "\n".join(snapshot_html_rows)
+            cells = [cluster_cell]
+            if include_location and not location_last:
+                cells.append(f'<td>{html.escape(str(r["location"]))}</td>')
+            cells.extend([
+                f'<td>{html.escape(str(r["node_type"]))}</td>',
+                f'<td>{html.escape(str(r["active_nodes"]))}</td>',
+            ])
+            if include_levelfs:
+                cells.append(f'<td>{html.escape(str(r["levelfs"]))}</td>')
+            cells.extend([
+                f'<td>{html.escape(str(r["trail_gpu_hrs_7d"]))}</td>',
+                qtime_cell,
+            ])
+            if include_users:
+                cells.append(f'<td>{html.escape(str(r["trail_users_7d"]))}</td>')
+            if include_location and location_last:
+                cells.append(f'<td>{html.escape(str(r["location"]))}</td>')
+            html_rows.append(f"        <tr{row_class}>" + "".join(cells) + "</tr>")
+        return "\n".join(html_rows)
+
+    drac_allocated_table_html = _cluster_summary_table_html(DRAC_ALLOCATED_SUMMARY_CLUSTERS)
+    other_cluster_table_html = _cluster_summary_table_html(
+        OTHER_SUMMARY_CLUSTERS,
+        include_location=True,
+        location_last=True,
+        include_levelfs=False,
+        include_users=False,
+    )
 
     trail_rows = compute_trail_snapshot_rows(snapshots)
     trail_html_rows: list[str] = []
@@ -2783,26 +2986,18 @@ def write_html(
             if ucolor
             else f'<td>{html.escape(str(r["util_7d"]))}</td>'
         )
-        mcolor = _color_for_util_pct(r.get("mem_util_7d_pct"))  # type: ignore[arg-type]
-        mem_util_7d_cell = (
-            f'<td style="color:{mcolor}; font-weight:600;">{html.escape(str(r["mem_util_7d"]))}</td>'
-            if mcolor
-            else f'<td>{html.escape(str(r["mem_util_7d"]))}</td>'
-        )
         trail_html_rows.append(
             f"        <tr{row_class}>"
             f"{cluster_cell}"
             f'<td>{html.escape(str(r["node_type"]))}</td>'
             f'<td>{html.escape(str(r["gpus"]))}</td>'
-            f'<td>{html.escape(str(r["mem_util"]))}</td>'
             f'<td>{html.escape(str(r["users"]))}</td>'
             f'{util_cell}'
-            f'{mem_util_7d_cell}'
             f'<td>{html.escape(str(r["users_7d"]))}</td>'
             "</tr>"
         )
     trail_table_html = "\n".join(trail_html_rows) if trail_html_rows else (
-        '        <tr><td colspan="8" class="muted">No TRAIL hosts configured.</td></tr>'
+        '        <tr><td colspan="6" class="muted">No TRAIL hosts configured.</td></tr>'
     )
 
     if stale:
@@ -2845,21 +3040,22 @@ def write_html(
     # --- heatmaps / distribution (TRAIL members) ---
     now_epoch = int(datetime.now().timestamp())
     try:
-        heatmap_split_html = _img(
+        heatmap_queue_html = _img(
             plot_split_queue_heatmap(
                 rows,
-                "Queue Time — TRAIL Members (↖ last observed, ↘ 7d median)",
+                "Queue Time — External Clusters (↖ last observed, ↘ 14d median)",
                 now=now_epoch,
+                clusters=QUEUE_HEATMAP_CLUSTERS,
             ),
-            "Combined queue time heatmap (last observed + 7d median)",
+            "Combined queue time heatmap for external clusters",
         )
     except Exception:
-        heatmap_split_html = '<p class="muted">Combined heatmap unavailable.</p>'
+        heatmap_queue_html = '<p class="muted">Combined heatmap unavailable.</p>'
 
     # --- pending heatmap (squeue, all cluster users) ---
     try:
         heatmap_pending_html = _img(
-            plot_pending_heatmap(snapshots),
+            plot_pending_heatmap(snapshots, clusters=PENDING_HEATMAP_CLUSTERS),
             "Pending jobs heatmap, all cluster users",
         )
     except Exception:
@@ -2882,21 +3078,6 @@ def write_html(
         )
     except Exception:
         trail_timeline_html = '<p class="muted">TRAIL utilisation timeline unavailable.</p>'
-
-    # --- distribution box plots (TRAIL members) ---
-    dist_lookback_days = 7
-    try:
-        dist_lab_html = _img(
-            plot_distributions(
-                rows,
-                "Queue Time Distribution — TRAIL Members, Last 7 Days",
-                now=now_epoch,
-                lookback_hours=dist_lookback_days * 24,
-            ),
-            "Queue distribution, TRAIL members",
-        )
-    except Exception:
-        dist_lab_html = '<p class="muted">Distribution plot unavailable.</p>'
 
     # --- daily job count ---
     try:
@@ -2938,7 +3119,8 @@ def write_html(
         except Exception:
             continue
 
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z").strip()
+    update_epoch = int(datetime.now().timestamp())
+    timestamp = datetime.fromtimestamp(update_epoch).strftime("%Y-%m-%d %H:%M:%S %Z").strip()
     refresh = max(30, int(refresh_seconds))
     if refresh % 3600 == 0:
         refresh_label = f"{refresh // 3600}h"
@@ -2946,7 +3128,10 @@ def write_html(
         refresh_label = f"{refresh // 60}m"
     else:
         refresh_label = f"{refresh}s"
-    subtitle = f"Auto-refresh every {refresh_label}"
+    subtitle = (
+        f'Auto-refresh every {refresh_label} - Last update '
+        f'<span id="last-update-age" data-updated-epoch="{update_epoch}">just now</span>'
+    )
 
     document = f"""<!DOCTYPE html>
 <html lang="en">
@@ -3073,6 +3258,30 @@ def write_html(
     display: block;
   }}
 </style>
+<script>
+  function updateLastUpdateAge() {{
+    const el = document.getElementById("last-update-age");
+    if (!el) return;
+    const updated = Number(el.dataset.updatedEpoch || 0);
+    if (!updated) return;
+    const elapsed = Math.max(0, Math.floor(Date.now() / 1000) - updated);
+    let label;
+    if (elapsed < 60) {{
+      label = "just now";
+    }} else if (elapsed < 3600) {{
+      label = `${{Math.floor(elapsed / 60)}}m ago`;
+    }} else if (elapsed < 86400) {{
+      label = `${{(elapsed / 3600).toFixed(1)}}h ago`;
+    }} else {{
+      label = `${{(elapsed / 86400).toFixed(1)}}d ago`;
+    }}
+    el.textContent = label;
+  }}
+  window.addEventListener("DOMContentLoaded", () => {{
+    updateLastUpdateAge();
+    setInterval(updateLastUpdateAge, 30000);
+  }});
+</script>
 </head>
 <body>
   <div class="header">
@@ -3086,7 +3295,7 @@ def write_html(
 
   <div class="cohort-divider">All compute summary</div>
 
-  <h2 class="section">TRAIL members usage <span class="muted">· TRAIL members on external clusters</span></h2>
+  <h2 class="section">Allocated Clusters</h2>
   <table>
     <thead>
       <tr>
@@ -3094,15 +3303,15 @@ def write_html(
       </tr>
     </thead>
     <tbody>
-{snapshot_table_html}
+{drac_allocated_table_html}
     </tbody>
   </table>
 
-  <h2 class="section">UTIAS servers <span class="muted">· lab machines</span></h2>
+  <h2 class="section">UTIAS Servers</h2>
   <table>
     <thead>
       <tr>
-        <th>Cluster</th><th>Node Type</th><th>GPU UTIL</th><th>MEM UTIL</th><th>Users</th><th>{TRAIL_LOOKBACK_DAYS}D GPU UTIL</th><th>{TRAIL_LOOKBACK_DAYS}D MEM UTIL</th><th>{TRAIL_LOOKBACK_DAYS}D USERS</th>
+        <th>Cluster</th><th>Node Type</th><th>GPU UTIL</th><th>Users</th><th>{TRAIL_LOOKBACK_DAYS}D GPU UTIL</th><th>{TRAIL_LOOKBACK_DAYS}D USERS</th>
       </tr>
     </thead>
     <tbody>
@@ -3110,7 +3319,19 @@ def write_html(
     </tbody>
   </table>
 
-  <div class="cohort-divider">TRAIL compute</div>
+  <h2 class="section">Other Clusters</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Cluster</th><th>Node Type</th><th>GPU NODES</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS</th><th>{TRAIL_LOOKBACK_DAYS}D QUEUE TIME</th><th>Location</th>
+      </tr>
+    </thead>
+    <tbody>
+{other_cluster_table_html}
+    </tbody>
+  </table>
+
+  <div class="cohort-divider">UTIAS SERVERS</div>
 
   <h2 class="section">GPU utilisation over time <span class="muted">· last {window_days} days, % of GPUs in use, sampled each refresh</span></h2>
   {trail_timeline_html}
@@ -3120,17 +3341,14 @@ def write_html(
   <h2 class="section">Current pending jobs <span class="muted">· all cluster users, live squeue</span></h2>
   {heatmap_pending_html}
 
-  <h2 class="section">Queue time, last observed vs 7d median <span class="muted">· TRAIL members · ↖ most recent job (or longest current pending) · ↘ median over last 7 days</span></h2>
-  {heatmap_split_html}
+  <h2 class="section">Queue time, last observed vs 14d median <span class="muted">· external clusters · ↖ most recent job (or longest current pending) · ↘ median over last 14 days</span></h2>
+  {heatmap_queue_html}
 
-  <h2 class="section">Historical queue time distribution <span class="muted">· TRAIL members, last 7 days</span></h2>
-  {dist_lab_html}
+  <h2 class="section">Historical queue time trend <span class="muted">· Daily median and IQR, 14 days, top 5 queue-time buckets</span></h2>
+  {trend_html}
 
   <h2 class="section">Daily GPU hours <span class="muted">· TRAIL members, all GPU counts, last {window_days} days</span></h2>
   {job_count_html}
-
-  <h2 class="section">Historical queue time trend <span class="muted">· TRAIL members, daily median, 12h time limit, 4 GPUs, last 7 days</span></h2>
-  {trend_html}
 
   <p class="ts">Last updated {html.escape(timestamp)}</p>
 </body>
@@ -3156,7 +3374,7 @@ _PROBE_CLUSTER_ABBR: dict[str, str] = {
     "rq": "rorqual",
     "ta": "tamia",
 }
-_PROBE_SPEC_RE = re.compile(r"^(kh|rq|ta|nb|n|t|k|v|f)(?:\d+g)?(3h|12h|1d)$")
+_PROBE_SPEC_RE = re.compile(r"^(kh|rq|ta|nb|n|t|k|v|f)(?:(\d+)g)?(3h|12h|1d)$")
 
 
 def _parse_probe_spec(spec: str) -> tuple[str, dict, str, str]:
@@ -3167,10 +3385,12 @@ def _parse_probe_spec(spec: str) -> tuple[str, dict, str, str]:
             f"Invalid probe spec {spec!r}. "
             "Format: {n|t|k|kh}[{N}g]{3h|12h|1d}  e.g. n4g12h"
         )
-    abbr, bucket = m.group(1), m.group(2)
+    abbr, gpus_str, bucket = m.group(1), m.group(2), m.group(3)
     cluster = _PROBE_CLUSTER_ABBR[abbr]
     info = CLUSTER_INFO[cluster]
-    opts_key = _BUCKET_PROBE_KEY[bucket]
+    base_key = _BUCKET_PROBE_KEY[bucket]
+    gpu_key = f"{base_key}_{gpus_str}gpu" if gpus_str else None
+    opts_key = gpu_key if gpu_key and info.get(gpu_key) else base_key
     opts = info.get(opts_key, "")
     if not opts:
         raise SystemExit(f"No sbatch opts configured for {cluster} {bucket}")
@@ -3215,7 +3435,7 @@ def submit_all_probes(timeout: int, spec: str = "all") -> int:
     ]
 
     if spec == "all":
-        probe_specs = [_parse_probe_spec(s) for s in ("n4g12h", "t4g12h", "k4g12h")]
+        probe_specs = [_parse_probe_spec(s) for s in ("n4g12h", "n1g1d", "t4g12h", "k4g12h")]
     else:
         probe_specs = [_parse_probe_spec(spec)]
 
@@ -3302,7 +3522,11 @@ def run_report(args: argparse.Namespace) -> int:
     for failure in failures:
         print(failure)
 
-    stale = merge_staleness(stale_acct, stale_snap)
+    stale = {
+        cluster: age
+        for cluster, age in merge_staleness(stale_acct, stale_snap).items()
+        if cluster in DASHBOARD_STALE_CLUSTERS
+    }
     if stale:
         print()
         print("⚠ Stale cluster data (using cached values from a previous run):")
@@ -3337,10 +3561,7 @@ def run_report(args: argparse.Namespace) -> int:
     if args.all:
         print_all(series, args.window)
     if not args.no_plot:
-        plot_series(
-            series, plot_rows, args.plot, args.window,
-            args.time_limit, args.gpus,
-        )
+        plot_series(rows, args.plot, args.window)
         print(f"Plot written to {args.plot}")
     if args.html is not None and not args.no_html:
         plot_for_html = args.plot if not args.no_plot else None
