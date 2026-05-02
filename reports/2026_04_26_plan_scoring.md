@@ -1,6 +1,10 @@
 # Plan Scoring Beyond Hard Heuristic Feasibility
 
-2026-04-26
+2026-04-26 (revised 2026-05-02)
+
+## Role in minS2
+
+The scoring work feeds **minS2** (`reports/2026_04_28_paper_plan.md` north star: stage-2 with everything off except ego queries + planning task/loss). The conflict head's scoring path (`evalmatchmode` + `image_at_det` conflict input, Stream B1) is the only collision-avoidance signal that survives in minS2 — the hard rescore path implicitly relied on the K/V agent tokens, while `evalmatchmode` is a learned scorer that operates on planner-internal logits. minS2 (`_egostatus_minS2`, Killarney 3397346, in flight) inherits `evalmatchmode` directly and additionally swaps the conflict head's agent_token input for image-at-det features. If minS2 ties the headline, the scoring story for the paper is "v4 evalmatchmode + image-at-det conflict head; hard rescore is no longer needed once K/V is removed."
 
 ## TODO
 

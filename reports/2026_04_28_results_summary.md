@@ -1,9 +1,27 @@
 # Results Summary for Paper Plan
 
-Date: 2026-04-29
+Date: 2026-04-29 (revised 2026-05-02)
 
 Scope: concise summary of recent results relevant to `reports/2026_04_28_paper_plan.md`.
 Primary metrics are planning `L2` and `CR=obj_box_col` (lower is better).
+
+## North star: minS2 (everything off in stage 2 except ego queries + planning task)
+
+Reference comparator throughout: K/V-off paper headline (`_decoder6_planwp_evalmatchmode_egostatus`) at **L2=0.3708 / CR=0.0405%** (mean of seeds 0+1; seed 2 in flight as 3394849).
+
+**Path to minS2** combines four components, each demonstrated individually but never (until 3397346) together:
+
+| Component | Closes at | Result | Source |
+|---|---|---|---|
+| K/V off | inference perception interface | Headline (0.3708) | `_decoder6_planwp_evalmatchmode_egostatus` |
+| Loss zeroing (Stream A, individual) | stage-2 perception supervision | All 3 tie L2=0.5204 baseline within noise | 3386472/73/74 |
+| Loss zeroing (Stream A, **combined**) | stage-2 perception supervision (joint) | **In flight 3397345 (`_s2nopercep`)** | TBD ~9.5 h |
+| Drop agent slots (Stream C) | inference perception in planner queries | Stream C training done, eval crashed; **rerun in flight 3394847** | TBD ~1 h |
+| Conflict head image features (Stream B1) | inference perception in conflict head | Ties evalmatchmode (3376418, L2=0.5119 / CR=0.047%) | already in hand |
+| Frozen backbone+heads (Stream E) | stage-2 backbone gradient | **In flight 3394848 (`_frozenpercep`)** | TBD ~9.5 h |
+| **All combined → minS2** | the goal | **In flight 3397346 (`_minS2`)** | TBD ~9.5 h |
+
+If 3397346 ties headline within noise (ΔL2 ≤ 0.007 / ΔCR ≤ 0.015 pp), the paper architecture is locked. Stage-1 candidates currently in flight (3396706-9, joint_nodetach) will be evaluated by their **stage-2 transfer through minS2**.
 
 ## Core Planning Stack
 
@@ -246,6 +264,7 @@ Practical threshold: single-run L2 differences below about `0.007` / `1.3%` and 
 - **Apollo egoonly stage-1 → stage-2 follow-up (`_ptegoonly_ppdeformmm_planifls`, K3377809): L2=0.5420 / CR=0.073%.** ΔL2=+0.022 vs the direct comparator `_ptnomapdnrot_ppdeformmm_planifls` (#7, L2=0.5203). Minimum-perception stage-1 (motion supervision keepalive-only, planning loss on 3 decoder stages) still produces a viable planning init when stage-2 keeps the standard `ppdeformmm_planifls` recipe — supports the supervision-vs-interface decoupling argument but doesn't recover the strongest stage-1 init. mAP_normal=0.5699 (best of the related pretraining batch) since the map head was trained at stage 1 here, unlike #7 where it was init-from-scratch.
 - **Anchor-capacity follow-ups (`shapeanchor_endptnorm_mag` retry, `_egostatus`, `_perbucketreg`): no clear winner beyond plain egostatus.** Refmag-floor patch did not rescue endptnorm_mag (still L2=1.11 / CR=0.39%, 3376688). Adding egostatus on top of endptnorm_mag rescues most of the regression (L2=0.412, 3377754) but does not beat plain egostatus alone (L2=0.3701). Per-bucket regression on speedstrat (3377755) lands at L2=0.5415 but CR=0.339% — per-bucket head doesn't cleanly decouple decoder capacity. **The decisive anchor-capacity finding is still egostatus, and now its strongest demonstration is on the K/V-off architecture (3376689 above), not on this batch.**
 - **Egostatus seed-1 reproduction (3386471): L2=0.3695 / CR=0.037%.** Mean across seeds (3376689 + 3386471): **L2=0.3708 / CR=0.0405%**. Paper main quantitative claim is locked across seeds — both L2 and CR survive reproduction (Δ_L2=0.0025 well below noise floor 0.007, ΔCR=0.007 pp within noise floor 0.015 pp). The K/V-off paper architecture beats every K/V-on result on both metrics, both seeds.
+- **REFRAMING (2026-05-02): single goal is minS2 — stage-2 with everything off except ego queries + planning task/loss.** The Stream A trio (individual loss zeroing) and the egoonly stage-1 → headline transfer together imply that stage-2 perception heads are inert on both their loss and their interface paths. The maximum-combined config `_egostatus_minS2` (Killarney 3397346) tests this directly: Stream A combined + Stream B1 + Stream C + Stream E in one config. Reference target: headline at L2=0.3708 / CR=0.0405%. All other in-flight work (stage-1 swaps, joint_nodetach, individual-stream diagnostics) is now measured by its contribution to or compatibility with minS2.
 - **Stream A — stage-2 zero-loss diagnostic trio (3386472/3386473/3386474): stage-2 perception supervision is empty for planning.** Cloning `_decoder6_planwp_evalmatchmode` (seed-0 baseline L2=0.5204 / CR=0.046%) and zeroing one perception loss family at a time: `s2nodetloss` (L2=0.5265 / CR=0.076%), `s2nomaploss` (L2=0.5161 / CR=0.063%), `s2nomotionloss` (L2=0.5132 / CR=0.042%). All three planning L2s tie the baseline within ~0.006 (well within the 0.007 noise floor); CRs deviate by ≤0.030 pp (≤2× noise). Each ablation collapses its own perception head as expected (det mAP 0.006, map_normal 0.31, car_ade 4.17 respectively) — confirming the loss zeroing took. **First direct test of the supervision-not-interface claim**: stage-2 perception losses are not shaping the backbone in any way that matters for planning, given a strong stage-1 init. Stream E (frozen-backbone S2) is now the natural next beat. Caveat: these are seed-0 single runs against seed-0 baseline; the headline egostatus comparator is at L2=0.3720, but the right comparator for these zero-loss configs (which don't include egostatus) is the seed-0 evalmatchmode baseline.
 - **Egoonly (minimum-perception) stage-1 + K/V-off headline stack (`_ptegoonly_decoder6_planwp_evalmatchmode_egostatus`, 3388946): L2=0.3946 / CR=0.055%.** ΔL2=+0.023 vs full-perception stage-1 headline (0.3720), CR +0.011 pp — egoonly stage-1 *nearly recovers* the paper headline. Stage-1 epoch choice on the K/V-on recipe (`_ptegoonly_ep3`, 3388945, L2=0.5402) doesn't move stage-2 L2 vs ep-5 (0.5420). Combined with Stream A, this **decisively supports the supervision-vs-interface decoupling argument**: stage-1 needs *some* perception-aware supervision to shape image features, but stage-2 perception losses are inert — meaning the architecture can be designed around image-feature shaping at stage-1 + planning at stage-2 with no perception decoders downstream.
 - **Stream C (`_decoder6_planwp_evalmatchmode_streamc`, 3389115) crashed at eval start with `KeyError: 'trajs_3d'`.** Training completed to iter 11679/11720 (essentially the full 1-epoch schedule); evaluation crashed during NuScenes eval setup because `ego_only_planning=True` strips the agent slots whose `trajs_3d` output the eval pipeline still queries. Bug is in the eval path, not the training path — final ckpt is intact but the result is not yet readable. Needs an eval-time fix that gates on `ego_only_planning` before requesting `trajs_3d`.

@@ -1,6 +1,21 @@
 # Paper Plan: Rethinking Sparse Scene Representations for End-to-End Driving
 
-2026-04-28 (revised 2026-04-30)
+2026-04-28 (revised 2026-05-02)
+
+## North star: Minimum Stage-2 (minS2)
+
+**Single goal: shortest path to a stage-2 architecture where everything is OFF except ego queries and the planning task/loss.**
+
+Concretely: at stage 2 the model trains only the planner head on top of a stage-1-shaped backbone. Detection, map, and motion heads exist for evaluation reporting only — they are not read by the planner, not updated by gradients, and their losses are zero. The planner reads ego state + image features (via deformable attention); the conflict head reads image features at det-anchor BEV positions. No agent tokens enter the planner's instance_feature.
+
+Every stream below feeds this north star:
+- **Stream A** kills perception losses at stage 2 (det/map/motion = 0).
+- **Stream C** drops agent slots from the planner (`ego_only_planning=True`).
+- **Stream B1** swaps the conflict head's agent-feature input for image features at det positions.
+- **Stream E** freezes backbone + perception heads (lr_mult=0).
+- **minS2 config (`_egostatus_minS2`, Killarney 3397346, in flight)** combines A + C + B1 + E. If it ties the headline within noise, the paper architecture is locked.
+
+Stage-1 work feeds the same goal: stage-1 needs to shape the backbone well enough that stage-2 can train only the planner. Stage-1 candidates (`aux2d`, `aux2d_dino`, `aux2d_dseg`, `nomapdnrot`, `egoonly`, `joint_nodetach`) are evaluated by their stage-2 transfer **on the K/V-off paper headline stack**, and ultimately on minS2.
 
 ## Overview
 
@@ -9,7 +24,7 @@ Sparse scene representations (object detections, map elements, motion prediction
 1. **As an interface**: tokens consumed by the planner at inference time.
 2. **As supervision**: training signal that teaches the visual representation what to encode.
 
-Our central claim is that **sparse scene representations are more valuable in the second role than the first**. Removing them at inference (no perception K/V into the planner) is essentially free; removing them at training time is catastrophic. The bottleneck is representation alignment, not the richness of intermediate token hand-offs.
+Our central claim is that **sparse scene representations are more valuable in the second role than the first** — and stronger still: **stage-2 needs neither the interface nor the supervision**. The interface is empty (Stream A trio of individual loss zeroings, plus the K/V ablation grid). The supervision at stage-2 is empty (Stream A combined `_s2nopercep`, in flight, plus the converging Stream A trio). The bottleneck is representation alignment at stage 1; stage 2 is a small planner-only fine-tune.
 
 ## Contributions
 
@@ -43,11 +58,11 @@ These are exactly what perception supervision teaches the backbone during pretra
 - Stage 1: pretraining image features for planning. Perception is one supervisory option among several (alongside dense aux2d, depth, drivable-area, occupancy).
 - Stage 2: end-to-end planner reading directly from image features — perception-free at inference. Perception heads exist if needed for evaluation reporting (NDS, mAP) but are not on the inference forward path.
 
-## Roadmap to zero (or minimal) stage-2 perception dependence
+## Roadmap to minS2 (everything off in stage 2 except ego queries + planning task)
 
-The bold claim is **zero-dependence stage 2**: a planner that, at inference, reads only from the backbone's image features and produces ego trajectories without any perception decoder output. The fallback is **minimal-dependence**: a bounded, planning-critical scene set (e.g. K nearest agents within an ego corridor, or a single occupancy grid) — still a structural break from the standard tokenized scene graph, just not zero.
+**minS2 = headline + Stream A combined + Stream C + Stream B1 + Stream E.** A single config (`_egostatus_minS2`, Killarney 3397346) tests it directly — if it ties the headline within noise, the architecture is locked. The streams below remain useful as ablation localizers if minS2 regresses; each isolates one component of the combined config.
 
-The current best K/V-off stack (`_decoder6_planwp_evalmatchmode`) is *not yet* zero-dependence. It removes K/V cross-attention to perception tokens but still consumes detection in two ways: (a) det agent tokens share the joint decoder's shared layers (norm/ffn/deformable parameters), and (b) the conflict head reads `(plan_query mode m, agent_feature j)` pairs to produce the collision logit that gives this stack its CR=0.046%. Both must be addressed.
+Reference comparator: K/V-off paper headline (`_decoder6_planwp_evalmatchmode_egostatus`) at **L2=0.3708 / CR=0.0405%** (mean of 2 seeds; 3rd seed in flight as 3394849).
 
 ### Stream A — Stage-2 supervision diagnostics (cheapest; running now)
 
@@ -357,9 +372,28 @@ Compute budget for #1–#5: ~5 stage-1 trains × ~32h each = ~160 GPU-days, plus
 
 NeurIPS 2026 abstract deadline (typical: mid-May) — tight but feasible if we lock the architecture by week 2 and start Stage-2 training by week 3.
 
-## What to do this week
+## What to do this week — minS2 critical path
 
-1. Confirm the K/V-off headline result. `_laststage_nodetmap_decoder6_planwp` (Killarney 3319227) at `L2=0.5150 / CR=0.068%` is the proposed Stage-2 architecture; verify reproducibility with one same-host control run before locking.
+**Critical-path jobs in flight on Killarney (all targeting minS2 directly or as ablation localizers):**
+
+| Job | Config | Role in minS2 path |
+|---|---|---|
+| **3397346** | `_egostatus_minS2` | **The decisive test.** A+B1+C+E combined. Ties headline → paper architecture locked |
+| **3397345** | `_egostatus_s2nopercep` | A combined alone (zero all 3 perception losses on egostatus). Diagnostic if minS2 regresses |
+| **3394848** | `_egostatus_frozenpercep` | E alone (freeze backbone+neck+det+map). Diagnostic if minS2 regresses |
+| **3394847** | `_streamc` eval-only | C alone (ego_only_planning + image_at_det). Diagnostic if minS2 regresses |
+| **3394849** | `_egostatus` seed 2 | Third headline seed — locks the comparator |
+| **3396706–9** | 4 stage-1 pretrain swaps on K/V-off paper headline (`aux2d`, `aux2d_dino`, `aux2d_dseg`, `nomapdnrot`) | Picks the best stage-1 to pair with minS2 once it lands |
+| **Apollo joint_nodetach** | stage-1 with `detach_perception=False` | Last open stage-1 hypothesis; its stage-2 transfer will also go through minS2 |
+
+**Decision tree at +9.5 h (when 3397346 lands):**
+- minS2 ties headline (within 0.007 L2 / 0.015 pp CR) → **paper architecture locked.** Submit minS2 seed-2 immediately. Best stage-1 from 3396706-9 → minS2 with that pretrain.
+- minS2 regresses → diagnose with 3397345 (loss zeroing only), 3394848 (freeze only), 3394847 (ego-only only). Whichever component caused the regression gets fallback config.
+- All four diagnostics tie headline but minS2 fails → interaction effect; localize pairwise.
+
+## Background notes (older state, kept for context)
+
+1. ~~Confirm the K/V-off headline result. `_laststage_nodetmap_decoder6_planwp` (Killarney 3319227)~~ Superseded — current headline is `_decoder6_planwp_evalmatchmode_egostatus` at L2=0.3708 / CR=0.0405% (mean 2 seeds).
 2. **Stage-1 aux2d_dino + aux2d_dseg: BOTH FINISHED (with caveats).** dino reached epoch 100 (Trillium 476862, 2026-05-01 21:15 UTC); dseg hung at epoch 80 and was cancelled (Trillium 476863, 2026-05-02 06:38 UTC) after 11 h of stalled output — `iter_93760.pth` (epoch 80) is the final ckpt. Both **underperform** the canonical aux2d 8gpu_noflash baseline on perception (mAP/NDS/mAP_normal). The 4gpu_bs24 vs 8gpu_noflash config disparity is a confound; without a same-config plain-aux2d baseline we can't fully separate "lever doesn't help" from "smaller batch caps the ceiling." Decisive read is the stage-2 follow-up.
 3. **Apollo egoonly stage-1 + stage-2 follow-up: BOTH COMPLETED.** Stage-1 (Apollo, finished 2026-04-30 23:51 UTC, epoch-5 ckpt `iter_58600.pth`): L2=0.6518 / obj_box_col=0.156% / NDS=0.5170 / mAP=0.3989 / mAP_normal=0.5667. Stage-2 follow-up `_ptegoonly_ppdeformmm_planifls` (Killarney **3377809**, completed 2026-05-01): **L2=0.5420 / CR=0.073% / NDS=0.5214 / mAP=0.4046 / mAP_normal=0.5699**. ΔL2=+0.022 vs the direct comparator `_ptnomapdnrot_ppdeformmm_planifls` (#7, L2=0.5203). Minimum-perception stage-1 still produces a viable planning init — supports the supervision-vs-interface decoupling argument but doesn't recover the strongest stage-1 init. Map head still trained at stage 1 here so `mAP_normal=0.5699` (vs #7's 0.2411 init-from-scratch).
    - **Two follow-ups completed 2026-05-02:**
