@@ -278,9 +278,9 @@ class SparseDriveAgent(AbstractAgent):
             pred_xy = pred[..., :2]
         else:
             pred_xy = pred
-        gt_deltas = targets["gt_ego_fut_trajs"]
+        gt_deltas = targets["gt_ego_fut_trajs"].to(pred_xy.device)
         gt_xy = torch.cumsum(gt_deltas, dim=-2)
-        masks = targets.get("gt_ego_fut_masks", torch.ones_like(gt_xy[..., 0]))
+        masks = targets.get("gt_ego_fut_masks", torch.ones_like(gt_xy[..., 0])).to(pred_xy.device)
         loss = nn.functional.smooth_l1_loss(pred_xy, gt_xy, reduction="none")
         loss = (loss.mean(-1) * masks).sum() / masks.sum().clamp(min=1.0)
         return {"loss": loss}
