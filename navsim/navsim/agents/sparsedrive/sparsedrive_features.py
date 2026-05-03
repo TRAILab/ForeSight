@@ -40,6 +40,35 @@ _NUSC_TO_NAVSIM = (
 # Spacing between consecutive frames in NavSim/openscene logs.
 _NAVSIM_INTERVAL = 0.5  # seconds
 
+# Driving command is a 4-dim onehot (left=0, straight=1, right=2, unknown=3).
+# See tools/gen_navsim_kmeans.py: cmd_idx = argmax(driving_command).
+_CMD_LEFT, _CMD_RIGHT = 0, 2
+
+# 50% probability for hflip augmentation. Cache-time only — applied
+# identically in compute_features and compute_targets via a shared
+# per-token seed so the input mirror matches the supervision mirror.
+_HFLIP_PROB = 0.5
+
+
+def _hflip_seed(timestamp_us) -> int:
+    """Stable per-token seed shared between feature + target builders.
+
+    Uses Frame.timestamp (microseconds), which is unique per token and
+    populated identically into AgentInput.EgoStatus.timestamp (the
+    feature-builder path) and Scene.frames[i].ego_status.timestamp /
+    Frame.timestamp (the target-builder path). Falls back to 0 — that
+    path produces no flip diversity but stays safe.
+    """
+    if timestamp_us is None:
+        return 0
+    # 32-bit mask keeps numpy's seed accept happy across versions.
+    return int(timestamp_us) & 0xFFFFFFFF
+
+
+def _decide_hflip(timestamp_us) -> bool:
+    """Deterministic per-token hflip choice (must match across builders)."""
+    return bool(np.random.default_rng(_hflip_seed(timestamp_us)).random() < _HFLIP_PROB)
+
 # ImageNet stats in [0, 255] uint8 scale — same constants the nuScenes
 # pipeline uses (NormalizeMultiviewImage). The SparseDrive ResNet50 backbone
 # was pretrained against this distribution; without it inputs land 3-5σ off
@@ -243,6 +272,11 @@ class SparseDriveFeatureBuilder(AbstractFeatureBuilder):
         # different aug — stable within one cache build, varies across builds.
         rng = np.random.default_rng()
 
+        # Shared-seed hflip: same decision in compute_features and
+        # compute_targets so the mirrored image and the mirrored
+        # gt_ego_fut_trajs stay consistent.
+        hflip = _decide_hflip(current_status.timestamp)
+
         imgs, lidar2img_mats, image_wh = [], [], []
         for cam in cams:
             assert cam.image is not None, (
@@ -255,12 +289,22 @@ class SparseDriveFeatureBuilder(AbstractFeatureBuilder):
             # before per-image jitter and ImageNet normalization.
             img = img.astype(np.float32)
             img = _photo_metric_distortion(img, rng)
+            if hflip:
+                img = np.ascontiguousarray(img[:, ::-1, :])
             img = _normalize_image(img)
             # HWC → CHW torch tensor (no extra division — already normalized).
             imgs.append(torch.from_numpy(np.ascontiguousarray(
                 img.transpose(2, 0, 1)
             )))
-            lidar2img_mats.append(_build_lidar2img(cam, scale, top, left))
+            lidar2img = _build_lidar2img(cam, scale, top, left)
+            if hflip:
+                # Negate lidar X column so a point at (X,Y,Z) projects under
+                # the new matrix to the mirrored u — keeps the projection
+                # consistent with the LR-flipped image. Lidar X is the lateral
+                # axis in SparseDrive's convention.
+                lidar2img = lidar2img.copy()
+                lidar2img[:, 0] *= -1
+            lidar2img_mats.append(lidar2img)
             image_wh.append([cfg.image_target_size[1], cfg.image_target_size[0]])
 
         img_tensor = torch.stack(imgs, dim=0)  # (num_cams, 3, H, W)
@@ -310,6 +354,17 @@ class SparseDriveFeatureBuilder(AbstractFeatureBuilder):
         ego_status[5] = rot_rate_z
         ego_status[6:8] = current_status.ego_velocity[:2]
 
+        # Driving command (4-dim onehot left/straight/right/unknown).
+        cmd = current_status.driving_command.astype(np.float32).copy()
+
+        if hflip:
+            # Mirror lateral kinematics: acc_x, vel_x, rot_rate_z all negate;
+            # acc_y, vel_y unchanged. Cmd left↔right swap.
+            ego_status[0] *= -1   # acc_x
+            ego_status[5] *= -1   # rot_rate_z
+            ego_status[6] *= -1   # vel_x
+            cmd[_CMD_LEFT], cmd[_CMD_RIGHT] = cmd[_CMD_RIGHT], cmd[_CMD_LEFT]
+
         # Frame timestamp in seconds (Frame.timestamp is microseconds).
         # instance_bank uses (current.timestamp - cached.timestamp) to gate
         # the temporal warp via max_time_interval; a zero placeholder makes
@@ -325,9 +380,7 @@ class SparseDriveFeatureBuilder(AbstractFeatureBuilder):
             "projection_mat": torch.tensor(np.stack(lidar2img_mats, axis=0)),
             "image_wh": torch.tensor(image_wh, dtype=torch.float32),
             "ego_status": torch.tensor(ego_status),
-            "gt_ego_fut_cmd": torch.tensor(
-                current_status.driving_command.astype(np.float32)
-            ),
+            "gt_ego_fut_cmd": torch.tensor(cmd),
             "T_global": torch.tensor(T_global),          # (num_history, 4, 4)
             "T_global_inv": torch.tensor(T_global_inv),  # (num_history, 4, 4)
             "timestamp": timestamp,                       # scalar, seconds
@@ -354,6 +407,16 @@ class SparseDriveTargetBuilder(AbstractTargetBuilder):
         deltas = torch.zeros_like(poses[:, :2])
         deltas[0] = poses[0, :2]
         deltas[1:] = poses[1:, :2] - poses[:-1, :2]
+
+        # Shared-seed hflip: same decision the feature builder makes for
+        # this token (seed = current frame timestamp µs, also stored on
+        # the feature-side EgoStatus). When True, mirror the lateral X
+        # component of every pose delta to match the LR-flipped image +
+        # negated lidar2img X column on the feature side.
+        current_frame = scene.frames[scene.scene_metadata.num_history_frames - 1]
+        hflip = _decide_hflip(current_frame.timestamp)
+        if hflip:
+            deltas[:, 0] *= -1
 
         # NOTE on det / map / motion targets:
         # PyTorch's default_collate can't stack variable-length per-scene

@@ -421,8 +421,8 @@ Higher is better for all sub-metrics.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | _ref_ DiffusionDrive (published) | — | — | **88.1** | — | — | — | — | — | — | leaderboard north star |
 | **3727 → 3746 eval** | `navsim_planonly` (baseline) fp32 bs=8 | 1 | **0.6502** | 0.9319 | 0.7893 | 0.5976 | 0.8518 | 0.9817 | 0.9207 | First real PDMS — image norm + timestamp + abs SE3 + photo-metric all in |
-| 3750 (in flight) | `navsim_planonly_minS2` fp32 bs=8 | 1 | TBD | — | — | — | — | — | — | Adds plan_ego_status_encode, ego_only_planning, zero motion losses, freeze backbone+perception, eval_skip_map |
-| TBD | + hflip shared-seed | 1 | TBD | — | — | — | — | — | — | Mirror-symmetric augmentation across both builders |
+| **3751 → 3753 eval** | `navsim_planonly_minS2` fp32 bs=8 | 1 | **0.6489** | 0.9304 | 0.7610 | 0.6159 | 0.8454 | 0.9998 | 0.8795 | Net flat vs baseline. Redistributes errors: EP/Comf up (planner more confident), DAC/DDC down (worse on edges). 1 epoch likely too short to see minS2's full benefit |
+| TBD (cycle 2) | + hflip shared-seed (hash on EgoStatus.timestamp) | 1 | TBD | — | — | — | — | — | — | Mirror-symmetric augmentation across both builders |
 | TBD | + minS2 arch knobs (planning_cumulative_refinement etc.) | 1 | TBD | — | — | — | — | — | — | More config knobs from the nuScenes minS2 winner |
 | TBD | overnight: best 1-epoch config | 10 | TBD | — | — | — | — | — | — | Promotion gate after Tier-2 sweeps |
 
