@@ -202,7 +202,8 @@ Files under `navsim/navsim/agents/sparsedrive/`:
 | killarney | navtrain dataset_cache (Ray-parallel, 103k entries) | 3386610 | COMPLETED |
 | dgx | navtrain training, fp32, 500 batches | 3705 | COMPLETED (clean: loss 1.29 → 0.21) |
 | dgx | navtrain training, fp32, 5000 batches | 3706 | NaN at step 4233/5000 (**blocker — see below**) |
-| killarney | navtrain training, fp32, 2000 batches (in flight) | 3387639 cache | RUNNING |
+| killarney | navtrain training, fp32, 2000 batches | 3387927 | NaN + cuda:0 vs cpu device crash (no stage-1 warmstart) |
+| killarney | navtrain training, fp32, 5000 batches, stage-1 warmstart | 3388590 | PENDING (stage-1 ckpt + device fix — see 2026-05-01 update) |
 
 ### Smoke test (2026-04-29, local, GPU)
 
@@ -418,10 +419,10 @@ untouched.
 | ForeSight SparseDrive (planning-only) | — | — | — | — | — | — | — | TBD |
 | ForeSight SparseDrive (full) | — | — | — | — | — | — | — | TBD |
 
-## Current State (2026-05-01, end of session)
+## Current State (2026-05-01, updated 2026-05-01 session 2)
 
-Everything from Phase 0 → Phase 4 first-checkpoint is in place except the
-training itself produces NaN before completing a useful run.
+Everything from Phase 0 → Phase 4 first-checkpoint is in place. Stage-1
+warm-start is now wired and a new Killarney job (3388590) is in queue.
 
 **Working:**
 - Image, .sif on DGX + Killarney, smoke 7/7 on both
@@ -431,11 +432,11 @@ training itself produces NaN before completing a useful run.
 - navtest metric_cache built (Killarney, 12k entries, 3 GB) — ready for PDM-Score eval
 - Real navtrain plan-side k-means anchors generated
 - 500-batch training (`3705`) clean: loss 1.29 → 0.21, no NaN
+- `sparsedrive_agent.yaml` now loads stage-1 ckpt via `foresight_pretrained`
+- `sparsedrive_agent.forward` now moves all target tensors to `img.device` (fixes cuda:0 vs cpu device mismatch in planning loss)
 
-**Broken / blocker:**
-- Training NaN's around step 4000–4500 even with fp32 + grad_clip=1.0 + frozen
-  det/map weights + det/map losses excluded from backprop. See diagnosis in
-  the next section.
+**In flight:**
+- Killarney job 3388590: fp32, bs=2, grad_clip=1.0, 1×L40S, 5000 batches, stage-1 warmstart + device fix. Waiting for ckpt to trigger PDM-Score eval.
 
 ## NaN Diagnosis (2026-05-01)
 
@@ -453,6 +454,12 @@ via cross-attention. With no supervision, those features drift; eventually
 some batch produces extreme cross-attention values and the planning loss
 spikes through gradient clip into NaN.
 
+**Secondary bug found (job 3387927):** `compute_targets()` returns CPU tensors
+(`gt_ego_fut_trajs`, `gt_ego_fut_masks`). `motion_planning_head.py` derives
+`device` from `gt_ego_fut_trajs`, so predictions on GPU vs targets on CPU
+causes a `smooth_l1_loss(cuda:0, cpu)` RuntimeError. Fixed in session 2 by
+moving all target tensors to `img.device` at the start of `forward`.
+
 **Decision (with user, 2026-05-01):** Adopt **Option 2** — load a stage-1
 nuScenes checkpoint to give det/map meaningful pretrained weights, freeze
 them, skip their losses. Cross-attention then sees real (frozen) detection
@@ -460,36 +467,18 @@ features instead of noise.
 
 ## Next Steps (clean session pickup)
 
-1. **Wire stage-1 warm-start.** The local repo has
-   `ckpt/sparsedrive_stage1.pth` (per CLAUDE.md the standard stage-2 init).
-   - scp to DGX `/raid/home/spapais/ForeSight/ckpt/sparsedrive_stage1.pth`
-     and Killarney `/home/spapais/ForeSight/ckpt/sparsedrive_stage1.pth`
-   - Update `navsim/navsim/planning/script/config/common/agent/sparsedrive_agent.yaml`:
-     ```
-     foresight_pretrained: ${oc.env:FORESIGHT_ROOT}/ckpt/sparsedrive_stage1.pth
-     ```
-   - `SparseDriveAgent._load_pretrained` already does `strict=False`, so the
-     `ego_fut_ts=8` / `num_driving_cmds=4` planning-head dim mismatches
-     fall through and that head trains from scratch as intended.
+1. **Monitor job 3388590 on Killarney.** First ~500 steps should be clean
+   (as in DGX 3705). If NaN appears before step 5000: try LR=1e-5 +
+   grad_clip=0.5, then fall back to Option 1 if still broken.
 
-2. **Confirm freeze logic still applies.** `SparseDriveAgent.__init__`
-   already sets `requires_grad=False` on `head.det_head` + `head.map_head`.
-   This combined with the warm-started weights means det/map are frozen at
-   their stage-1-trained state — exactly what we want for stage-2 navsim.
-
-3. **Resubmit training on DGX or Killarney**, same precision/strategy as
-   `3705` (`fp32`, `grad_clip=1.0`, `bs=2`, single GPU). Now expect:
-   - det/map cross-attention features are meaningful (not noise)
-   - planning loss should stay stable past 5000 steps
-   - Land a real ckpt via the `ModelCheckpoint` callback already wired into
-     `SparseDriveAgent.get_training_callbacks`
-
-4. **First navtest PDM-Score eval** once a ckpt exists:
-   `bash scripts/navsim_eval.sh /path/to/ckpt navtest`. metric_cache is
-   already built on Killarney at
+2. **Once a ckpt lands**, run PDM-Score eval:
+   ```
+   bash scripts/navsim_eval.sh <ckpt_path> navtest
+   ```
+   metric_cache already built at
    `/scratch/spapais/ForeSight/work_dirs/navsim/metric_cache`.
 
-5. **If NaN still appears** after stage-1 warm-start: drop to LR=1e-5,
+3. **If NaN still appears** after stage-1 warm-start: drop to LR=1e-5,
    grad_clip=0.5, OR fall back to **Option 1** (refactor `SparseDriveHead`
    to hoist `anchor_encoder` + `instance_bank` out of `det_head` so we can
    actually skip det/map forward).

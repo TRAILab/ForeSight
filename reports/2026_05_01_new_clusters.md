@@ -85,36 +85,103 @@ Fir's extracted dataset has: `samples/`, `v1.0-trainval/`, `maps/`, pkl infos, g
 
 ### New clusters — set up tamia + fir + rorqual in parallel
 
-All three share the same common steps. Cluster-specific differences are noted per cluster.
+All three share the same setup procedure. Cluster-specific differences are noted per cluster.
 
-#### Common steps (all three)
-- [ ] Push branch locally: `git push origin sd_combined`
-- [ ] Clone repo on each: `ssh <cluster> "git clone <repo_url> /home/spapais/ForeSight"`
-- [ ] Copy container from killarney: `scp killarney:/home/spapais/ForeSight/docker/foresight_cuda118.sif <cluster>:/home/spapais/ForeSight/docker/`
-- [ ] Copy nuScenes data from narval: `ssh narval "rsync -a /home/spapais/projects/rrg-swasland/datasets/nuscenes/ <cluster>:/scratch/spapais/nuscenes/"` (or pull from another source)
-- [ ] Create `scripts/<cluster>_run.sh` (see per-cluster notes below)
-- [ ] Set up scratch dirs: `ssh <cluster> "mkdir -p /scratch/spapais/ForeSight/{logs,work_dirs,wandb}"`
-- [ ] Build custom ops inside container (one-time per cluster)
-- [ ] Submit 1-iter probe training run to confirm end-to-end
+#### Step 0 — GitHub SSH key (one-time per cluster, do before clone)
+On each cluster:
+```bash
+ssh-keygen -t ed25519 -C "spapais"   # accept defaults, no passphrase
+cat ~/.ssh/id_ed25519.pub             # copy output
+ssh-keyscan github.com >> ~/.ssh/known_hosts
+```
+Add the printed public key as a Deploy Key on the GitHub repo (Settings → Deploy keys, read-only is sufficient).
 
-#### Tamia (aip-swasland) — ~4.5 h total, essentially zero queue
-- `scripts/tamia_run.sh`: model on `killarney_run.sh`; CVMFS apptainer path; **`--gpus-per-node=h100:4`** (whole-node, no 2-GPU jobs); `--time=23:59:00` (1 d max); `DATA_DIR` pointing to scratch
-- Fix scratch: `ssh tamia "mkdir -p /scratch/spapais/ForeSight/{logs,work_dirs,wandb}"` — may need group quota, check if `/scratch/spapais` exists first
-- **Note:** 4-GPU minimum for all jobs; 1 d wall-time cap
+#### Step 1 — Create run script
+Add `scripts/<cluster>_run.sh` to the local repo and push. See per-cluster notes below for account, GPU spec, wall time, and path differences.
 
-#### Fir (def-swasland-ab) — ~4.6 h total, 8 min queue
-- `scripts/fir_run.sh`: model on `killarney_run.sh`; CVMFS apptainer path; `DATA_DIR=/scratch/spapais/nuscenes/`; account `def-swasland-ab`
-- Scratch already partially exists (`/scratch/spapais/allo`); just add ForeSight subdirs
-- Alternatively: `DATA_DIR=/project/def-swasland-ab/datasets/nuscenes/` (pre-extracted, skip unzip loop) — verify with `ls /project/def-swasland-ab/datasets/nuscenes/samples/ | head -3`
+#### Step 2 — Clone repo + checkout branch (after Step 0 + 1)
+```bash
+# tamia (SciNet home path is /home/s/spapais/)
+ssh tamia "ssh-keyscan github.com >> ~/.ssh/known_hosts && git clone git@github.com:TRAILab/ForeSight.git /home/s/spapais/ForeSight && cd /home/s/spapais/ForeSight && git checkout sd_combined"
 
-#### Rorqual (def-swasland-ab_gpu) — ~4.8 h total, 18 min queue
-- `scripts/rorqual_run.sh`: model on `killarney_run.sh`; CVMFS apptainer path; account `def-swasland-ab_gpu`; partition `gpubase_bynode_b2` (12 h); `DATA_DIR=/scratch/spapais/nuscenes/`
-- Scratch exists (`/scratch/spapais/`); add ForeSight subdirs
+# fir / rorqual (standard Alliance path /home/spapais/)
+ssh fir    "ssh-keyscan github.com >> ~/.ssh/known_hosts && git clone git@github.com:TRAILab/ForeSight.git /home/spapais/ForeSight && cd /home/spapais/ForeSight && git checkout sd_combined"
+ssh rorqual "git clone git@github.com:TRAILab/ForeSight.git /home/spapais/ForeSight && cd /home/spapais/ForeSight && git checkout sd_combined"
+```
 
-#### Vulcan (aip-swasland) — deprioritised
-- L40S is ~3× slower than H100; total time to completion ~15 h vs ~4.5 h for the trio
+#### Step 3 — Create scratch dirs and data dirs
+```bash
+ssh tamia   "mkdir -p /scratch/s/spapais/ForeSight/{logs,work_dirs,wandb} && mkdir -p /home/s/spapais/links/projects/aip-swasland/datasets/nuscenes && mkdir -p /home/s/spapais/ForeSight/{ckpt,data/{infos,kmeans,motion_stats,occlusions}}"
+ssh fir     "mkdir -p /scratch/spapais/ForeSight/{logs,work_dirs,wandb} && mkdir -p /project/def-swasland-ab/datasets/nuscenes && mkdir -p /home/spapais/ForeSight/{ckpt,data/{infos,kmeans,motion_stats,occlusions}}"
+ssh rorqual "mkdir -p /scratch/spapais/ForeSight/{logs,work_dirs,wandb} && mkdir -p /home/spapais/links/projects/def-swasland-ab/datasets/nuscenes && mkdir -p /home/spapais/ForeSight/{ckpt,data/{infos,kmeans,motion_stats,occlusions}}"
+```
+
+#### Step 4 — Copy container from killarney (~4 GB, run from killarney)
+Use `foresight_cuda118pytorch21.sif` — the base `cuda118.sif` does not work on H100 SXM5 hardware (same issue as trillium).
+```bash
+ssh killarney "
+  scp /home/spapais/ForeSight/docker/foresight_cuda118pytorch21.sif tamia:/home/s/spapais/ForeSight/docker/ &
+  scp /home/spapais/ForeSight/docker/foresight_cuda118pytorch21.sif fir:/home/spapais/ForeSight/docker/ &
+  scp /home/spapais/ForeSight/docker/foresight_cuda118pytorch21.sif rorqual:/home/spapais/ForeSight/docker/ &
+  wait"
+```
+
+#### Step 5 — Copy nuScenes zip archives (run from narval, ~40 GB each)
+Data is unzipped to `SLURM_TMPDIR` at job start for fast local access — do not use pre-extracted data.
+```bash
+ssh narval "
+  nohup rsync -a /home/spapais/projects/rrg-swasland/datasets/nuscenes/ tamia:/home/s/spapais/links/projects/aip-swasland/datasets/nuscenes/ > /tmp/rsync_tamia.log 2>&1 &
+  nohup rsync -a /home/spapais/projects/rrg-swasland/datasets/nuscenes/ fir:/project/def-swasland-ab/datasets/nuscenes2/ > /tmp/rsync_fir.log 2>&1 &
+  nohup rsync -a /home/spapais/projects/rrg-swasland/datasets/nuscenes/ rorqual:/home/spapais/links/projects/def-swasland-ab/datasets/nuscenes/ > /tmp/rsync_rorqual.log 2>&1 &"
+```
+
+#### Step 6 — Build custom ops (one-time per cluster, after container is present)
+```bash
+ssh <cluster> "cd /home/[s/]spapais/ForeSight && \
+  /cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/Core/apptainer/1.3.5/bin/apptainer \
+  exec --nv -c -e --pwd /workspace/ForeSight/ \
+  --bind=/home/[s/]spapais/ForeSight:/workspace/ForeSight/ \
+  /home/[s/]spapais/ForeSight/docker/foresight_cuda118pytorch21.sif \
+  bash -c 'cd projects/mmdet3d_plugin/ops && python setup.py develop'"
+```
+
+#### Step 7 — Submit probe run (1 iter, after Steps 4–6 complete)
+```bash
+ssh tamia   "source ~/.bashrc && cd /home/s/spapais/ForeSight && sbatch --export=ALL scripts/tamia_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage2_4gpu_bs24_predonly.py 4 --deterministic"
+ssh fir     "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/fir_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage2_4gpu_bs24_predonly.py 4 --deterministic"
+ssh rorqual "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/rorqual_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage2_4gpu_bs24_predonly.py 4 --deterministic"
+```
+
+#### Status (2026-05-01)
+- [x] Run scripts created (`scripts/tamia_run.sh`, `scripts/fir_run.sh`, `scripts/rorqual_run.sh`)
+- [x] Branch pushed to origin
+- [x] GitHub SSH keys generated and added (Step 0)
+- [x] Repo cloned and on `sd_combined` (Steps 1–2)
+- [x] Scratch dirs created (Step 3)
+- [ ] Container copied (Step 4)
+- [ ] nuScenes data copied (Step 5)
+- [ ] Custom ops built (Step 6)
+- [ ] Probe run submitted (Step 7)
+
+#### Per-cluster notes
+
+**Tamia** (aip-swasland) — ~4.5 h total, essentially zero queue
+- Home path: `/home/s/spapais/` (SciNet convention, differs from all other clusters)
+- `--gpus-per-node=h100:4`; `--time=23:59:00` (1 d max wall time); 4-GPU minimum
+- DATA_DIR: `~/links/projects/aip-swasland/datasets/nuscenes/`
+
+**Fir** (def-swasland-ab) — ~4.6 h total, 8 min queue
+- DATA_DIR: `/project/def-swasland-ab/datasets/nuscenes2/` — original `nuscenes/` dir is owned by `nisarbar` (no write access), created `nuscenes2/` in the same parent
+- `--gpus-per-node=4`; standard 12 h wall time
+
+**Rorqual** (def-swasland-ab_gpu) — ~4.8 h total, 18 min queue
+- `--partition=gpubase_bynode_b2`; account `def-swasland-ab_gpu`
+- DATA_DIR: `~/links/projects/def-swasland-ab/datasets/nuscenes/`
+- Both `rrg-swasland` and `def-swasland-ab` project dirs exist; script uses `def-swasland-ab` to match compute account
+
+**Vulcan** (aip-swasland) — deprioritised
+- L40S is ~3× slower than H100; total ~15 h regardless of near-instant queue
 - Set up only if tamia/fir/rorqual are at capacity
-- Current GPU test probe stuck on DOWN/DRAINED nodes — investigate before committing jobs
 
 ---
 
