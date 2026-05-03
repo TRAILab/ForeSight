@@ -33,6 +33,20 @@ log_config = dict(
 )
 load_from = None
 resume_from = None
+# Stage-1 ablation: removing det + map heads leaves the backbone +
+# 4-level FPN architecture unchanged (so the resulting checkpoint is
+# directly comparable to every other S1 baseline and slots cleanly
+# into the standard 4-level S2 stack). The only architectural
+# consequence is that fpn_conv[3]'s output has no consumer — depth
+# uses 3 levels, aux2d uses level 0, and there are no det/map heads
+# spanning all 4 levels. layer4 still trains because its output feeds
+# the FPN top-down path that produces feat[0..2]. Tell DDP the one
+# expected dead module is OK; if a future regression adds a *new*
+# unused parameter, the diagnostic in tools/diag_unused_params.py
+# will surface it and this comment should be updated rather than the
+# flag silently absorbing the new dead weight.
+# Expected unused: img_neck.fpn_conv[3].{weight, bias} (~590 K params).
+find_unused_parameters = True
 workflow = [("train", 1)]
 fp16 = dict(loss_scale=32.0)
 input_shape = (704, 256)
@@ -73,10 +87,7 @@ num_decoder = 6
 num_single_frame_decoder = 1
 num_single_frame_decoder_map = 1
 use_deformable_func = True  # mmdet3d_plugin/ops/setup.py needs to be executed
-# aux2d_only consumes only 3 FPN levels (depth uses 3, aux2d uses level 0).
-# Drop the deepest level + corresponding backbone stage so no parameter is
-# built without gradient flow.
-strides = [4, 8, 16]
+strides = [4, 8, 16, 32]
 num_levels = len(strides)
 num_depth_layers = 3
 drop_out = 0.1
@@ -100,16 +111,15 @@ model = dict(
     img_backbone=dict(
         type="ResNet",
         depth=50,
-        # 3-stage truncated ResNet50 — layer4 is unused without det/map heads,
-        # so we don't build it (saves ~15M params + the layer4 FLOPs).
-        num_stages=3,
-        strides=(1, 2, 2),
-        dilations=(1, 1, 1),
+        num_stages=4,
         frozen_stages=-1,
         norm_eval=False,
         style="pytorch",
-        with_cp=True,
-        out_indices=(0, 1, 2),
+        # with_cp=False is the companion to find_unused_parameters=True:
+        # reentrant grad-checkpointing collides with parameter-usage tracking
+        # under DDP. The H100/L40S targets have plenty of memory.
+        with_cp=False,
+        out_indices=(0, 1, 2, 3),
         norm_cfg=dict(type="BN", requires_grad=True),
         pretrained="ckpt/resnet50-19c8e357.pth",
     ),
@@ -120,7 +130,7 @@ model = dict(
         out_channels=embed_dims,
         add_extra_convs="on_output",
         relu_before_extra_convs=True,
-        in_channels=[256, 512, 1024],
+        in_channels=[256, 512, 1024, 2048],
     ),
     depth_branch=dict(  # for auxiliary supervision only
         type="DenseDepthNet",
