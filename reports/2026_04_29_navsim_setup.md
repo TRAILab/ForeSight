@@ -413,11 +413,18 @@ untouched.
    placeholders with the correct shapes ((10, 6, 16, 2) motion, (4, 6, 8, 2)
    plan); real anchors must be regenerated from navtrain after data lands.
 
-| Model | PDMS | NC | DAC | EP | TTC | Comf. | DDC | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| _baseline ref_ DiffusionDrive | 88.1 | — | — | — | — | — | — | published |
-| ForeSight SparseDrive (planning-only) | — | — | — | — | — | — | — | TBD |
-| ForeSight SparseDrive (full) | — | — | — | — | — | — | — | TBD |
+## Results table (PDM-Score on navtest, 12146 scenarios)
+
+Higher is better for all sub-metrics.
+
+| Job | Config | Epochs | PDMS | NAC | DAC | EP | TTC | Comf | DDC | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| _ref_ DiffusionDrive (published) | — | — | **88.1** | — | — | — | — | — | — | leaderboard north star |
+| **3727 → 3746 eval** | `navsim_planonly` (baseline) fp32 bs=8 | 1 | **0.6502** | 0.9319 | 0.7893 | 0.5976 | 0.8518 | 0.9817 | 0.9207 | First real PDMS — image norm + timestamp + abs SE3 + photo-metric all in |
+| 3750 (in flight) | `navsim_planonly_minS2` fp32 bs=8 | 1 | TBD | — | — | — | — | — | — | Adds plan_ego_status_encode, ego_only_planning, zero motion losses, freeze backbone+perception, eval_skip_map |
+| TBD | + hflip shared-seed | 1 | TBD | — | — | — | — | — | — | Mirror-symmetric augmentation across both builders |
+| TBD | + minS2 arch knobs (planning_cumulative_refinement etc.) | 1 | TBD | — | — | — | — | — | — | More config knobs from the nuScenes minS2 winner |
+| TBD | overnight: best 1-epoch config | 10 | TBD | — | — | — | — | — | — | Promotion gate after Tier-2 sweeps |
 
 ## Current State (2026-05-03, updated from 2026-05-01)
 
@@ -548,77 +555,118 @@ nuScenes checkpoint to give det/map meaningful pretrained weights, freeze
 them, skip their losses. Cross-attention then sees real (frozen) detection
 features instead of noise.
 
-## Next Steps (clean session pickup)
+## Iteration Plan (2026-05-03 PM)
 
-1. **Watch DGX job 3724 past step ~4300.** If clean: cancel and resubmit with `batch_size=8`, updated config (`skip_perception_kv=True`, `num_map=0`). If NaN: drop to LR=1e-5 + grad_clip=0.5.
+**Strategy**: Tier-2 stage-2-safe knobs first, each as a 1-epoch + eval cycle
+(~95 min/iter, ~60 min once `ray_distributed_torch` is validated). Promote
+the best 1-epoch config to a 10-epoch overnight run. 100-epoch runs
+deferred — too long for iteration (~3.3 days).
 
-2. **Once nuScenes `s2nopercep` / `frozenpercep` / `minS2` land (~3h from 2026-05-03):** check whether freezing the backbone matters (frozenpercep result). If it does, add backbone freeze to the NavSim agent.
+**Sub-metric weak spots from 3727 baseline** (PDMS=0.65):
+- **DAC = 0.79** (worst, ~21% leave drivable area) → needs map awareness; will be fundamentally limited until stage-1 map GT is wired (Tier 3).
+- **EP = 0.60** → too cautious / stalls; minS2's `plan_ego_status_encode` should help directly. Verify with 3750 result.
+- Everything else (NAC 0.93, TTC 0.85, Comf 0.98, DDC 0.92) is healthy.
 
-3. **Once a ckpt lands from the higher-bs run**, run PDM-Score eval:
-   ```
-   bash scripts/navsim_eval.sh <ckpt_path> navtest
-   ```
-   metric_cache at `/scratch/spapais/ForeSight/work_dirs/navsim/metric_cache` (Killarney) or DGX equivalent.
+### Tier 2 — Stage-2-safe 1-epoch sweeps (current focus)
 
-## Roadmap: Gaps vs a Full NavSim Implementation
+Numbered in the order we'll run them. Each row gates the next on a sane
+PDMS (≥ baseline ± 1%):
 
-The current setup is a deliberately minimal first pass. The gaps below are
-ordered by effort/impact tradeoff — quick wins first, then heavy lifts.
-All items 1–3 invalidate the training cache and require a ~46 min rebuild
-before the next training run.
+1. **3750 minS2 baseline (in flight)** — 5-knob port of nuScenes minS2:
+   `plan_ego_status_encode_enable`, `ego_only_planning`, zero motion losses,
+   freeze backbone+perception via `lr_mult=0`, `use_rescore=False`, plus
+   `eval_skip_map=True` for faster eval. Expected: ↑EP, similar everything else.
+2. **+ hflip with shared per-token seed** — port the deferred hflip but with
+   a hash-derived seed (e.g. `hash(scene_metadata.initial_token)` in the
+   target builder, `hash(agent_input.cameras[-1].cam_f0.intrinsics.tobytes())`
+   or similar shared content in the feature builder) so both builders pick
+   the same flip choice → mirrored image AND mirrored gt_ego_fut_trajs.
+   Doubles dataset diversity. Expected: ↑DAC modestly, ↑PDMS 1-3%.
+3. **+ minS2 arch knobs we didn't first port**:
+   - `planning_cumulative_refinement=True`, `motion_cumulative_refinement=True`
+   - `planning_deformable=True`, `planning_deformable_instfeat=True`,
+     `planning_deformable_instfeat_laststage=True`,
+     `planning_deformable_waypoints=[0,1,2,3,4,5]`
+   - `motion_deformable_multimode=True`
+   - These are config-only knobs that already have plumbing in the head
+     code (minS2 ships them on the same head). Expected: small wins.
+4. **+ mixed precision done right** — needs `@force_fp32` decorators around
+   mmcv focal_loss + careful dtype handling at the det/map loss boundary
+   (3748 fp16 NaN'd, 3749 bf16 crashed on focal_loss CUDA kernel).
+   ~1.5-2× training throughput once it works. ~2-4 hr engineering.
+5. **+ ray_distributed_torch eval validation** — code committed but
+   untested in distributed mode. Test on a checkpoint from #3 or #4. If
+   it works, eval cycle drops 50→15 min.
 
-### 1. Real `T_global` (temporal cache) — HIGH impact, medium effort
-Feature builder currently injects identity matrices for `T_global` /
-`T_global_inv`. The instance bank uses these to warp temporal anchors
-between frames; identity means no ego-motion compensation, so the temporal
-cache is completely broken. Fix: read `ego_status.ego2global_rotation` /
-`ego2global_translation` from each history frame, build the 4×4 SE3 matrix,
-and inject the current-frame global→lidar inverse as `T_global_inv`.
-This is the single biggest gap vs the nuScenes setup. **Start here.**
+### Tier 2 promotion gate
 
-### 2. Ego status channels — HIGH impact, low effort
-NavSim only ships 2D acc + 2D vel. The 10-dim `ego_status` used by the
-planner (`[acc_xyz, rot_rate_xyz, vel_xyz, steer]`) has channels 2, 3–5,
-8, 9 always zero. `rot_rate_z` can be computed from consecutive ego pose
-headings (Δheading / Δt); `steer` is available from nuPlan's
-`EgoStatus.tire_steering_angle`. Fix is a few lines in
-`sparsedrive_features.py`. Do alongside T_global since it also requires a
-cache rebuild.
+Run **10 epochs overnight on the best 1-epoch config**. ~9 hr wall.
+This is where we expect the real step-change in PDMS — the nuScenes minS2
+winner trained for 10 epochs.
 
-### 3. Data augmentation — MEDIUM impact, low effort
-NavSim cache stores fixed resized images — no random crop/flip/rotation.
-nuScenes applies `ResizeCropFlipImage`, `BBoxRotation`,
-`PhotoMetricDistortion` every step. The simplest fix is to apply random
-horizontal flip + colour jitter inside `compute_features` before writing
-to cache (many augmented views of each token). A cleaner approach is
-on-the-fly augmentation at load time, skipping the cache for image tensors.
-Do alongside the cache rebuild for items 1–2.
+### Tier 3 — Sub-metric-targeted (medium effort, multi-day)
 
-### 4. Motion supervision + custom collate — HIGH impact, high effort
-`gt_agent_fut_trajs` for surrounding agents is not wired. The motion head
-runs forward but is completely unsupervised, so the motion queries feeding
-into planning cross-attention are untrained. Requires: (a) per-track future
-trajectories from nuPlan annotations across frames, (b) a custom
-`collate_fn` to pad variable-length agent counts (default_collate breaks on
-variable N). This is the heaviest lift in the near-term roadmap.
+Pursue once Tier 2 is exhausted or PDMS plateaus. Still stage-2-safe.
 
-### 5. Motion k-means regeneration — LOW effort, follows #4
-Current motion anchors are random placeholders. Plan-side anchors are real.
-Regenerate on navtrain agent futures once #4 is wired.
+- **DAC fix via real map GT**. Build `Scene.map_api` → polylines extractor
+  in current-ego frame, vectorize to `(N, 38, 20, 2)`, plug into a custom
+  collate_fn for variable-N. Flip `num_map=10` and `skip_perception_kv=False`.
+  This is a stage-1-shaped change but ships planning-only benefits.
+- **Lidar depth aux loss**. `MultiScaleDepthMapGenerator`-equivalent in the
+  feature builder; cache size grows. Stabilizes backbone features.
+- **All 8 cameras**. Restore `cam_l1` / `cam_r1`. Touches backbone camera
+  embed dim. Low impact unless side-camera coverage becomes a metric driver.
 
-### 6. Stage-1 NavSim — HIGH impact, very high effort
-Det/map heads are frozen at stage-1 nuScenes weights. A stage-1 NavSim run
-would give the backbone domain-adapted features, likely needed to approach
-DiffusionDrive's 88.1 PDMS. Requires #4 (padded GT + custom collate) first.
+### Tier 4 — Stage-1 perception (real det/motion GT)
 
-### 7. All 8 cameras — LOW impact, medium effort
-`cam_l1` and `cam_r1` are dropped. Extending to 8 cameras requires changes
-to the backbone camera-embed dimensions and projection geometry. Worth
-revisiting if side-camera coverage proves important for PDMS.
+Heaviest lift; unlocks unfreezing perception heads. Needs:
+- nuPlan `Annotations` → 11-dim SparseDrive boxes flowing through the
+  target builder (the converter exists in `sparsedrive_features.py:92` but
+  isn't called).
+- Per-agent future trajectories via cross-frame `track_tokens` walk over
+  `Scene.frames`.
+- Custom `collate_fn` for variable-length per-batch GT lists.
+- Re-enable det/map/motion losses + remove the agent's freeze.
 
-### 8. Joint nuScenes + NavSim training — long-term
-Shared backbone with task-specific heads, unified data loader, careful loss
-balancing.
+### Tier 5 — Long-term
 
-### 9. Closed-loop fine-tuning — very long-term
-PDM-Score as reward signal. Requires differentiable simulator or RL wrapper.
+- Joint nuScenes + NavSim training (shared backbone, task-specific heads).
+- Closed-loop fine-tuning with PDM-Score as reward (differentiable sim or RL).
+
+## Eval-time speedups landed (untested in production)
+
+Three optional opt-ins for the next eval cycle, committed in `a6843dd`:
+
+1. `_eval_fp16` flag on `SparseDriveAgent` — wraps eval-mode forward in
+   `torch.cuda.amp.autocast(dtype=torch.float16)`. Default True. ~17%
+   faster on local A6000. Only the eval path is wrapped — training is
+   unaffected.
+2. `eval_skip_map` flag on `SparseDriveHead` — skips map_head's forward +
+   post_process at eval when `num_map=0` makes it dead compute. Wired
+   `True` in `navsim_planonly_minS2.py` config.
+3. `worker=ray_distributed_torch` (new yaml + `worker_ray_torch.py`) —
+   navsim-side subclass of `RayDistributedNoTorch` that registers GPUs
+   with ray and stamps every dispatched task with `num_gpus_per_task`.
+   Expected to enable true 4-GPU eval distribution. Untested in production
+   (validate on first DGX use).
+
+## DGX bash script gotchas (fixed)
+
+- `navsim_train.sh` reads cache from `${NAVSIM_DATA_ROOT}/training_cache`
+  but `navsim_cache.sh` writes to `${NAVSIM_EXP_ROOT}/training_cache`. Both
+  now use `NAVSIM_EXP_ROOT` (`91802f1`).
+- `navsim_eval.sh` sourced `navsim_setup.sh` without an empty arg, so its
+  shifted positional args leaked into setup's case statement and the
+  `*) Unknown subcommand` branch killed the job. Fixed to source with `""`
+  (`94c72b3`).
+- Agent's `os.getcwd()` based `ckpt_dir` lands ckpts in the repo root
+  instead of the Hydra per-run dir. Workaround: ckpts at
+  `/raid/home/spapais/ForeSight/checkpoints/sparsedrive-epoch=*-step=*.ckpt`,
+  filter by mtime to disambiguate runs. Real fix: use `HydraConfig.get().runtime.output_dir`.
+- nuplan-devkit's `worker_map` creates `Task(fn=fn)` without `num_gpus`,
+  so `worker=ray_distributed` workers don't get CUDA → `t == DeviceType::
+  CUDA INTERNAL ASSERT FAILED`. Worked around via `RayDistributedTorch`
+  subclass (above).
+- PDM-Score eval default `worker=single_machine_thread_pool` with all
+  CPUs → 64 threads on 1 GPU → 38GB OOM. Sweet spot: ~8-32 threads on a
+  40GB A100, with throughput plateauing past 8 (GPU contention dominates).
