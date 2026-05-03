@@ -396,7 +396,7 @@ NeurIPS 2026 abstract deadline (typical: mid-May) — tight but feasible if we l
 | Job | Config | Outcome |
 |---|---|---|
 | **3397346** | `_egostatus_minS2` | **L2=0.3563 / CR=0.041%** — ties/marginally beats 3-seed headline mean (0.3692 / 0.040%). **Paper architecture locked.** |
-| **3397345** | `_egostatus_s2nopercep` | Training completed; eval crashed (same `KeyError` family as Stream C). Eval-only rerun queued |
+| **3397345 → 3406308** | `_egostatus_s2nopercep` | Training completed; eval crashed on NaN det boxes; eval-only rerun on iter_11720.pth landed: **L2=0.3572 / CR=0.061%** (ΔL2=−0.012 vs headline; CR +0.021 pp at noise edge). Stream A combined alone is empty for planning. |
 | **3394848** | `_egostatus_frozenpercep` | **L2=0.3698 / CR=0.044%** — within noise of headline; freezing S2 perception stack is safe |
 | **3394847** | `_streamc` eval-only | L2=0.3597 / CR=0.026% (already logged) |
 | **3394849** | `_egostatus` seed 2 | **L2=0.3660 / CR=0.039%** — locks 3-seed mean at 0.3692/0.040% |
