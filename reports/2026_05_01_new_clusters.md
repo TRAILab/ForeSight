@@ -152,21 +152,62 @@ ssh fir     "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=A
 ssh rorqual "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/rorqual_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage2_4gpu_bs24_predonly.py 4 --deterministic"
 ```
 
-#### Status (2026-05-02 — all three operational)
+#### Status (2026-05-03 — fully operational, eval bugs fixed)
 - [x] Run scripts created (`scripts/tamia_run.sh`, `scripts/fir_run.sh`, `scripts/rorqual_run.sh`)
 - [x] Branch pushed to origin
 - [x] GitHub SSH keys generated and added (Step 0)
 - [x] Repo cloned and on `sd_combined` (Steps 1–2)
 - [x] Scratch dirs created (Step 3)
 - [x] Container copied (Step 4)
-- [x] nuScenes data copied (Step 5) — includes `v1.0-trainval.zip` (required for end-of-training eval)
+- [x] nuScenes data copied (Step 5)
 - [x] Custom ops built (Step 6)
 - [x] Probe run submitted and completed (Step 7)
-- [x] Baseline (`_evalmatchmode`) reproduced on tamia and rorqual; fir eval job 38334420 pending
-- [x] Run scripts fixed: `v1.0-trainval.zip` added to extraction loop in fir/rorqual/tamia_run.sh
+- [x] Baseline (`_evalmatchmode`) reproduced on tamia and rorqual
+- [x] dtype fix (`95db051`) pulled on all three — egostatus CR no longer inflated
+- [x] Three eval bugs found and fixed (see below)
 - [x] CLAUDE.md, job-status skill, submit-job skill updated with fir/rorqual/tamia
 
-**Known issue**: tamia and rorqual are missing commit `95db051` ("fix SparseBox3DKeyPointsGenerator dtype") — `_evalmatchmode_egostatus` CR will be inflated (~3–6×) until `git pull` is run on both. `_evalmatchmode` (no egostatus) reproduces cleanly.
+#### Eval bugs fixed (2026-05-03)
+
+Three bugs caused eval crashes on fir/rorqual/tamia that don't affect killarney:
+
+**Bug 1 — `dist_test.sh` tmpdir** (tamia only, SciNet clusters)
+- Symptom: `rank N exitcode: 1` after ~4 min of GPU work; no metrics printed
+- Root cause: default `.dist_test` temp dir resolves under `/workspace/ForeSight/` which is read-only on SciNet compute nodes (same constraint as Trillium)
+- Fix: `tools/dist_test.sh` now defaults `--tmpdir /tmp/.dist_test` unless overridden; `/tmp` is always fast local NVMe via the run script bind mount
+
+**Bug 2 — missing `lidarseg.zip` extraction**
+- Symptom: `os.listdir(...lidarseg/v1.0-trainval...)` FileNotFoundError after full forward pass
+- Root cause: fir/rorqual/tamia run scripts listed zips explicitly (samples + maps + v1.0-trainval) and omitted `lidarseg.zip`; nuscenes-devkit checks for `lidarseg/v1.0-trainval/` at eval time; killarney uses `for file in $DATA_DIR/*.zip` which includes it
+- Fix: all three run scripts now use the same glob-except-sweeps pattern as `killarney_run.sh`
+
+**Bug 3 — tamia home quota (25 GB)**
+- Symptom: `git pull` fails with "Disk quota exceeded"
+- Root cause: `ckpt/` (9.2 GB) + `docker/` (11 GB) + code fills the 25 GB home limit
+- Fix: `ckpt/` moved to `/scratch/s/spapais/ForeSight/ckpt/`; symlink left in home; `tamia_run.sh` adds `--bind=/scratch/s/spapais/ForeSight/ckpt:/workspace/ForeSight/ckpt` so container resolves it correctly
+
+#### In-flight jobs (2026-05-03, ~06:00 UTC)
+
+Training jobs use the old extraction loop (submitted pre-fix) — training will complete fine but end-of-training eval will crash. Dependent eval jobs are queued with `--dependency=afterany` to fire automatically when training exits.
+
+| Server | Train job | Config | Dependent eval |
+|---|---|---|---|
+| fir | 38334912 | `_egostatus_seed3` | 38335844 |
+| fir | 38334913 | `_streamc_seed3` | 38335845 |
+| rorqual | 11262594 | `_egostatus_seed3` | 11262873 |
+| rorqual | 11262596 | `_streamc_seed3` | 11262874 |
+| tamia | 272451 | `_egostatus_seed3` | 272460 |
+| tamia | 272452 | `_streamc_seed3` | 272461 |
+
+Standalone evals for seed-1 checkpoints also in flight:
+
+| Server | Eval job | Config | Notes |
+|---|---|---|---|
+| fir | 38335393 | `_evalmatchmode` | reproduction baseline |
+| rorqual | 11262822 | `_egostatus` | PENDING (DOWN nodes) |
+| tamia | 272454 | `_egostatus` | running |
+
+**When resuming**: run `/survey-results --server fir rorqual tamia` to pull metrics from completed jobs and update `results_summary.md`.
 
 #### Per-cluster notes
 
