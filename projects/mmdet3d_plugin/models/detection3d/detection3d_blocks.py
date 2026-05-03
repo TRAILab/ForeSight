@@ -199,7 +199,7 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
         if fix_scale is None:
             fix_scale = ((0.0, 0.0, 0.0),)
         self.fix_scale = nn.Parameter(
-            torch.tensor(fix_scale), requires_grad=False
+            torch.tensor(fix_scale, dtype=torch.float32), requires_grad=False
         )
         self.num_pts = len(self.fix_scale) + num_learnable_pts
         if num_learnable_pts > 0:
