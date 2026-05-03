@@ -15,7 +15,10 @@ SPLIT="${2:-navtest}"
 shift 2 || shift 1 || true
 EXTRA_ARGS="$@"
 
-source "$(dirname "$0")/navsim_setup.sh"
+# Explicit "" so navsim_setup.sh's case statement sees an empty subcommand
+# (env-vars-only mode) and doesn't try to dispatch the positional EXTRA_ARGS
+# we just shifted off — same pattern used by navsim_train.sh / navsim_cache.sh.
+source "$(dirname "$0")/navsim_setup.sh" ""
 
 EXP_NAME="sparsedrive_${SPLIT}_eval_$(date +%Y%m%d_%H%M%S)"
 
