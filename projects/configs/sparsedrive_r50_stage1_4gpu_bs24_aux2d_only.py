@@ -33,6 +33,11 @@ log_config = dict(
 )
 load_from = None
 resume_from = None
+# Removing both det and map heads leaves some downstream parameters
+# (e.g. shared FFNs / norms in the head pipeline) without gradient flow
+# on every step. DDP's reduce-by-default chokes on those; opt in to
+# parameter-usage tracking so the allreduce only covers used grads.
+find_unused_parameters = True
 workflow = [("train", 1)]
 fp16 = dict(loss_scale=32.0)
 input_shape = (704, 256)
@@ -101,7 +106,7 @@ model = dict(
         frozen_stages=-1,
         norm_eval=False,
         style="pytorch",
-        with_cp=True,
+        with_cp=False,  # with_cp + find_unused_parameters=True conflicts via reentrant backward; H100 has plenty of memory
         out_indices=(0, 1, 2, 3),
         norm_cfg=dict(type="BN", requires_grad=True),
         pretrained="ckpt/resnet50-19c8e357.pth",
