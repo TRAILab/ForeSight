@@ -380,6 +380,7 @@ class MotionPlanningHead(BaseModule):
         self.conflict_input = conflict_input
         _valid_conflict_inputs = (
             'agent_token', 'image_at_det', 'image_at_plan', 'image_at_init_topk',
+            'image_at_init_topk_and_plan', 'image_at_ego_grid',
             'image_at_scene_query',
         )
         if conflict_input not in _valid_conflict_inputs:
@@ -389,7 +390,8 @@ class MotionPlanningHead(BaseModule):
         # conflict_image_sampler is only needed for det/plan/init_topk modes;
         # scene_query mode uses the decoder's own deformable attention.
         _needs_image_sampler = conflict_input in (
-            'image_at_det', 'image_at_plan', 'image_at_init_topk'
+            'image_at_det', 'image_at_plan', 'image_at_init_topk',
+            'image_at_init_topk_and_plan', 'image_at_ego_grid',
         )
         if _needs_image_sampler:
             assert conflict_image_sampler is not None, (
@@ -433,9 +435,9 @@ class MotionPlanningHead(BaseModule):
         # over all M*K. Track sample count K so the loss can reshape correctly.
         self._conflict_per_mode_K = None  # set in forward when applicable
         self.conflict_init_topk = int(conflict_init_topk)
-        if conflict_input == 'image_at_init_topk':
+        if conflict_input in ('image_at_init_topk', 'image_at_init_topk_and_plan'):
             assert conflict_init_anchor_path is not None, (
-                "conflict_input='image_at_init_topk' requires conflict_init_anchor_path"
+                f"conflict_input={conflict_input!r} requires conflict_init_anchor_path"
             )
             init_anchors = np.load(conflict_init_anchor_path)
             # Expect shape (N, 11) — full SparseDrive anchor format.
@@ -449,6 +451,22 @@ class MotionPlanningHead(BaseModule):
             )
         else:
             self.conflict_init_anchors = None
+        # B1.9: ego-anchored fixed BEV grid (5x5 by default). Shared across
+        # plan modes; loss uses global-pool path (per_mode_K = grid size,
+        # total = K, smooth-max over all grid points per output mode).
+        if conflict_input == 'image_at_ego_grid':
+            grid_x = torch.tensor([0.0, 6.0, 12.0, 18.0, 24.0])  # forward (m)
+            grid_y = torch.tensor([-8.0, -4.0, 0.0, 4.0, 8.0])  # lateral (m)
+            xs, ys = torch.meshgrid(grid_x, grid_y, indexing='ij')
+            xy = torch.stack([xs.flatten(), ys.flatten()], dim=-1)  # (25, 2)
+            ego_grid = xy.new_zeros(xy.shape[0], 11)
+            ego_grid[:, 0:2] = xy
+            ego_grid[:, 7] = 1.0  # cos(yaw=0)
+            self.register_buffer(
+                'conflict_ego_grid_anchors', ego_grid, persistent=False
+            )
+        else:
+            self.conflict_ego_grid_anchors = None
         self.planning_temporal_stack = int(planning_temporal_stack)
         self.planning_temporal_egocomp = bool(planning_temporal_egocomp)
         # Anchor normalization variants. 'none' is the default static-meter
@@ -1681,6 +1699,47 @@ class MotionPlanningHead(BaseModule):
                     det_anchors.device, dtype=det_anchors.dtype
                 )
                 self._conflict_per_mode_K = K_topk
+            elif self.conflict_input == 'image_at_init_topk_and_plan':
+                # B1.8: union of B1.6 (init_topk) and B1.7 (plan waypoints).
+                # Per mode K = K_topk + T. Anchors laid out as
+                # [topk_0..topk_{K-1}, plan_t0..plan_{T-1}] for each mode.
+                init_anchors = self.conflict_init_anchors  # (N, 11)
+                N_init = init_anchors.shape[0]
+                K_topk = min(self.conflict_init_topk, N_init)
+                plan_xy_full = self.plan_anchor.detach()  # (cmd, mode, T, 2)
+                M_total = plan_xy_full.shape[0] * plan_xy_full.shape[1]
+                T = plan_xy_full.shape[2]
+                plan_xy = plan_xy_full.reshape(M_total, T, 2).cumsum(dim=-2)
+                anc_xy = init_anchors[:, 0:2]
+                d2 = ((plan_xy.to(anc_xy.device).unsqueeze(2) - anc_xy.unsqueeze(0).unsqueeze(0)) ** 2).sum(-1)
+                d2_min = d2.min(dim=1).values
+                topk_idx = d2_min.topk(K_topk, dim=-1, largest=False).indices  # (M, K)
+                topk_anchors = init_anchors[topk_idx]  # (M, K, 11)
+                # Plan-waypoint anchors per mode (M, T, 11).
+                plan_anc = plan_xy.new_zeros(M_total, T, 11)
+                plan_anc[..., 0:2] = plan_xy
+                plan_anc[..., 7] = 1.0  # cos(yaw=0)
+                plan_anc = plan_anc.to(topk_anchors.device, dtype=topk_anchors.dtype)
+                # Concatenate per-mode keypoints: [topk(K), plan(T)] → (M, K+T, 11)
+                K_total_per_mode = K_topk + T
+                combined = torch.cat([topk_anchors, plan_anc], dim=1)
+                combined = combined.reshape(M_total * K_total_per_mode, 11)
+                bs_local = det_anchors.shape[0]
+                sampler_anchors = combined.unsqueeze(0).expand(bs_local, -1, -1).contiguous().to(
+                    det_anchors.device, dtype=det_anchors.dtype
+                )
+                self._conflict_per_mode_K = K_total_per_mode
+            elif self.conflict_input == 'image_at_ego_grid':
+                # B1.9: fixed BEV grid centered on ego (lidar frame). 25 points
+                # by default (5 forward × 5 lateral). Shared across plan modes;
+                # loss uses global-pool path (total = K, K queries per mode).
+                ego_grid = self.conflict_ego_grid_anchors  # (K, 11)
+                K_grid = ego_grid.shape[0]
+                bs_local = det_anchors.shape[0]
+                sampler_anchors = ego_grid.unsqueeze(0).expand(bs_local, -1, -1).contiguous().to(
+                    det_anchors.device, dtype=det_anchors.dtype
+                )
+                self._conflict_per_mode_K = K_grid  # global pool: total == K
             else:
                 raise NotImplementedError(self.conflict_input)
             if self.conflict_input == 'image_at_scene_query':
@@ -3050,7 +3109,8 @@ class MotionPlanningHead(BaseModule):
         # (image_at_plan, image_at_init_topk, image_at_scene_query). Bypasses
         # Hungarian matching and uses per-mode evalmatch labels directly.
         if self.conflict_input in (
-            'image_at_plan', 'image_at_init_topk', 'image_at_scene_query'
+            'image_at_plan', 'image_at_init_topk', 'image_at_init_topk_and_plan',
+            'image_at_ego_grid', 'image_at_scene_query',
         ):
             return self._loss_planning_conflict_per_mode(conf_logits, reg, data)
         if motion_loss_cache is None:
