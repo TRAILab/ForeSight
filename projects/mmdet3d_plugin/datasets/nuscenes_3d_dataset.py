@@ -101,6 +101,8 @@ class NuScenes3DDataset(Dataset):
         keep_consistent_seq_aug=True,
         work_dir=None,
         eval_config=None,
+        polygon_geom_layers=None,
+        polygon_geom_roi_size=(60, 30),
     ):
         self.version = version
         self.load_interval = load_interval
@@ -115,10 +117,26 @@ class NuScenes3DDataset(Dataset):
 
         if classes is not None:
             self.CLASSES = classes
-        if map_classes is not None: 
+        if map_classes is not None:
             self.MAP_CLASSES = map_classes
         self.cat2id = {name: i for i, name in enumerate(self.CLASSES)}
         self.data_infos = self.load_annotations(self.ann_file)
+
+        # Optional live polygon-layer extraction for dseg v2-style supervision.
+        # `polygon_geom_layers` is a tuple of nuScenes map polygon layer names
+        # (e.g. ('drivable_area', 'walkway', 'stop_line')) to inject into
+        # `input_dict['map_geoms']` at load time. Saved `map_annos` only
+        # contains LineStrings (geom2anno strips polygons), so polygons are
+        # re-extracted live via NuscMapExtractor. None disables (default).
+        self.polygon_geom_layers = (
+            tuple(polygon_geom_layers) if polygon_geom_layers else None
+        )
+        self._polygon_extractor = None
+        if self.polygon_geom_layers and data_root is not None:
+            from .map_utils.nuscmap_extractor import NuscMapExtractor
+            self._polygon_extractor = NuscMapExtractor(
+                data_root=data_root, roi_size=polygon_geom_roi_size,
+            )
 
         if pipeline is not None:
             self.pipeline = Compose(pipeline)
@@ -327,6 +345,23 @@ class NuScenes3DDataset(Dataset):
         input_dict["lidar2global"] = ego2global @ lidar2ego
 
         map_geoms = self.anno2geom(info["map_annos"])
+        if self._polygon_extractor is not None:
+            # Re-extract polygon layers live (saved `map_annos` only has LineStrings).
+            # Pose is the lidar-to-global transform (matches data prep convention).
+            l2g = input_dict["lidar2global"]
+            translation = l2g[:3, 3].tolist()
+            rotation_q = pyquaternion.Quaternion(matrix=l2g).q.tolist()
+            try:
+                live = self._polygon_extractor.get_map_geom(
+                    info["map_location"], translation, rotation_q,
+                )
+                for layer in self.polygon_geom_layers:
+                    map_geoms[layer] = live.get(layer, [])
+            except Exception:
+                # Defensive: if extraction fails for one sample, fall back to
+                # empty polygon list rather than crashing the dataloader.
+                for layer in self.polygon_geom_layers:
+                    map_geoms[layer] = []
         input_dict["map_geoms"] = map_geoms
 
         if self.modality["use_camera"]:

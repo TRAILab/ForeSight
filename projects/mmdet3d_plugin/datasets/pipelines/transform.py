@@ -220,6 +220,7 @@ class GenerateDenseSegMask(object):
         class_specs=None,
         polyline_thickness_px=2,
         polyline_sample_dist_m=0.5,
+        polygon_grid_step_m=0.5,
         min_depth=0.1,
         agent_class_names=(
             "car", "truck", "construction_vehicle", "bus",
@@ -244,6 +245,7 @@ class GenerateDenseSegMask(object):
         self.num_classes = len(class_specs)
         self.polyline_thickness_px = int(polyline_thickness_px)
         self.polyline_sample_dist_m = float(polyline_sample_dist_m)
+        self.polygon_grid_step_m = float(polygon_grid_step_m)
         self.min_depth = float(min_depth)
         self.agent_class_names = list(agent_class_names)
         self._agent_label_lookup = {
@@ -332,6 +334,54 @@ class GenerateDenseSegMask(object):
                 sampled.append(coords)
             sampled_lines_per_class.append(sampled)
 
+        # Pre-sample polygon interiors once per layer (in lidar frame). Each
+        # row is a list of arrays: one (M, 3) array per Polygon (its interior
+        # rasterized at `polygon_grid_step_m` spacing). Used by `map_polygon`
+        # source to project the polygon's filled region into camera image
+        # space and rasterize via convex hull (matches `agent_box` pattern).
+        sampled_polygons_per_class = []
+        for spec in self.class_specs:
+            if spec["source"] != "map_polygon":
+                sampled_polygons_per_class.append(None)
+                continue
+            layer = spec["layer"]
+            geoms = input_dict.get("map_geoms", {}).get(layer, [])
+            sampled = []
+            step = max(self.polygon_grid_step_m, 1e-3)
+            for poly in geoms:
+                if poly.is_empty or poly.area < 1e-3:
+                    continue
+                minx, miny, maxx, maxy = poly.bounds
+                # Build a grid of (x, y) candidates and keep those inside.
+                xs = np.arange(minx, maxx + step, step, dtype=np.float32)
+                ys = np.arange(miny, maxy + step, step, dtype=np.float32)
+                if xs.size == 0 or ys.size == 0:
+                    continue
+                gx, gy = np.meshgrid(xs, ys, indexing='xy')
+                pts_xy = np.stack([gx.ravel(), gy.ravel()], axis=-1)
+                # Vectorized inside-test would be ideal, but shapely's
+                # `contains` doesn't vectorize; use prepared geometry path.
+                from shapely.prepared import prep
+                from shapely.geometry import Point
+                prepared = prep(poly)
+                inside_mask = np.array(
+                    [prepared.contains(Point(p)) for p in pts_xy],
+                    dtype=bool,
+                )
+                pts_xy = pts_xy[inside_mask]
+                # Always include the polygon boundary so thin/elongated
+                # polygons still get coverage when the grid undersamples.
+                ext = np.array(poly.exterior.coords, dtype=np.float32)
+                pts_xy = np.concatenate([pts_xy, ext[:, :2]], axis=0)
+                if pts_xy.shape[0] < 3:
+                    continue
+                pts_xyz = np.concatenate(
+                    [pts_xy, np.zeros((pts_xy.shape[0], 1), dtype=np.float32)],
+                    axis=-1,
+                )
+                sampled.append(pts_xyz)
+            sampled_polygons_per_class.append(sampled)
+
         # Pre-project agent corners once per camera (saves work across classes).
         gt_bboxes_3d = input_dict.get("gt_bboxes_3d")
         gt_labels_3d = input_dict.get("gt_labels_3d")
@@ -387,6 +437,18 @@ class GenerateDenseSegMask(object):
                             self._draw_polyline(
                                 mask[cls_idx], uv_ds, valid, thickness,
                             )
+                    elif spec["source"] == "map_polygon":
+                        for poly_xyz in sampled_polygons_per_class[cls_idx] or []:
+                            uv, valid = self._project_pts(poly_xyz, lidar2img)
+                            uv_ds = uv / ds
+                            inside = np.logical_and.reduce([
+                                uv_ds[:, 0] >= -1, uv_ds[:, 0] < w + 1,
+                                uv_ds[:, 1] >= -1, uv_ds[:, 1] < h + 1,
+                            ])
+                            valid = valid & inside
+                            if valid.sum() < 3:
+                                continue
+                            self._draw_agent(mask[cls_idx], uv_ds, valid)
                     elif spec["source"] == "agent_box":
                         if agent_corners_per_cam[cam_idx] is None:
                             continue

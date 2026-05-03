@@ -150,10 +150,26 @@ class NuscMapExtractor(object):
         # boundaries are defined as the contour of drivable areas
         boundaries = get_drivable_area_contour(drivable_areas, self.roi_size)
 
+        # walkway polygons (sidewalk regions) — for dseg v2 +polygon channels
+        walkway_polys = self.map_explorer[location]._get_layer_polygon(
+                    patch_box, yaw, 'walkway')
+        walkways = []
+        for w in walkway_polys:
+            walkways += split_collections(w)
+
+        # stop_line polygons (painted stop line areas)
+        stop_line_polys = self.map_explorer[location]._get_layer_polygon(
+                    patch_box, yaw, 'stop_line')
+        stop_lines = []
+        for s in stop_line_polys:
+            stop_lines += split_collections(s)
+
         return dict(
             divider=all_dividers, # List[LineString]
             ped_crossing=ped_crossing_lines, # List[LineString]
             boundary=boundaries, # List[LineString]
-            drivable_area=drivable_areas, # List[Polygon],
+            drivable_area=drivable_areas, # List[Polygon]
+            walkway=walkways, # List[Polygon]
+            stop_line=stop_lines, # List[Polygon]
         )
 
