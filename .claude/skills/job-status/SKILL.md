@@ -1,11 +1,11 @@
 ---
 name: job-status
-description: Checks running and queued jobs on DGX, Apollo, Narval, Trillium, or Killarney when the user asks for remote job status.
+description: Checks running and queued jobs on DGX, Apollo, Narval, Trillium, Killarney, Fir, Rorqual, or Tamia when the user asks for remote job status.
 ---
 
 ## Inputs
 Parse from: `$ARGUMENTS`
-- `--server` (default: `all`): `dgx` | `apollo` | `narval` | `trillium` | `killarney` | `all`
+- `--server` (default: `all`): `dgx` | `apollo` | `narval` | `trillium` | `killarney` | `fir` | `rorqual` | `tamia` | `all`
 
 Use the host and VPN rules from `.claude/CLAUDE.md` as needed.
 
@@ -40,6 +40,15 @@ timeout 15 ssh trillium_gpu "source ~/.bashrc && squeue -u spapais --noheader --
 
 # Killarney (needs module load)
 timeout 15 ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && squeue -u spapais --noheader --format='%.10i|%.8T|%.10M|%.10L|%.6D|%.20b|%R'" 2>&1
+
+# Fir
+timeout 15 ssh fir "source ~/.bashrc && squeue -u spapais --noheader --format='%.10i|%.8T|%.10M|%.10L|%.6D|%.20b|%R'" 2>&1
+
+# Rorqual
+timeout 15 ssh rorqual "source ~/.bashrc && squeue -u spapais --noheader --format='%.10i|%.8T|%.10M|%.10L|%.6D|%.20b|%R'" 2>&1
+
+# Tamia
+timeout 15 ssh tamia "source ~/.bashrc && squeue -u spapais --noheader --format='%.10i|%.8T|%.10M|%.10L|%.6D|%.20b|%R'" 2>&1
 ```
 
 ### Per-job config + mode (SLURM)
@@ -49,7 +58,8 @@ For each job ID returned above, run **in parallel**:
 ```bash
 # DGX repo path
 timeout 10 ssh trail_dgx "head -1 /raid/home/spapais/ForeSight/logs/foresight-<JOBID>.log 2>/dev/null"
-# Other servers: /home/spapais/ForeSight/logs/foresight-<JOBID>.log
+# Standard Alliance Canada servers (narval, trillium, killarney, fir, rorqual): /home/spapais/ForeSight/logs/foresight-<JOBID>.log
+# Tamia (SciNet path): /home/s/spapais/ForeSight/logs/foresight-<JOBID>.log
 ```
 
 Parse the first line `Running: bash ./tools/dist_<train|test>.sh projects/configs/<config>.py <ngpus> ...`:

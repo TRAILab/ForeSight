@@ -1,13 +1,13 @@
 ---
 name: submit-job
-description: Submits a ForeSight training or evaluation run to DGX, Apollo, Narval, Trillium, or Killarney when given a server and config path.
+description: Submits a ForeSight training or evaluation run to DGX, Apollo, Narval, Trillium, Killarney, Fir, Rorqual, or Tamia when given a server and config path.
 ---
 
 ## Inputs
 Parse from: `$ARGUMENTS`
-- `--server` (required): `dgx` | `apollo` | `narval` | `trillium` | `killarney`
+- `--server` (required): `dgx` | `apollo` | `narval` | `trillium` | `killarney` | `fir` | `rorqual` | `tamia`
 - `--config` (required): repo-relative config path such as `projects/configs/sparsedrive_r50_stage2_4gpu.py`
-- `--gpus`: default by server (`dgx=4`, `apollo=8`, `narval=4`, `trillium=4`, `killarney=4`)
+- `--gpus`: default by server (`dgx=4`, `apollo=8`, `narval=4`, `trillium=4`, `killarney=4`, `fir=4`, `rorqual=4`, `tamia=4`)
 - `--test`: run evaluation instead of training
 - `--ckpt`: checkpoint path required with `--test`
 
@@ -24,7 +24,7 @@ If missing, stop and tell the user to push locally and run `git pull` on the rem
 ## Wrapped command
 - Train: `bash ./tools/dist_train.sh <config> <gpus> --deterministic`
 - Test: `bash ./tools/dist_test.sh <config> <ckpt> <gpus> --deterministic --eval bbox`
-- On Trillium, append `--tmpdir /tmp/.dist_test` to the test command (cwd is read-only, default `.dist_test` fails at result collection)
+- `--tmpdir /tmp/.dist_test` is now the default in `dist_test.sh` (no need to pass manually)
 
 ## Time limit
 - Training: leave the script default (typically 11:59:00 / 12h).
@@ -61,6 +61,24 @@ Parse `Submitted batch job <ID>`.
 ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && sbatch --export=ALL /home/spapais/ForeSight/scripts/killarney_run.sh <wrapped_cmd>"
 ```
 Parse `Submitted batch job <ID>`.
+
+### Fir
+```bash
+ssh fir "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/fir_run.sh <wrapped_cmd>"
+```
+Parse `Submitted batch job <ID>`.
+
+### Rorqual
+```bash
+ssh rorqual "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/rorqual_run.sh <wrapped_cmd>"
+```
+Parse `Submitted batch job <ID>`.
+
+### Tamia
+```bash
+ssh tamia "source ~/.bashrc && cd /home/s/spapais/ForeSight && sbatch --export=ALL scripts/tamia_run.sh <wrapped_cmd>"
+```
+Parse `Submitted batch job <ID>`. (Note: Tamia home path is `/home/s/spapais/` — SciNet convention.)
 
 ## Output
 - For DGX, Narval, Trillium, and Killarney, print the job ID and suggest `/parse-metrics --server <server> --job <ID>`.

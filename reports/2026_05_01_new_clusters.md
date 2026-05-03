@@ -152,16 +152,21 @@ ssh fir     "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=A
 ssh rorqual "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/rorqual_run.sh bash ./tools/dist_train.sh projects/configs/sparsedrive_r50_stage2_4gpu_bs24_predonly.py 4 --deterministic"
 ```
 
-#### Status (2026-05-01)
+#### Status (2026-05-02 — all three operational)
 - [x] Run scripts created (`scripts/tamia_run.sh`, `scripts/fir_run.sh`, `scripts/rorqual_run.sh`)
 - [x] Branch pushed to origin
 - [x] GitHub SSH keys generated and added (Step 0)
 - [x] Repo cloned and on `sd_combined` (Steps 1–2)
 - [x] Scratch dirs created (Step 3)
-- [ ] Container copied (Step 4)
-- [ ] nuScenes data copied (Step 5)
-- [ ] Custom ops built (Step 6)
-- [ ] Probe run submitted (Step 7)
+- [x] Container copied (Step 4)
+- [x] nuScenes data copied (Step 5) — includes `v1.0-trainval.zip` (required for end-of-training eval)
+- [x] Custom ops built (Step 6)
+- [x] Probe run submitted and completed (Step 7)
+- [x] Baseline (`_evalmatchmode`) reproduced on tamia and rorqual; fir eval job 38334420 pending
+- [x] Run scripts fixed: `v1.0-trainval.zip` added to extraction loop in fir/rorqual/tamia_run.sh
+- [x] CLAUDE.md, job-status skill, submit-job skill updated with fir/rorqual/tamia
+
+**Known issue**: tamia and rorqual are missing commit `95db051` ("fix SparseBox3DKeyPointsGenerator dtype") — `_evalmatchmode_egostatus` CR will be inflated (~3–6×) until `git pull` is run on both. `_evalmatchmode` (no egostatus) reproduces cleanly.
 
 #### Per-cluster notes
 

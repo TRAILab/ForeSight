@@ -16,6 +16,9 @@ Autonomous driving research codebase built on SparseDrive. Training and evaluati
 - Narval: `sbatch scripts/narval_run.sh <cmd>`
 - Trillium: `sbatch scripts/trillium_run.sh <cmd>`
 - Killarney: `sbatch scripts/killarney_run.sh <cmd>`
+- Fir: `sbatch scripts/fir_run.sh <cmd>`
+- Rorqual: `sbatch scripts/rorqual_run.sh <cmd>`
+- Tamia: `sbatch scripts/tamia_run.sh <cmd>`
 - Build custom ops after a fresh clone: `cd projects/mmdet3d_plugin/ops && python setup.py develop`
 
 ## Config Rules
@@ -73,7 +76,6 @@ Autonomous driving research codebase built on SparseDrive. Training and evaluati
 - Repo: `/home/spapais/ForeSight`
 - No VPN required
 - Home is read-only on compute nodes; output logs go to `/scratch/spapais/ForeSight/logs/`
-- Eval must pass `--tmpdir /tmp/.dist_test` (the default `.dist_test` resolves under read-only `/workspace/ForeSight` and the rank-0 mkdir crashes after the full forward pass)
 - GPU scheduling uses `--gpus-per-node=N` (not `--gres`); only 1 or 4 GPUs allowed per node
 - Remote submission over SSH (must use GPU login node):
   `ssh trillium_gpu "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/trillium_run.sh <cmd>"`
@@ -87,6 +89,40 @@ Autonomous driving research codebase built on SparseDrive. Training and evaluati
   `ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && sbatch --export=ALL /home/spapais/ForeSight/scripts/killarney_run.sh <cmd>"`
 - Container runtime is apptainer via CVMFS (not a loadable module); called via full path in `killarney_run.sh`
 - WandB runs in offline mode on Killarney.
+
+### Fir
+- Host: `fir`
+- Repo: `/home/spapais/ForeSight`
+- Scratch: `/scratch/spapais/ForeSight/`
+- No VPN required
+- H100 SXM5, account `def-swasland-ab`; data at `/project/def-swasland-ab/datasets/nuscenes2/`
+- Remote submission over SSH:
+  `ssh fir "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/fir_run.sh <cmd>"`
+- Container runtime is apptainer via CVMFS full path (not a loadable module); baked into `fir_run.sh`
+- WandB runs in offline mode on Fir.
+
+### Rorqual
+- Host: `rorqual`
+- Repo: `/home/spapais/ForeSight`
+- Scratch: `/scratch/spapais/ForeSight/`
+- No VPN required
+- H100 SXM5, account `def-swasland-ab_gpu`, partition `gpubase_bynode_b2`; data at `~/links/projects/def-swasland-ab/datasets/nuscenes/`
+- Remote submission over SSH:
+  `ssh rorqual "source ~/.bashrc && cd /home/spapais/ForeSight && sbatch --export=ALL scripts/rorqual_run.sh <cmd>"`
+- Container runtime is apptainer via CVMFS full path (not a loadable module); baked into `rorqual_run.sh`
+- WandB runs in offline mode on Rorqual.
+
+### Tamia
+- Host: `tamia`
+- Repo: `/home/s/spapais/ForeSight` (SciNet convention: home is `/home/s/spapais/`, not `/home/spapais/`)
+- Scratch: `/scratch/s/spapais/ForeSight/`
+- No VPN required
+- H100 SXM5, account `aip-swasland`; data at `~/links/projects/aip-swasland/datasets/nuscenes/`; 24h max wall time
+- Home is read-only on compute nodes (same SciNet constraint as Trillium); output logs go to `/scratch/s/spapais/ForeSight/logs/`
+- Remote submission over SSH:
+  `ssh tamia "source ~/.bashrc && cd /home/s/spapais/ForeSight && sbatch --export=ALL scripts/tamia_run.sh <cmd>"`
+- Container runtime is apptainer via CVMFS full path (not a loadable module); baked into `tamia_run.sh`
+- WandB runs in offline mode on Tamia.
 
 ## Git Workflow
 - Work locally, then push and pull on the target server.
