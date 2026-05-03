@@ -128,7 +128,11 @@ def main(cfg: DictConfig) -> None:
     logger.info("Num validation samples: %d", len(val_data))
 
     logger.info("Building Trainer")
-    trainer = pl.Trainer(**cfg.trainer.params, callbacks=agent.get_training_callbacks())
+    trainer_params = dict(cfg.trainer.params)
+    if trainer_params.get("strategy") in ("ddp", "ddp_find_unused_parameters_true", None):
+        from pytorch_lightning.strategies import DDPStrategy
+        trainer_params["strategy"] = DDPStrategy(find_unused_parameters=True, static_graph=True)
+    trainer = pl.Trainer(**trainer_params, callbacks=agent.get_training_callbacks())
 
     logger.info("Starting Training")
     trainer.fit(
