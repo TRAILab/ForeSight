@@ -366,5 +366,13 @@ class SparseDriveAgent(AbstractAgent):
                 every_n_epochs=1,
                 save_top_k=-1,
                 filename="sparsedrive-{epoch:02d}-{step:08d}",
+                # Lightning defaults save_on_train_epoch_end to None which
+                # resolves to "not _has_val()". The navsim DataModule defines
+                # a val dataloader so _has_val()=True; we set
+                # limit_val_batches=0 at the trainer level which skips val
+                # actually firing — net effect: ModelCheckpoint waits
+                # forever for val_epoch_end and never saves. Force on-train
+                # save so every epoch's weights land regardless.
+                save_on_train_epoch_end=True,
             ),
         ]
