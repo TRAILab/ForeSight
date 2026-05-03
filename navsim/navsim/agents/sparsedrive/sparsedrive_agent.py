@@ -118,6 +118,13 @@ class SparseDriveAgent(AbstractAgent):
     def initialize(self) -> None:
         if self._checkpoint_path:
             self._load_pretrained(self._checkpoint_path)
+        # PDM-Score eval invokes compute_trajectory directly (no Lightning
+        # wrapper), so the model would otherwise stay on CPU. Move to CUDA
+        # if available — the deformable_aggregation_ext op is CUDA-only and
+        # falls over with `t == DeviceType::CUDA INTERNAL ASSERT FAILED`
+        # when fed CPU tensors.
+        if torch.cuda.is_available():
+            self.cuda()
 
     def get_sensor_config(self) -> SensorConfig:
         # Only need the current frame's selected 6 cams; LiDAR off (camera-only
@@ -152,12 +159,17 @@ class SparseDriveAgent(AbstractAgent):
         features: Dict[str, torch.Tensor],
         targets: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Dict[str, torch.Tensor]:
-        img = features["img"]
-        device = img.device
+        # Derive device from the model's params, not from img — eval-mode
+        # `compute_trajectory` feeds CPU features but the model lives on
+        # CUDA. Lightning's training path moves both consistently, so this
+        # also works during training (model+features both on the trainer's
+        # device by then).
+        device = next(self._sparsedrive_model.parameters()).device
+        img = features["img"].to(device)
         data = {k: v for k, v in features.items() if k != "img"}
         if targets is not None:
             data.update(targets)
-        # Targets from compute_targets() are CPU tensors; move them to match img.
+        # Move every tensor (features + targets) to the model's device.
         for k, v in list(data.items()):
             if isinstance(v, torch.Tensor):
                 data[k] = v.to(device)
@@ -243,9 +255,8 @@ class SparseDriveAgent(AbstractAgent):
         # eval: simple_test -> List[{"img_bbox": merged_result_dict}] per batch
         # item. The merged dict has {"planning": (num_cmds, modes, ts, 2),
         # "final_planning": (ts, 2), "planning_score": ..., ...}.
-        # PDM scoring needs the (ts, 3) trajectory — final_planning gives
-        # (ts, 2) and we'll synthesize heading from the trajectory tangent
-        # downstream once we wire the eval pipeline.
+        # PDM scoring needs (ts, 3) trajectories with (x, y, heading); we
+        # synthesize heading from the cumulative xy tangent below.
         outputs = self._sparsedrive_model(img, **data)
         trajs = []
         for sample in outputs:
@@ -260,7 +271,18 @@ class SparseDriveAgent(AbstractAgent):
                     f"got top-level keys: "
                     f"{list(res.keys()) if isinstance(res, dict) else type(res)}"
                 )
-        return {"trajectory": torch.stack(trajs, dim=0) if trajs else torch.zeros(0)}
+        if not trajs:
+            return {"trajectory": torch.zeros(0)}
+        trajs_xy = torch.stack(trajs, dim=0)  # (B, ts, 2) cumulative ego-frame xy
+        # Heading from tangent. Pad with the current ego pose at the origin
+        # so heading[0] points from (0,0) to the first predicted xy — gives
+        # SparseDrive's planning a sensible direction at t=0 instead of NaN.
+        origin = torch.zeros_like(trajs_xy[..., :1, :])
+        xy_with_origin = torch.cat([origin, trajs_xy], dim=-2)        # (B, ts+1, 2)
+        delta = xy_with_origin[..., 1:, :] - xy_with_origin[..., :-1, :]  # (B, ts, 2)
+        heading = torch.atan2(delta[..., 1], delta[..., 0])           # (B, ts)
+        trajs_xyh = torch.cat([trajs_xy, heading.unsqueeze(-1)], dim=-1)  # (B, ts, 3)
+        return {"trajectory": trajs_xyh}
 
     def compute_loss(
         self,
