@@ -332,23 +332,41 @@ Perception heads are auxiliary supervisors. They are not on the inference forwar
 3. **Temporal image-feature stacking** (T2.6) — closed out as a stage-2 lever (regresses L2 by 0.034–0.046). Open as a stage-1 lever: train the backbone with temporal stacking in the loop so per-frame features compose, then load into the K/V-off stage-2.
 4. **Rescore: hard rescore is locked.** Exp 7 hybrid_or matched hard rescore exactly (CR=0.063%) — the learned head adds no unique collision-avoidance signal. The lightweight motion head stays as a training-time aux + inference-time rescore input. The "learned cost replaces rescore" option is dropped.
 
-## Stage-1 batch — ranked by paper EV (additive framing)
+## Stage-1 batch — current status (updated 2026-05-03)
 
-Each new stage-1 train is followed by an identical stage-2 best recipe so the only varying input is the stage-1 backbone. Stage 2 keeps perception decoders for safety (the fully-removed version is the no-K/V stage-2 architecture experiment, separate from this batch).
+The original ranked list (DINOv1, dadense, occupancy, additive suite, …) has been superseded as evidence accumulated. Each new stage-1 train is followed by stage-2 transfer through the locked K/V-off headline (`_decoder6_planwp_evalmatchmode_egostatus`) so the only varying input is the stage-1 backbone.
 
-| # | Stage-1 recipe | Tests | Cost | Paper role |
+**Landed stage-1 → S2 transfer results** (3-seed default mean = 0.3692 / 0.0400%):
+
+| # | Stage-1 recipe | Status | S2 transfer L2 / CR | Notes |
 |---|---|---|---|---|
-| **1** | **DINO-init stage-1** (R50 backbone init from DINOv1 SSL weights instead of ImageNet; det+map+aux2d unchanged) | does a stronger SSL prior on the backbone lift planning? | 1× ~32h | tests "image-feature quality" lever; Trillium 4-GPU bs=24 |
-| **2** | **`dadense_aux2d`** — drivable-area BEV dense aux, *added* on top of det+map+aux2d | does a planner-relevant dense aux compound with depth? | ~1d label-gen; 1× ~32h | first additive planner-aware aux |
-| **3** | **`occupancy_aux2d`** — class-conditional BEV occupancy, *added* on top of det+map+aux2d | dense agent supervision without box decoding | ~1–2d label-gen; 1× ~32h | second additive planner-aware aux |
-| **4** | **`dadense + occupancy + aux2d`** | full additive aux suite | trivial after #2,#3; 1× ~32h | strongest stage-1 recipe; headline number |
-| **5** | **DINO-init + best additive stage-1** | best-of-both | 1× ~32h | optional further-best |
-| **6** | **Arm B (`stage1_8gpu_noflash_joint`)** modernized joint-stage-1 — s1 full eval landed; s2 pending | locks in negative for "joint planning supervision at stage 1" | stage-1 done; stage-2 follow-up still needed | closes joint-stage-1 line for the paper |
-| **7** | **`stage1_nomap_dn_rotaug` ckpt + stage-2 *with* map** (no new stage-1 train; already have ckpt) | resolves backbone-shaping vs inference-path confound from prior nomap evidence | 1× stage-2 only ~12h | side study / appendix — **DONE**: Killarney 3311181, see results below |
-| **8** | **`stage1_nodet`** + stage-2 with det | analog of #7 for detection | 1× ~32h | side study / appendix |
-| **9** | **`aux2d_only`** (no det, no map at stage 1) + stage-2 with full perception heads | extreme replacement test, *with* stage 2 keeping perception decoders for safety | 1× ~32h | appendix; gated on #7 outcome |
+| 1 | `aux2d` (depth aux) | landed | 0.3627 / 0.056% (3396706) | tied default within noise |
+| 2 | `aux2d_dseg` v1 (3 polylines + 3 agent channels) | landed | **0.3621 / 0.043%** (3396708) | **best swap** — Δ−0.007 L2 at noise floor |
+| 3 | `aux2d_dino` (DINOv1 SSL-init) | landed | 0.3655 / 0.056% (3396707) | null lift; SSL prior on R50 saturated. DINOv2 not pursued (needs ViT swap) |
+| 4 | `nomap_dn_rotaug` (bundled) | landed | 0.3700 / 0.052% (3396709) | confounds nomap + dn + rotaug |
+| 5 | `egoonly` (motion only) | landed | 0.3946 / 0.055% (3388946) | minimum-perception regresses ~0.025 L2 |
+| 6 | **`aux2d_dsegv2`** (dseg v1 + 3 polygon channels: drivable_area, walkway, stop_line) | **S1 in flight** (Fir 38443120, Tamia 273023) | TBD | tests planning-relevant filled-region supervision on top of best swap |
+| 7 | `aux2d_only` (no det, no map; only depth aux) | **S1 in flight** (Fir 38411464, Tamia 272925) | TBD | thesis ablation: is *any* perception supervision necessary at S1? |
+| 8 | `nodet_aux2d` (no det; map+aux2d) | **S1 in flight** (Fir 38379927, Tamia 272887) | TBD | symmetric mirror of `nomap_aux2d` for the "backbone-shaping is the load-bearing role" claim |
+| 9 | `joint_nodetach` (`detach_perception=False`) | S1 ~73% on Apollo | TBD | last untested S1 mechanism — planning gradient flows back through perception heads |
 
-Compute budget for #1–#5: ~5 stage-1 trains × ~32h each = ~160 GPU-days, plus #4 occupancy label-gen. Feasible across 2 weeks if pipelined across Apollo, Killarney, Trillium.
+**S1 ckpts existing but not previously transferred to modern stack — now in flight on Killarney** (`_decoder6_planwp_evalmatchmode_egostatus` recipe):
+
+| Job | S1 init | Tests |
+|---|---|---|
+| 3408313 | `dn` (denoising queries) | training-time matching stability lever |
+| 3408314 | `aux2p5d` | 2.5D depth-regression aux |
+| 3408315 | `rot3dv2` | 3D rotation augmentation |
+| 3408316 | `dn_rot3d_aux2p5d` | full stacked recipe |
+
+**Dropped from active plan** (reasoning):
+- *DINOv2-init*: requires architectural backbone swap (ResNet → ViT); out of scope this cycle.
+- *dadense_aux2d*: subsumed by `aux2d_dsegv2` once polygon-class supervision lands.
+- *occupancy_aux2d (static)*: already covered by `aux2d_dseg` v1 agent channels.
+- *occupancy_aux2d (temporal)*: different task class (future prediction), much bigger eng lift.
+- *additive aux suite (#4 from original ranking)*: collapsed into dsegv2.
+
+**Gated 1 follow-up budget**: combine the best individual S1 levers (most likely `joint_nodetach + aux2d_dsegv2` or `joint_nodetach + aux2d_dseg` v1) once the current batch lands. Decision deferred to data.
 
 ## Stage-2 architecture experiments
 
