@@ -190,22 +190,24 @@ Three bugs caused eval crashes on fir/rorqual/tamia that don't affect killarney:
 
 Training jobs use the old extraction loop (submitted pre-fix) — training will complete fine but end-of-training eval will crash. Dependent eval jobs are queued with `--dependency=afterany` to fire automatically when training exits.
 
-| Server | Train job | Config | Dependent eval |
-|---|---|---|---|
-| fir | 38334912 | `_egostatus_seed3` | 38335844 |
-| fir | 38334913 | `_streamc_seed3` | 38335845 |
-| rorqual | 11262594 | `_egostatus_seed3` | 11262873 |
-| rorqual | 11262596 | `_streamc_seed3` | 11262874 |
-| tamia | 272451 | `_egostatus_seed3` | 272460 |
-| tamia | 272452 | `_streamc_seed3` | 272461 |
+| Server | Train job | Config | Dependent eval | Result |
+|---|---|---|---|---|
+| fir | 38334912 | `_egostatus_seed3` | 38335844 | **L2=0.3701 / CR=0.087%** (L2 reproduces; CR elevated) |
+| fir | 38334913 | `_streamc_seed3` | 38335845 | **L2=0.3700 / CR=0.040%** (clean reproduction) |
+| rorqual | 11262594 | `_egostatus_seed3` | 11262873 | **L2=0.3781 / CR=0.094%** (L2 reproduces; CR elevated — missing dtype fix) |
+| rorqual | 11262596 | `_streamc_seed3` | 11262874 | **L2=0.3727 / CR=0.040%** (clean reproduction) |
+| tamia | 272451 | `_egostatus_seed3` | 272460 | crashed at ~1h elapsed; investigation needed |
+| tamia | 272452 | `_streamc_seed3` | 272461 | crashed at ~1h elapsed; investigation needed |
 
-Standalone evals for seed-1 checkpoints also in flight:
+Standalone evals for seed-1 checkpoints:
 
-| Server | Eval job | Config | Notes |
+| Server | Eval job | Config | Result |
 |---|---|---|---|
-| fir | 38335393 | `_evalmatchmode` | reproduction baseline |
-| rorqual | 11262822 | `_egostatus` | PENDING (DOWN nodes) |
-| tamia | 272454 | `_egostatus` | running |
+| fir | 38335393 | `_evalmatchmode` | **L2=0.5149 / CR=0.047%** — clean reproduction of K/V-off baseline |
+| rorqual | 11262822 | `_egostatus` | L2=0.3638 / CR=0.119% (CR elevated — missing dtype fix) |
+| tamia | 272454 | `_egostatus` | L2=0.3740 / CR=0.243% (CR elevated — missing dtype fix) |
+
+**Cross-cluster summary:** Streamc reproduces cleanly across all three clusters (Killarney 0.3597/0.026%, Fir 0.3700/0.040%, Rorqual 0.3727/0.040%). Egostatus L2 reproduces but CR is elevated outside Killarney; Rorqual + Tamia known missing the dtype fix, but Fir's elevated CR (0.087%) is the first on a fix-applied cluster and warrants a closer look.
 
 **When resuming**: run `/survey-results --server fir rorqual tamia` to pull metrics from completed jobs and update `results_summary.md`.
 

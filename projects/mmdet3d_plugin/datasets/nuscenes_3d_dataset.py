@@ -1615,17 +1615,26 @@ def output_to_nusc_box(detection, threshold=None):
 
     box_list = []
     for i in range(len(box3d)):
+        # Skip NaN/inf rows: configs that zero detection losses (e.g. s2nopercep)
+        # produce an unsupervised det head whose outputs drift to NaN. NuScenesBox
+        # asserts no NaN; without this filter the entire eval crashes before
+        # planning metrics are computed.
+        if (not np.all(np.isfinite(box_gravity_center[i]))
+                or not np.all(np.isfinite(nus_box_dims[i]))
+                or not np.isfinite(box_yaw[i])):
+            continue
         quat = pyquaternion.Quaternion(axis=[0, 0, 1], radians=box_yaw[i])
         if hasattr(box3d, "gravity_center"):
             velocity = (*box3d.tensor[i, 7:9], 0.0)
         else:
             velocity = (*box3d[i, 7:9], 0.0)
+        velocity = tuple(v if np.isfinite(v) else 0.0 for v in velocity)
         box = NuScenesBox(
             box_gravity_center[i],
             nus_box_dims[i],
             quat,
             label=labels[i],
-            score=scores[i],
+            score=scores[i] if np.isfinite(scores[i]) else 0.0,
             velocity=velocity,
         )
         if "instance_ids" in detection:

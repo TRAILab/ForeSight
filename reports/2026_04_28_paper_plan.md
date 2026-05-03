@@ -72,7 +72,9 @@ These are exactly what perception supervision teaches the backbone during pretra
 
 **minS2 = headline + Stream A combined + Stream C + Stream B1 + Stream E.** A single config (`_egostatus_minS2`, Killarney 3397346) tests it directly — if it ties the headline within noise, the architecture is locked. The streams below remain useful as ablation localizers if minS2 regresses; each isolates one component of the combined config.
 
-Reference comparator: K/V-off paper headline (`_decoder6_planwp_evalmatchmode_egostatus`) at **L2=0.3708 / CR=0.0405%** (mean of 2 seeds; 3rd seed in flight as 3394849).
+Reference comparator: K/V-off paper headline (`_decoder6_planwp_evalmatchmode_egostatus`) at **L2=0.3692 / CR=0.0400%** (3-seed mean: 3376689 0.3720/0.044, 3386471 0.3695/0.037, 3394849 0.3660/0.039). All seed deltas under noise floor.
+
+**LANDED 2026-05-03 — minS2 (3397346) at L2=0.3563 / CR=0.041%; ΔL2=−0.013 (marginal beat, single seed), ΔCR=+0.001 pp (at noise). Paper architecture is locked.** Stream E alone (`_frozenpercep` 3394848) at L2=0.3698/CR=0.044% — confirms freezing the entire S2 perception stack is safe for planning. Best stage-1 swap is `_ptaux2d_dseg` (3396708) at L2=0.3621/CR=0.043%. The next batch pairs the best stage-1 with minS2.
 
 ### Stream A — Stage-2 supervision diagnostics (cheapest; running now)
 
@@ -389,22 +391,25 @@ NeurIPS 2026 abstract deadline (typical: mid-May) — tight but feasible if we l
 
 ## What to do this week — minS2 critical path
 
-**Critical-path jobs in flight on Killarney (all targeting minS2 directly or as ablation localizers):**
+**RESULTS (2026-05-03):**
 
-| Job | Config | Role in minS2 path |
+| Job | Config | Outcome |
 |---|---|---|
-| **3397346** | `_egostatus_minS2` | **The decisive test.** A+B1+C+E combined. Ties headline → paper architecture locked |
-| **3397345** | `_egostatus_s2nopercep` | A combined alone (zero all 3 perception losses on egostatus). Diagnostic if minS2 regresses |
-| **3394848** | `_egostatus_frozenpercep` | E alone (freeze backbone+neck+det+map). Diagnostic if minS2 regresses |
-| **3394847** | `_streamc` eval-only | C alone (ego_only_planning + image_at_det). Diagnostic if minS2 regresses |
-| **3394849** | `_egostatus` seed 2 | Third headline seed — locks the comparator |
-| **3396706–9** | 4 stage-1 pretrain swaps on K/V-off paper headline (`aux2d`, `aux2d_dino`, `aux2d_dseg`, `nomapdnrot`) | Picks the best stage-1 to pair with minS2 once it lands |
+| **3397346** | `_egostatus_minS2` | **L2=0.3563 / CR=0.041%** — ties/marginally beats 3-seed headline mean (0.3692 / 0.040%). **Paper architecture locked.** |
+| **3397345** | `_egostatus_s2nopercep` | Training completed; eval crashed (same `KeyError` family as Stream C). Eval-only rerun queued |
+| **3394848** | `_egostatus_frozenpercep` | **L2=0.3698 / CR=0.044%** — within noise of headline; freezing S2 perception stack is safe |
+| **3394847** | `_streamc` eval-only | L2=0.3597 / CR=0.026% (already logged) |
+| **3394849** | `_egostatus` seed 2 | **L2=0.3660 / CR=0.039%** — locks 3-seed mean at 0.3692/0.040% |
+| **3396706** | `ptaux2d_egostatus` | L2=0.3627 / CR=0.056% |
+| **3396707** | `ptaux2d_dino_egostatus` | L2=0.3655 / CR=0.056% |
+| **3396708** | `ptaux2d_dseg_egostatus` | **L2=0.3621 / CR=0.043%** — best stage-1 swap; pair with minS2 next |
+| **3396709** | `ptnomapdnrot_egostatus` | L2=0.3700 / CR=0.052% |
 | **Apollo joint_nodetach** | stage-1 with `detach_perception=False` | Last open stage-1 hypothesis; its stage-2 transfer will also go through minS2 |
 
-**Decision tree at +9.5 h (when 3397346 lands):**
-- minS2 ties headline (within 0.007 L2 / 0.015 pp CR) → **paper architecture locked.** Submit minS2 seed-2 immediately. Best stage-1 from 3396706-9 → minS2 with that pretrain.
-- minS2 regresses → diagnose with 3397345 (loss zeroing only), 3394848 (freeze only), 3394847 (ego-only only). Whichever component caused the regression gets fallback config.
-- All four diagnostics tie headline but minS2 fails → interaction effect; localize pairwise.
+**Decision tree (resolved):**
+- minS2 ties headline → **paper architecture locked.** Next: submit minS2 seed-2 to confirm the marginal L2 win. Pair best stage-1 (`_ptaux2d_dseg`, 3396708) with minS2 architecture.
+- B1.6/B1.7 evals (3401950, 3401952) close the last detection-forward dependency at inference: B1.6 L2=0.3665/CR=0.067%, B1.7 L2=0.3729/CR=0.056%. Both tie L2 within noise but trade ~0.02–0.03 pp CR. Worth a seed-2 if the "fully perception-free at inference" headline is to be claimed.
+- Cross-cluster: Streamc reproduces cleanly on Fir (0.3700/0.040%) and Rorqual (0.3727/0.040%); egostatus L2 reproduces but CR elevated outside Killarney — investigate after seed-2 minS2.
 
 ## Background notes (older state, kept for context)
 
