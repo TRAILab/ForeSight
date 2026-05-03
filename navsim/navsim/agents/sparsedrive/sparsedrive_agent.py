@@ -257,11 +257,16 @@ class SparseDriveAgent(AbstractAgent):
         # "final_planning": (ts, 2), "planning_score": ..., ...}.
         # PDM scoring needs (ts, 3) trajectories with (x, y, heading); we
         # synthesize heading from the cumulative xy tangent below.
-        # Wrap the forward in fp16 autocast at eval time. Weights stay fp32
-        # (no model conversion); ops cast to fp16 where safe. ~1.5-2× faster
-        # on A100 and halves activation memory, letting more workers fit per
-        # GPU. Off when self._eval_fp16=False (default True).
-        if getattr(self, "_eval_fp16", True) and device.type == "cuda":
+        # Optional eval-time fp16 autocast. Weights stay fp32; ops cast to
+        # fp16 where safe — ~1.5-2× faster on A100 and halves activation
+        # memory. **Default OFF** because fp16 overflows in the deeper
+        # decoder layers on trained-weight magnitudes (3752 hit "angle is
+        # not finite" in nuplan's interpolator on every token because
+        # trajectory[..., :2] went NaN). The smoke test missed this — it
+        # uses random-init weights with tiny logits that don't overflow.
+        # Re-enable per-instance via `agent._eval_fp16 = True` once we have
+        # @force_fp32 boundaries around the focal_loss / decoder ops.
+        if getattr(self, "_eval_fp16", False) and device.type == "cuda":
             with torch.cuda.amp.autocast(dtype=torch.float16):
                 outputs = self._sparsedrive_model(img, **data)
         else:
