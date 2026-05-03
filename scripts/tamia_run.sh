@@ -35,6 +35,7 @@ CONTAINER_CMD="$APPTAINER exec --nv -c -e --pwd /workspace/ForeSight/ \
 --bind=/home/s/spapais/ForeSight:/workspace/ForeSight/ \
 --bind=$TMP_DATA_DIR:/workspace/ForeSight/data/nuscenes \
 --bind=$WORK_DIR:/workspace/ForeSight/work_dirs \
+--bind=/scratch/s/spapais/ForeSight/ckpt:/workspace/ForeSight/ckpt \
 /home/s/spapais/ForeSight/docker/foresight_cuda118pytorch21.sif"
 CONTAINER_CMD="$CONTAINER_CMD bash -c 'export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:\$LD_LIBRARY_PATH && $CMD'"
 
