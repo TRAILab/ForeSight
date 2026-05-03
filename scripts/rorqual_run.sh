@@ -43,7 +43,7 @@ CONTAINER_CMD="$CONTAINER_CMD bash -c 'export LD_LIBRARY_PATH=/usr/lib/x86_64-li
 SECONDS=0
 echo "Extracting data"
 mkdir -p $TMP_DATA_DIR $TMP_DIR $WORK_DIR $WANDB_PERSIST_DIR
-for file in $DATA_DIR/samples.zip $DATA_DIR/maps.zip; do
+for file in $DATA_DIR/samples.zip $DATA_DIR/maps.zip $DATA_DIR/v1.0-trainval.zip; do
     duration=$SECONDS
     echo "[$((duration/3600))h$((duration%3600/60))m]: Unzipping $file to $TMP_DATA_DIR"
     unzip -qq $file -d $TMP_DATA_DIR
