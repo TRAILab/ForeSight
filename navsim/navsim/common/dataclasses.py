@@ -137,6 +137,19 @@ class EgoStatus:
     ego_acceleration: npt.NDArray[np.float32]
     driving_command: npt.NDArray[np.int]
     in_global_frame: bool = False  # False for AgentInput
+    # Absolute global SE2 pose [x, y, heading] of the ego at this frame.
+    # Populated alongside the local `ego_pose` during AgentInput construction
+    # so feature builders can recover proper cross-call temporal transforms
+    # (e.g. SparseDrive's instance_bank T_global) without losing the
+    # current-frame-relative `ego_pose` consumers downstream depend on.
+    # None on legacy paths that don't set it.
+    global_ego_pose: Optional[npt.NDArray[np.float64]] = None
+    # Frame timestamp in microseconds (matches Frame.timestamp). Plumbed
+    # through AgentInput so feature builders can emit a real time signal
+    # for instance_bank's max_time_interval gate (a zero placeholder makes
+    # the temporal warp fire on stale cached anchors across scene
+    # boundaries — silently corrupts training).
+    timestamp: Optional[int] = None
 
 
 @dataclass
@@ -191,6 +204,8 @@ class AgentInput:
                 ego_velocity=np.array(ego_dynamic_state[:2], dtype=np.float32),
                 ego_acceleration=np.array(ego_dynamic_state[2:], dtype=np.float32),
                 driving_command=scene_dict_list[frame_idx]["driving_command"],
+                global_ego_pose=global_ego_poses[frame_idx].copy(),
+                timestamp=int(scene_dict_list[frame_idx]["timestamp"]),
             )
             ego_statuses.append(ego_status)
 
@@ -358,6 +373,12 @@ class Scene:
                     ego_velocity=frame_ego_status.ego_velocity,
                     ego_acceleration=frame_ego_status.ego_acceleration,
                     driving_command=frame_ego_status.driving_command,
+                    # Frame.ego_status carries in_global_frame=True, so its
+                    # ego_pose is the absolute global SE2 we want to retain.
+                    global_ego_pose=np.asarray(
+                        frame_ego_status.ego_pose, dtype=np.float64
+                    ).copy(),
+                    timestamp=int(self.frames[frame_idx].timestamp),
                 )
             )
             cameras.append(self.frames[frame_idx].cameras)

@@ -419,10 +419,10 @@ untouched.
 | ForeSight SparseDrive (planning-only) | — | — | — | — | — | — | — | TBD |
 | ForeSight SparseDrive (full) | — | — | — | — | — | — | — | TBD |
 
-## Current State (2026-05-01, updated 2026-05-01 session 2)
+## Current State (2026-05-03, updated from 2026-05-01)
 
-Everything from Phase 0 → Phase 4 first-checkpoint is in place. Stage-1
-warm-start is now wired and a new Killarney job (3388590) is in queue.
+Everything from Phase 0 → Phase 4 first-checkpoint is in place. 4-GPU DDP
+is working and the first full navtrain run is in flight on DGX.
 
 **Working:**
 - Image, .sif on DGX + Killarney, smoke 7/7 on both
@@ -434,9 +434,92 @@ warm-start is now wired and a new Killarney job (3388590) is in queue.
 - 500-batch training (`3705`) clean: loss 1.29 → 0.21, no NaN
 - `sparsedrive_agent.yaml` now loads stage-1 ckpt via `foresight_pretrained`
 - `sparsedrive_agent.forward` now moves all target tensors to `img.device` (fixes cuda:0 vs cpu device mismatch in planning loss)
+- 4-GPU DDP fixed (`a69e848`): `DDPStrategy(find_unused_parameters=True, static_graph=True)` handles frozen det/map heads + gradient checkpointing
 
 **In flight:**
-- Killarney job 3388590: fp32, bs=2, grad_clip=1.0, 1×L40S, 5000 batches, stage-1 warmstart + device fix. Waiting for ckpt to trigger PDM-Score eval.
+- DGX job 3724: fp32, bs=2/GPU (8 total), grad_clip=1.0, 4×A100, stage-1 warmstart, `skip_perception_kv=True`, `num_map=0`. Step ~2700/10639 at epoch 0. Key milestone: pass step ~4300 (where job 3706 NaN'd) to confirm stability.
+
+**Feature builder upgrades landed (2026-05-03, pending cache rebuild):**
+- **ImageNet normalization** (was missing entirely — top suspect for
+  training instability): `compute_features` now subtracts
+  `mean=[123.675, 116.28, 103.53]` and divides by
+  `std=[58.395, 57.12, 57.375]` after promoting uint8 RGB to float32 in
+  [0, 255]. ResNet50 backbone now sees inputs in roughly the same
+  distribution it was pretrained on instead of [0, 1]. On a real
+  navmini token: per-cam `img.mean ≈ -0.4`, `img.std ≈ 0.9` (was 0.5
+  and 0.3 before).
+- **Real timestamps** plumbed via a new `EgoStatus.timestamp` field
+  (microseconds; same source as `Frame.timestamp`), populated in both
+  `AgentInput` construction paths. `compute_features` emits seconds.
+  Replaces the agent's `img.new_zeros(bs)` placeholder which made
+  `instance_bank.get`'s `|Δt| <= 2 s` gate always pass and the
+  temporal warp fire on stale `cached_anchor` across scene boundaries.
+- **Photo-metric distortion** (brightness/contrast/saturation/hue) on
+  each cam image, mirroring the nuScenes
+  `PhotoMetricDistortionMultiViewImage` constants. Cache-time only
+  (one persisted draw per token), but adds meaningful color/lighting
+  diversity at zero training-step cost. No GT touched, so safe under
+  planning-only.
+- `sparsedrive_features.py` emits per-history-frame `T_global` /
+  `T_global_inv` (shape `(num_history, 4, 4)`) using **absolute** nuPlan
+  global SE2 (z=0 flat-world promotion). To make this possible without
+  changing the `compute_features(agent_input)` interface, vendored
+  navsim's `EgoStatus` gained an optional `global_ego_pose` field
+  populated alongside the local `ego_pose` in both `AgentInput`
+  construction paths (`Scene.get_agent_input` for cache build,
+  `AgentInput.from_scene_dict_list` for PDM eval). Cross-call warping in
+  `instance_bank` / `InstanceQueue` is now consistent across sequential
+  calls — both calls reference the same absolute frame, so
+  `T_temp2cur = T_global_inv(curr) @ T_global(temp)` gives the real
+  ego-motion compensation the temporal cache needs. The agent peels off
+  the current-frame matrices for `img_metas` (replaces the identity
+  placeholder). Float64 throughout to preserve UTM-scale translation
+  precision; instance_bank's `cached_anchor.new_tensor` downcasts at the
+  GPU boundary.
+- `ego_status[5]` (rot_rate_z) is now filled from Δheading/0.5 s between
+  the last two frames (heading delta is invariant to frame origin, so
+  local pose is fine; wrapped into (-π, π] for safety). Other rot_rate
+  channels stay zero. `ego_status[9]` (steer) stays zero too:
+  `tire_steering_angle` is not exposed via `AgentInput.EgoStatus` — it
+  only lives in nuPlan's full `EgoState` behind the scene loader.
+
+**Stage-2 planning-only gap survey** (2026-05-03): a Plan agent compared
+the navsim feature/agent path to the nuScenes pipeline. The big-impact
+items above all land in this batch. Stage-1 perception items —
+real det/map/motion GT plus a custom variable-length collate_fn — are
+correctly out of scope for the current planning-only setup
+(`with_det/with_map/with_motion_plan=True` only because
+`motion_plan_head` consumes infra from `det_head`; det/map are frozen by
+the agent and `compute_loss` filters their losses out of backprop;
+`skip_perception_kv=True` and `num_map=0` already short-circuit any
+runtime dependency on real perception cross-attn). Lidar depth
+supervision (`MultiScaleDepthMapGenerator` + `depth_branch`) is the
+remaining stage-2-safe gap; deferred to keep this batch focused.
+
+**Deferred: horizontal-flip augmentation.** A first cut applied 50% hflip
+inside `compute_features` (image LR flip, lidar2img X-column negation,
+left↔right cmd swap), but `compute_targets` runs as a separate builder
+that doesn't see the flip choice — `gt_ego_fut_trajs` would stay in
+original coords on flipped tokens, breaking supervision symmetry. Doing
+this properly needs a shared per-token seed (or per-cache flip flag) so
+both builders make the same choice. Reverted for now; will revisit
+alongside the on-the-fly augmentation discussion.
+
+**Cache rebuild required before the next training run.** The feature
+builder's cache key is `sparsedrive_feature.gz`; the existing DGX
+`/raid/home/spapais/work_dirs/.../dataset_cache/` was built before these
+keys existed and lacks `T_global` / `T_global_inv` plus the new
+`ego_status[5]`. Re-run `scripts/run_dataset_caching` (Ray-parallel,
+~46 min on Killarney) before the next `navtrain` job.
+
+**Config alignment with nuScenes s2nopercep (2026-05-03):**
+- Added `skip_perception_kv=True` and `num_map=0` to `sparsedrive_r50_stage2_navsim_planonly.py`
+- This matches the nuScenes `_s2nopercep` config: no det/map K/V in planning cross-attention, map branch produces no cross-attn queries into the planner
+- Previous run (3724) had `num_map=10` + no `skip_perception_kv` — frozen unsupervised map features were unnecessarily feeding the planner
+
+**Next job (pending stability of 3724):**
+- `batch_size=8/GPU` (32 total, 4× current), `skip_perception_kv=True`, `num_map=0`
+- Expected epoch time: ~20 min → 100 epochs in ~1.4 days
 
 ## NaN Diagnosis (2026-05-01)
 
@@ -467,43 +550,75 @@ features instead of noise.
 
 ## Next Steps (clean session pickup)
 
-1. **Monitor job 3388590 on Killarney.** First ~500 steps should be clean
-   (as in DGX 3705). If NaN appears before step 5000: try LR=1e-5 +
-   grad_clip=0.5, then fall back to Option 1 if still broken.
+1. **Watch DGX job 3724 past step ~4300.** If clean: cancel and resubmit with `batch_size=8`, updated config (`skip_perception_kv=True`, `num_map=0`). If NaN: drop to LR=1e-5 + grad_clip=0.5.
 
-2. **Once a ckpt lands**, run PDM-Score eval:
+2. **Once nuScenes `s2nopercep` / `frozenpercep` / `minS2` land (~3h from 2026-05-03):** check whether freezing the backbone matters (frozenpercep result). If it does, add backbone freeze to the NavSim agent.
+
+3. **Once a ckpt lands from the higher-bs run**, run PDM-Score eval:
    ```
    bash scripts/navsim_eval.sh <ckpt_path> navtest
    ```
-   metric_cache already built at
-   `/scratch/spapais/ForeSight/work_dirs/navsim/metric_cache`.
+   metric_cache at `/scratch/spapais/ForeSight/work_dirs/navsim/metric_cache` (Killarney) or DGX equivalent.
 
-3. **If NaN still appears** after stage-1 warm-start: drop to LR=1e-5,
-   grad_clip=0.5, OR fall back to **Option 1** (refactor `SparseDriveHead`
-   to hoist `anchor_encoder` + `instance_bank` out of `det_head` so we can
-   actually skip det/map forward).
+## Roadmap: Gaps vs a Full NavSim Implementation
 
-## Future Work (deferred)
+The current setup is a deliberately minimal first pass. The gaps below are
+ordered by effort/impact tradeoff — quick wins first, then heavy lifts.
+All items 1–3 invalidate the training cache and require a ~46 min rebuild
+before the next training run.
 
-- Multi-GPU DDP: `find_unused_parameters_true` conflicts with gradient
-  checkpointing. Need `DDPStrategy(static_graph=True, find_unused_parameters=True)`
-  via custom strategy build. Single GPU works for now.
-- Real `T_global` from `scene.frames[i].ego_status.ego_pose` in the feature
-  builder (currently identity placeholders kill the temporal cache benefit).
-- nuPlan `gt_agent_fut_trajs` from per-track futures across frames, so
-  motion head loss is non-zero. Same path needed for the per-class
-  motion-side k-means anchors.
-- Padded variable-length detection GT or custom collate — to actually
-  supervise det/map on navsim. Stage-1 navsim is the natural follow-up.
-- Joint nuScenes + navtrain training (shared backbone, separate heads).
-- Extend SparseDrive to consume all 8 NavSim cameras instead of dropping
-  the side cams.
-- Closed-loop fine-tuning using the PDM scorer as a reward.
+### 1. Real `T_global` (temporal cache) — HIGH impact, medium effort
+Feature builder currently injects identity matrices for `T_global` /
+`T_global_inv`. The instance bank uses these to warp temporal anchors
+between frames; identity means no ego-motion compensation, so the temporal
+cache is completely broken. Fix: read `ego_status.ego2global_rotation` /
+`ego2global_translation` from each history frame, build the 4×4 SE3 matrix,
+and inject the current-frame global→lidar inverse as `T_global_inv`.
+This is the single biggest gap vs the nuScenes setup. **Start here.**
 
-## Discussion
+### 2. Ego status channels — HIGH impact, low effort
+NavSim only ships 2D acc + 2D vel. The 10-dim `ego_status` used by the
+planner (`[acc_xyz, rot_rate_xyz, vel_xyz, steer]`) has channels 2, 3–5,
+8, 9 always zero. `rot_rate_z` can be computed from consecutive ego pose
+headings (Δheading / Δt); `steer` is available from nuPlan's
+`EgoStatus.tire_steering_angle`. Fix is a few lines in
+`sparsedrive_features.py`. Do alongside T_global since it also requires a
+cache rebuild.
 
-Pending experiments. The expected default after Phase 4 will be the
-stage-2 SparseDrive agent on navtrain (stage-1 nuScenes warm-start, frozen
-det/map, planning supervision), which gives us a NavSim-comparable PDMS
-number while keeping the rest of the codebase on its existing nuScenes
-trajectory.
+### 3. Data augmentation — MEDIUM impact, low effort
+NavSim cache stores fixed resized images — no random crop/flip/rotation.
+nuScenes applies `ResizeCropFlipImage`, `BBoxRotation`,
+`PhotoMetricDistortion` every step. The simplest fix is to apply random
+horizontal flip + colour jitter inside `compute_features` before writing
+to cache (many augmented views of each token). A cleaner approach is
+on-the-fly augmentation at load time, skipping the cache for image tensors.
+Do alongside the cache rebuild for items 1–2.
+
+### 4. Motion supervision + custom collate — HIGH impact, high effort
+`gt_agent_fut_trajs` for surrounding agents is not wired. The motion head
+runs forward but is completely unsupervised, so the motion queries feeding
+into planning cross-attention are untrained. Requires: (a) per-track future
+trajectories from nuPlan annotations across frames, (b) a custom
+`collate_fn` to pad variable-length agent counts (default_collate breaks on
+variable N). This is the heaviest lift in the near-term roadmap.
+
+### 5. Motion k-means regeneration — LOW effort, follows #4
+Current motion anchors are random placeholders. Plan-side anchors are real.
+Regenerate on navtrain agent futures once #4 is wired.
+
+### 6. Stage-1 NavSim — HIGH impact, very high effort
+Det/map heads are frozen at stage-1 nuScenes weights. A stage-1 NavSim run
+would give the backbone domain-adapted features, likely needed to approach
+DiffusionDrive's 88.1 PDMS. Requires #4 (padded GT + custom collate) first.
+
+### 7. All 8 cameras — LOW impact, medium effort
+`cam_l1` and `cam_r1` are dropped. Extending to 8 cameras requires changes
+to the backbone camera-embed dimensions and projection geometry. Worth
+revisiting if side-camera coverage proves important for PDMS.
+
+### 8. Joint nuScenes + NavSim training — long-term
+Shared backbone with task-specific heads, unified data loader, careful loss
+balancing.
+
+### 9. Closed-loop fine-tuning — very long-term
+PDM-Score as reward signal. Requires differentiable simulator or RL wrapper.

@@ -164,19 +164,38 @@ class SparseDriveAgent(AbstractAgent):
             elif isinstance(v, list) and v and isinstance(v[0], torch.Tensor):
                 data[k] = [x.to(device) for x in v]
 
-        # SparseDrive expects mmcv-style metas. Until the feature builder ships
-        # T_global, timestamps, and detection GT from the scene, inject
-        # placeholders so the head's training-mode forward runs end-to-end with
-        # task_config.with_det=False / with_motion=False / planning-only loss.
+        # SparseDrive expects mmcv-style metas. The feature builder now ships
+        # per-history-frame T_global / T_global_inv (current-frame as origin,
+        # so [-1] is identity by construction); instance_bank only consumes
+        # the current frame's per call, so peel that off into img_metas.
+        # Detection GT and timestamps are still placeholders — see below.
         bs = img.shape[0]
         if "img_metas" not in data:
             # SparseDrive's instance_bank stacks T_global / T_global_inv via
-            # numpy.stack, so they must be CPU numpy arrays, not torch tensors.
+            # numpy.stack, so they must be CPU numpy arrays, not torch
+            # tensors. Keep float64 here: nuPlan global poses have UTM-scale
+            # translations (~3.6e5 m); the matmul T_global_inv(curr) @
+            # T_global(temp) inside instance_bank needs the precision so the
+            # cancellation produces a correct small relative transform.
+            # cached_anchor.new_tensor downcasts the result to the GPU dtype.
             import numpy as np
-            eye = np.eye(4, dtype=np.float32)
+            if "T_global" in data and "T_global_inv" in data:
+                # Pop so they don't get forwarded as model kwargs.
+                Tg_full = data.pop("T_global")           # (B, n_hist, 4, 4)
+                Tg_inv_full = data.pop("T_global_inv")
+                Tg_curr = (
+                    Tg_full[:, -1].detach().cpu().numpy().astype(np.float64)
+                )
+                Tg_inv_curr = (
+                    Tg_inv_full[:, -1].detach().cpu().numpy().astype(np.float64)
+                )
+            else:
+                eye = np.eye(4, dtype=np.float64)
+                Tg_curr = np.broadcast_to(eye, (bs, 4, 4)).copy()
+                Tg_inv_curr = Tg_curr.copy()
             data["img_metas"] = [
-                {"T_global": eye.copy(), "T_global_inv": eye.copy()}
-                for _ in range(bs)
+                {"T_global": Tg_curr[i], "T_global_inv": Tg_inv_curr[i]}
+                for i in range(bs)
             ]
         if "timestamp" not in data:
             data["timestamp"] = img.new_zeros(bs)

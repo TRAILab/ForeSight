@@ -517,7 +517,8 @@ model = dict(
                 use_rescore=True,
             ),
             num_det=50,
-            num_map=10,
+            num_map=0,
+            skip_perception_kv=True,
         ),
     ),
 )
