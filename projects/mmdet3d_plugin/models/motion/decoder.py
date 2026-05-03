@@ -577,16 +577,18 @@ class HierarchicalPlanningDecoder(object):
         logits_cmd = logits[bs_indices, :, cmd, :]  # (bs, A, M_per_cmd)
 
         # Drop low-confidence anchors by setting their logits to a very negative
-        # value so sigmoid → 0 and max-aggregation skips them.
+        # value so sigmoid → 0 and max-aggregation skips them. Skip the filter
+        # for per-mode-pooled conflict samplers where anchor dim != det count.
         thr = float(self.rescore_learned_score_thresh)
-        det_mask = (det_confidence < thr)  # (bs, A)
-        if det_mask.any():
-            very_neg = logits_cmd.new_tensor(-1e6)
-            logits_cmd = torch.where(
-                det_mask.unsqueeze(-1).expand_as(logits_cmd),
-                very_neg.expand_as(logits_cmd),
-                logits_cmd,
-            )
+        if det_confidence is not None and det_confidence.shape[-1] == num_anchor:
+            det_mask = (det_confidence < thr)  # (bs, A)
+            if det_mask.any():
+                very_neg = logits_cmd.new_tensor(-1e6)
+                logits_cmd = torch.where(
+                    det_mask.unsqueeze(-1).expand_as(logits_cmd),
+                    very_neg.expand_as(logits_cmd),
+                    logits_cmd,
+                )
 
         # max over agents per (bs, M_per_cmd), then sigmoid → bounded penalty.
         max_logit_per_mode = logits_cmd.max(dim=1).values  # (bs, M_per_cmd)
@@ -634,22 +636,29 @@ class HierarchicalPlanningDecoder(object):
         det_thr = float(self.rescore_learned_hard_score_thresh)
         agg = self.rescore_learned_hard_aggregation
 
-        if agg == 'detweighted':
+        # Det-confidence filtering only applies when anchor dim == det count.
+        # For per-mode-pooled conflict samplers (image_at_plan / image_at_init_topk
+        # / image_at_scene_query) the anchor dim is M*K (or K), not num_det_anchor;
+        # det_confidence has the wrong shape, so skip the filter and let the
+        # per-mode aggregation handle thresholding directly.
+        det_compatible = (det_confidence is not None) and (det_confidence.shape[-1] == num_anchor)
+
+        if agg == 'detweighted' and det_compatible:
             # Soft det-confidence weighting on the prob; no hard det-conf gate.
             # `det_confidence` is in [0, 1]; multiplying preserves [0, 1] range.
             prob = prob * det_confidence.unsqueeze(-1)
             col = (prob > prob_thr).any(dim=1)  # (bs, M_per_cmd)
         else:
-            # Drop low-confidence anchors: their collision probability is forced
-            # to 0 so they cannot trigger the per-mode reduction.
-            det_mask = (det_confidence < det_thr)  # (bs, A)
-            if det_mask.any():
-                zero = prob.new_tensor(0.0)
-                prob = torch.where(
-                    det_mask.unsqueeze(-1).expand_as(prob),
-                    zero.expand_as(prob),
-                    prob,
-                )
+            # Drop low-confidence anchors when det_confidence aligns with anchors.
+            if det_compatible:
+                det_mask = (det_confidence < det_thr)  # (bs, A)
+                if det_mask.any():
+                    zero = prob.new_tensor(0.0)
+                    prob = torch.where(
+                        det_mask.unsqueeze(-1).expand_as(prob),
+                        zero.expand_as(prob),
+                        prob,
+                    )
             if agg == 'any':
                 # Per-mode binary collision: any anchor exceeds prob threshold.
                 col = (prob > prob_thr).any(dim=1)  # (bs, M_per_cmd)
