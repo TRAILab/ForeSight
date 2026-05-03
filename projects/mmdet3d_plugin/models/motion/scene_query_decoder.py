@@ -155,4 +155,9 @@ class SceneQueryDecoder(BaseModule):
             anchor_embed = self._encode_anchor(anchor)
             query = query + anchor_embed
             query, anchor = layer(query, anchor, anchor_embed, feature_maps, metas)
+        # Re-encode the final refined anchor and add to features so the last
+        # layer's refine MLP receives gradient even when aux loss is off (the
+        # caller reads `features`; without this, last-layer refine = unused
+        # parameters → DDP crash).
+        query = query + self._encode_anchor(anchor)
         return dict(anchors=anchor, features=query)

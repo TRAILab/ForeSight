@@ -386,7 +386,12 @@ class MotionPlanningHead(BaseModule):
             raise ValueError(
                 f"conflict_input must be one of {_valid_conflict_inputs}, got {conflict_input!r}"
             )
-        if conflict_input.startswith('image_at_'):
+        # conflict_image_sampler is only needed for det/plan/init_topk modes;
+        # scene_query mode uses the decoder's own deformable attention.
+        _needs_image_sampler = conflict_input in (
+            'image_at_det', 'image_at_plan', 'image_at_init_topk'
+        )
+        if _needs_image_sampler:
             assert conflict_image_sampler is not None, (
                 f"conflict_input={conflict_input!r} requires conflict_image_sampler config"
             )
@@ -418,6 +423,10 @@ class MotionPlanningHead(BaseModule):
             nn.init.constant_(self.scene_query_cls_head.bias, -2.0)  # rare-positive prior
         else:
             self.scene_query_cls_head = None
+        # Defensive: initialise scene-query cache attrs so loss helpers can
+        # safely check `is None` even before any forward pass has run.
+        self._scene_query_features = None
+        self._scene_query_anchors = None
         # Per-mode-restricted aggregation: image_at_plan / image_at_init_topk
         # build a per-(plan-mode, K) anchor pool, and per-mode collision logits
         # should read only from that mode's K samples (smooth-max over K), not
