@@ -257,7 +257,15 @@ class SparseDriveAgent(AbstractAgent):
         # "final_planning": (ts, 2), "planning_score": ..., ...}.
         # PDM scoring needs (ts, 3) trajectories with (x, y, heading); we
         # synthesize heading from the cumulative xy tangent below.
-        outputs = self._sparsedrive_model(img, **data)
+        # Wrap the forward in fp16 autocast at eval time. Weights stay fp32
+        # (no model conversion); ops cast to fp16 where safe. ~1.5-2× faster
+        # on A100 and halves activation memory, letting more workers fit per
+        # GPU. Off when self._eval_fp16=False (default True).
+        if getattr(self, "_eval_fp16", True) and device.type == "cuda":
+            with torch.cuda.amp.autocast(dtype=torch.float16):
+                outputs = self._sparsedrive_model(img, **data)
+        else:
+            outputs = self._sparsedrive_model(img, **data)
         trajs = []
         for sample in outputs:
             res = sample.get("img_bbox", sample)

@@ -1,0 +1,10 @@
+_target_: navsim.planning.utils.multithreading.worker_ray_torch.RayDistributedTorch
+_convert_: 'all'
+master_node_ip: null     # Set to a master node IP if you desire to connect to cluster remotely
+threads_per_node: null   # CPU task slots per node; null = all logical cores
+num_gpus_per_node: null  # GPUs to register with ray; null = autodetect from CUDA_VISIBLE_DEVICES / torch
+num_gpus_per_task: 0.25  # Fraction of a GPU per worker; 0.25 packs 4 workers per GPU
+debug_mode: false        # If true all tasks will be executed serially, mainly for testing
+log_to_driver: true      # If true, all printouts from ray threads will be displayed in driver
+logs_subdir: 'logs'      # Subdirectory to store logs inside the experiment directory
+use_distributed: false   # Whether to use the built-in distributed mode of ray

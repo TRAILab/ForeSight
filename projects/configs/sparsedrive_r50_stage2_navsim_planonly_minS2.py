@@ -130,6 +130,13 @@ model = dict(
     head=dict(
         type="SparseDriveHead",
         task_config=task_config,
+        # PDM-Score eval optimization: with num_map=0 and skip_perception_kv
+        # already short-circuiting map cross-attn into the planner, the
+        # map_head's forward + post_process at eval are pure waste.
+        # eval_skip_map=True drops them; saves ~30% eval-time compute.
+        # Off in training (still runs forward against empty map GT for
+        # weight init / DDP unused-param tracking).
+        eval_skip_map=True,
         det_head=dict(
             type="Sparse4DHead",
             cls_threshold_to_reg=0.05,
