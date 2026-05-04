@@ -617,7 +617,7 @@ train_pipeline = [
         downsample=strides[:num_depth_layers],
     ),
     dict(
-        type='VectorizeMap'
+        type='VectorizeMap',
         roi_size=roi_size,
         simplify=False,
         normalize=False,
