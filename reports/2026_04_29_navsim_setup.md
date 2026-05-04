@@ -422,8 +422,8 @@ Higher is better for all sub-metrics.
 | _ref_ DiffusionDrive (published) | — | — | **88.1** | — | — | — | — | — | — | leaderboard north star |
 | **3727 → 3746 eval** | `navsim_planonly` (baseline) fp32 bs=8 | 1 | **0.6502** | 0.9319 | 0.7893 | 0.5976 | 0.8518 | 0.9817 | 0.9207 | First real PDMS — image norm + timestamp + abs SE3 + photo-metric all in |
 | **3751 → 3753 eval** | `navsim_planonly_minS2` fp32 bs=8 | 1 | **0.6489** | 0.9304 | 0.7610 | 0.6159 | 0.8454 | 0.9998 | 0.8795 | Net flat vs baseline. Redistributes errors: EP/Comf up (planner more confident), DAC/DDC down (worse on edges). 1 epoch likely too short to see minS2's full benefit |
-| TBD (cycle 2) | + hflip shared-seed (hash on EgoStatus.timestamp) | 1 | TBD | — | — | — | — | — | — | Mirror-symmetric augmentation across both builders |
-| TBD | + minS2 arch knobs (planning_cumulative_refinement etc.) | 1 | TBD | — | — | — | — | — | — | More config knobs from the nuScenes minS2 winner |
+| **3755 → 3756 eval** ❌ | + hflip shared-seed (REVERTED) | 1 | **0.3076** | 0.6695 | 0.4697 | 0.2957 | 0.5257 | 0.5297 | 0.7083 | -0.34 PDMS regression. Two bugs: (1) `compute_features` runs at PDM eval too, mirroring ~50% of test predictions; (2) T_global stays in unmirrored UTM but lidar coords mirror, breaking `instance_bank` warp. Reverted; will redesign with training-only gating + T_global mirror handling later |
+| TBD (cycle 3) | + minS2 arch knobs (planning_cumulative_refinement etc.) | 1 | TBD | — | — | — | — | — | — | More config knobs from the nuScenes minS2 winner |
 | TBD | overnight: best 1-epoch config | 10 | TBD | — | — | — | — | — | — | Promotion gate after Tier-2 sweeps |
 
 ## Current State (2026-05-03, updated from 2026-05-01)

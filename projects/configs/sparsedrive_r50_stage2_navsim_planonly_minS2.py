@@ -547,6 +547,19 @@ model = dict(
             num_det=50,
             num_map=0,
             skip_perception_kv=True,
+            # minS2 architecture knobs (ported in Tier 2 cycle 3). Each
+            # plumbs an existing code path in motion_plan_head that nuScenes
+            # minS2 uses to refine the planner's mode query layer-by-layer
+            # instead of just at the final block.
+            planning_cumulative_refinement=True,
+            motion_cumulative_refinement=True,
+            planning_deformable=True,
+            planning_deformable_instfeat=True,
+            planning_deformable_instfeat_laststage=True,
+            # nuScenes minS2 lists 6 waypoint indices for ego_fut_ts=6.
+            # NavSim has ego_fut_ts=8, so cover all 8 waypoints.
+            planning_deformable_waypoints=list(range(ego_fut_ts)),
+            motion_deformable_multimode=True,
         ),
     ),
 )
