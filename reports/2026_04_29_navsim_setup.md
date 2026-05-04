@@ -426,7 +426,8 @@ Higher is better for all sub-metrics.
 | **3757 → 3758 eval** ❌ | + minS2 arch knobs (cumulative_refinement, deformable_*, multimode) | 1 | **0.5670** | 0.8833 | 0.7144 | 0.5597 | 0.7631 | 0.9954 | 0.8567 | -0.082 PDMS regression. Adds learnable params (per-layer refinement, deformable sampling at every waypoint) that need >1 epoch to settle. Reverted; could revisit at 10-epoch scale |
 | **3759 → 3760 eval** | 10ep minS2 (promotion gate) | 10 | **0.6138** | 0.9091 | 0.7342 | 0.5877 | 0.8134 | 0.9962 | 0.8569 | Train loss dropped 0.183→0.103 but **all** PDMS sub-metrics regressed vs 1ep. Overfitting: planner has too few trainable params + open-loop L1 ≠ closed-loop PDMS. Pivot to stage-1 perception GT |
 | **3765 → 3766 eval** | stage-1 1ep (det+map+motion + unfreeze, **placeholder anchors**) | 1 | **0.6498** | **0.9454** | 0.7621 | 0.5939 | **0.8756** | 0.9999 | **0.9203** | Real perception supervision lifts NAC +0.02, TTC +0.03, DDC +0.04 vs minS2. DAC stuck (placeholder anchors cap it). EP regressed -0.03. PDMS basically flat |
-| **3768 (in flight)** | stage-1 1ep + **real anchors** (33k navtrain plan + 1.9M motion trajs) | 1 | TBD | — | — | — | — | — | — | First test with real plan/motion k-means; expecting +3-7 PDMS |
+| **3768 → 3769 eval** | stage-1 1ep + **real anchors** (33k navtrain plan + 1.9M motion) | 1 | **0.6387** | 0.9189 | 0.7541 | 0.6193 | 0.8246 | 0.9988 | 0.8778 | Slight regression vs placeholder. EP restored to 0.62 (placeholder cost was real); but NAC/TTC/DDC lost their bumps. 1ep too short — 10ep is the cleaner test |
+| **3770 (in flight)** | stage-1 10ep + real anchors | 10 | TBD | — | — | — | — | — | — | Overnight; the real promotion gate. nuScenes minS2 was tuned for 10ep |
 | TBD | overnight: best 1-epoch config | 10 | TBD | — | — | — | — | — | — | Promotion gate after Tier-2 sweeps |
 
 ## Current State (2026-05-03, updated from 2026-05-01)
