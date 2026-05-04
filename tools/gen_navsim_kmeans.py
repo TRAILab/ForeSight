@@ -74,24 +74,49 @@ def main():
     # Per-class motion future deltas
     motion_deltas_per_class = [[] for _ in range(args.num_classes)]
 
+    # Reuse the SparseDrive target builder's motion extraction (cross-frame
+    # track-token walk + per-class bucketing). Same code path the training
+    # cache will see — guarantees the anchor distribution matches the target
+    # distribution.
+    from navsim.agents.sparsedrive.sparsedrive_config import SparseDriveConfig
+    from navsim.agents.sparsedrive.sparsedrive_features import (
+        _extract_motion_gt,
+        navsim_boxes_to_sparsedrive,
+    )
+
     print("Extracting trajectories...")
     for token in tqdm(loader.tokens):
         scene = loader.get_scene_from_token(token)
-        # Ego future
+        current_idx = scene.scene_metadata.num_history_frames - 1
+        # Ego future deltas (plan side)
         traj = scene.get_future_trajectory(num_trajectory_frames=args.ego_fut_ts)
         poses = traj.poses[:, :2]  # (T, 2)
         deltas = np.zeros_like(poses)
         deltas[0] = poses[0]
         deltas[1:] = poses[1:] - poses[:-1]
-        # Driving command from current frame
-        current_idx = scene.scene_metadata.num_history_frames - 1
         cmd_onehot = scene.frames[current_idx].ego_status.driving_command
         cmd_idx = int(np.argmax(cmd_onehot))
         if 0 <= cmd_idx < args.num_driving_cmds:
             ego_deltas_per_cmd[cmd_idx].append(deltas)
-        # Agent motion futures: TODO — needs per-track future aggregation across
-        # frames, which navsim's Scene.frames already exposes via track_tokens.
-        # Left as a follow-up; placeholder anchors stay random for motion.
+
+        # Per-class motion deltas (motion side)
+        current_anns = scene.frames[current_idx].annotations
+        _, labels_np, keep_idx = navsim_boxes_to_sparsedrive(current_anns)
+        motion_trajs, motion_masks = _extract_motion_gt(
+            scene, keep_idx, fut_ts=args.fut_ts,
+        )
+        # Only keep agents with all timesteps valid (full-trajectory anchors).
+        # The Hungarian matcher tolerates short trajectories at training time,
+        # but anchors should represent typical full-horizon motion.
+        if motion_trajs.shape[0] == 0:
+            continue
+        full_valid = motion_masks.all(dim=1)
+        for i in torch_to_indices(full_valid):
+            cls = int(labels_np[i])
+            if 0 <= cls < args.num_classes:
+                motion_deltas_per_class[cls].append(
+                    motion_trajs[i].numpy().astype(np.float32)
+                )
 
     # Plan k-means: cluster per cmd
     plan_anchors = np.zeros(
@@ -114,17 +139,29 @@ def main():
     np.save(plan_path, plan_anchors)
     print(f"  wrote {plan_path}  shape={plan_anchors.shape}")
 
-    # Motion anchors: random for now (per-class clustering needs real per-track
-    # future trajectories from scene.frames track_tokens, which is a follow-up).
-    motion_anchors = (
-        np.random.RandomState(args.seed)
-        .randn(args.num_classes, args.fut_mode, args.fut_ts, 2)
-        .astype(np.float32)
-        * 0.5
+    # Motion k-means: cluster per nuScenes class
+    motion_anchors = np.zeros(
+        (args.num_classes, args.fut_mode, args.fut_ts, 2), dtype=np.float32
     )
+    for cls, deltas_list in enumerate(motion_deltas_per_class):
+        if not deltas_list:
+            print(f"  motion class {cls}: no agents — keeping zero anchors")
+            continue
+        arr = np.stack(deltas_list, axis=0)  # (N, fut_ts, 2)
+        flat = arr.reshape(arr.shape[0], -1)
+        n_clusters = min(args.fut_mode, len(arr))
+        km = KMeans(n_clusters=n_clusters, random_state=args.seed, n_init=10).fit(flat)
+        centers = km.cluster_centers_.reshape(n_clusters, args.fut_ts, 2)
+        motion_anchors[cls, :n_clusters] = centers
+        print(f"  motion class {cls}: clustered {len(arr)} trajs into {n_clusters} modes")
     motion_path = out_dir / f"kmeans_motion_navsim_{args.fut_mode}.npy"
     np.save(motion_path, motion_anchors)
-    print(f"  wrote {motion_path}  shape={motion_anchors.shape}  (random — TODO: real per-class)")
+    print(f"  wrote {motion_path}  shape={motion_anchors.shape}")
+
+
+def torch_to_indices(mask):
+    """Helper: torch boolean (N,) → list of int indices where True."""
+    return mask.nonzero(as_tuple=False).flatten().tolist()
 
 
 if __name__ == "__main__":
