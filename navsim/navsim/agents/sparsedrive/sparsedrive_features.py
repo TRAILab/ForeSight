@@ -118,9 +118,7 @@ def _line_to_local(
 def _resample_line(line: LineString, num_sample: int) -> npt.NDArray[np.float32]:
     """Sample `num_sample` evenly-spaced points along a shapely LineString.
 
-    Returns (num_sample, 2) float32. Matches the SparseDrive map head's
-    expected input shape (the head's anchor encoder permutes to include
-    forward + reverse + ... but per-line we just need the 2D points).
+    Returns (num_sample, 2) float32 in the line's coordinate frame.
     """
     if line.length <= 0 or len(line.coords) < 2:
         return np.zeros((num_sample, 2), dtype=np.float32)
@@ -129,6 +127,49 @@ def _resample_line(line: LineString, num_sample: int) -> npt.NDArray[np.float32]
         [list(line.interpolate(d).coords)[0] for d in distances],
         dtype=np.float32,
     )
+
+
+def _permute_line(
+    line: npt.NDArray[np.float32], padding: float = 1e5,
+) -> npt.NDArray[np.float32]:
+    """Expand a `(num_pts, 2)` polyline into `(2 * (num_pts - 1), num_pts, 2)`.
+
+    Matches `VectorizeMap.permute_line` in
+    `projects/mmdet3d_plugin/datasets/pipelines/vectorize.py`. The
+    SparseDrive map head's loss compares predictions against this stacked
+    permutation set — orderings the model can equivalently produce —
+    using a Hungarian matcher. Closed lines (e.g. crosswalk perimeters)
+    use `2 * (num_pts - 1)` rotational + flipped rotations; open lines
+    pad with a sentinel `padding` value so the head ignores them.
+    """
+    is_closed = np.allclose(line[0], line[-1], atol=1e-3)
+    num_points = len(line)
+    permute_num = num_points - 1
+    coords_dim = line.shape[-1]
+    out: List[npt.NDArray[np.float32]] = []
+    if is_closed:
+        pts = line[:-1]
+        for shift in range(permute_num):
+            out.append(np.roll(pts, shift, axis=0))
+        flipped = np.flip(pts, axis=0)
+        for shift in range(permute_num):
+            out.append(np.roll(flipped, shift, axis=0))
+        arr = np.stack(out, axis=0)
+        # Re-attach the closing point as a copy of the first point.
+        full = np.zeros((permute_num * 2, num_points, coords_dim), dtype=np.float32)
+        full[:, :-1] = arr
+        full[:, -1] = arr[:, 0]
+        return full
+    else:
+        out.append(line)
+        out.append(np.flip(line, axis=0))
+        arr = np.stack(out, axis=0)
+        # Pad with sentinel — the head's matcher will skip these slots.
+        pad = np.full(
+            (permute_num * 2 - 2, num_points, coords_dim),
+            padding, dtype=np.float32,
+        )
+        return np.concatenate([arr, pad], axis=0)
 
 
 def _extract_map_polylines(
@@ -142,7 +183,9 @@ def _extract_map_polylines(
 
     Returns:
         gt_map_labels: (N,) int64 — class index per polyline (0/1/2)
-        gt_map_pts:    (N, num_sample, 2) float32 — local-frame xy
+        gt_map_pts:    (N, 2*(num_sample-1), num_sample, 2) float32 —
+                       local-frame xy with all permutations the head's
+                       Hungarian matcher considers equivalent.
     """
     # Treat global_ego_pose as a 3-vec [x, y, heading] in nuPlan global SE2.
     origin = StateSE2(
@@ -183,13 +226,15 @@ def _extract_map_polylines(
                     and (np.abs(xy[:, 1]) <= fwd_lim).any()
                 ):
                     continue
-                pts.append(_resample_line(local, num_sample))
+                resampled = _resample_line(local, num_sample)  # (num_sample, 2)
+                pts.append(_permute_line(resampled))           # (38, 20, 2)
                 labels.append(cls)
 
+    permute_num = 2 * (num_sample - 1)
     if not labels:
         return (
             torch.zeros((0,), dtype=torch.long),
-            torch.zeros((0, num_sample, 2), dtype=torch.float32),
+            torch.zeros((0, permute_num, num_sample, 2), dtype=torch.float32),
         )
     return (
         torch.tensor(labels, dtype=torch.long),
