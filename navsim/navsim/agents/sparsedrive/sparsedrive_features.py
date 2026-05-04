@@ -11,12 +11,17 @@ Camera mapping (8 → 6, nuScenes-aligned):
     cam_l1, cam_r1: dropped (pure-side cameras have no nuScenes counterpart)
 """
 
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import cv2
 import numpy as np
 import numpy.typing as npt
 import torch
+from shapely import affinity
+from shapely.geometry import LineString
+
+from nuplan.common.actor_state.state_representation import StateSE2
+from nuplan.common.maps.abstract_map import AbstractMap, SemanticMapLayer
 
 from navsim.agents.abstract_agent import AbstractAgent  # noqa: F401  (for type hints)
 from navsim.agents.sparsedrive.sparsedrive_config import SparseDriveConfig
@@ -75,6 +80,121 @@ def _decide_hflip(timestamp_us) -> bool:
 # the training distribution and FPN/depth_branch features blow up.
 _IMG_MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
 _IMG_STD = np.array([58.395, 57.12, 57.375], dtype=np.float32)
+
+
+# SparseDrive map class indices — same as nuScenes config (3 classes).
+# `_MAP_LAYERS` maps each class to the nuPlan `SemanticMapLayer` enum
+# values it pulls from. CROSSWALK + LANE_CONNECTOR are missing from
+# nuScenes but useful in nuPlan; coalesced into the closest SparseDrive
+# class so the (3-class) anchors stay reusable.
+_MAP_CLASS_PED_CROSSING = 0
+_MAP_CLASS_DIVIDER = 1
+_MAP_CLASS_BOUNDARY = 2
+_MAP_LAYERS: Dict[int, List[SemanticMapLayer]] = {
+    _MAP_CLASS_PED_CROSSING: [SemanticMapLayer.CROSSWALK],
+    # Lane and lane_connector centerlines act as dividers (gives the planner
+    # a sense of which way each lane goes).
+    _MAP_CLASS_DIVIDER: [SemanticMapLayer.LANE, SemanticMapLayer.LANE_CONNECTOR],
+    # Walkways approximate sidewalk boundaries; close enough for the
+    # nuScenes "boundary" semantic.
+    _MAP_CLASS_BOUNDARY: [SemanticMapLayer.WALKWAYS],
+}
+
+
+def _line_to_local(
+    line: LineString, origin: StateSE2,
+) -> LineString:
+    """Transfuser pattern: translate then rotate a shapely geometry into
+    the local frame of `origin` (a global SE2)."""
+    a = np.cos(origin.heading)
+    b = np.sin(origin.heading)
+    d = -np.sin(origin.heading)
+    e = np.cos(origin.heading)
+    translated = affinity.affine_transform(line, [1, 0, 0, 1, -origin.x, -origin.y])
+    rotated = affinity.affine_transform(translated, [a, b, d, e, 0, 0])
+    return rotated
+
+
+def _resample_line(line: LineString, num_sample: int) -> npt.NDArray[np.float32]:
+    """Sample `num_sample` evenly-spaced points along a shapely LineString.
+
+    Returns (num_sample, 2) float32. Matches the SparseDrive map head's
+    expected input shape (the head's anchor encoder permutes to include
+    forward + reverse + ... but per-line we just need the 2D points).
+    """
+    if line.length <= 0 or len(line.coords) < 2:
+        return np.zeros((num_sample, 2), dtype=np.float32)
+    distances = np.linspace(0.0, line.length, num_sample)
+    return np.array(
+        [list(line.interpolate(d).coords)[0] for d in distances],
+        dtype=np.float32,
+    )
+
+
+def _extract_map_polylines(
+    map_api: AbstractMap,
+    global_ego_pose: npt.NDArray,
+    roi: Tuple[float, float],
+    num_sample: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Pull lanes / crosswalks / walkways within `roi` of the current ego,
+    transform to local frame, vectorize to fixed-length point lists.
+
+    Returns:
+        gt_map_labels: (N,) int64 — class index per polyline (0/1/2)
+        gt_map_pts:    (N, num_sample, 2) float32 — local-frame xy
+    """
+    # Treat global_ego_pose as a 3-vec [x, y, heading] in nuPlan global SE2.
+    origin = StateSE2(
+        x=float(global_ego_pose[0]),
+        y=float(global_ego_pose[1]),
+        heading=float(global_ego_pose[2]),
+    )
+    radius = max(roi)  # one circular query covers the rectangular ROI
+    all_layers = sorted(
+        {layer for layers in _MAP_LAYERS.values() for layer in layers},
+        key=lambda l: l.value,
+    )
+    obj_dict = map_api.get_proximal_map_objects(
+        point=origin.point, radius=radius, layers=all_layers
+    )
+
+    labels: List[int] = []
+    pts: List[npt.NDArray[np.float32]] = []
+    lat_lim, fwd_lim = roi
+    for cls, layers in _MAP_LAYERS.items():
+        for layer in layers:
+            for map_object in obj_dict.get(layer, []):
+                # CROSSWALK / WALKWAYS expose `.polygon` (use exterior as
+                # the polyline). LANE / LANE_CONNECTOR expose
+                # `.baseline_path.linestring` (centerline).
+                if layer == SemanticMapLayer.CROSSWALK or layer == SemanticMapLayer.WALKWAYS:
+                    line = LineString(map_object.polygon.exterior.coords)
+                else:
+                    line = map_object.baseline_path.linestring
+                local = _line_to_local(line, origin)
+                xy = np.asarray(local.coords, dtype=np.float32)
+                # Quick ROI cull: drop polylines fully outside the local
+                # rectangle. SparseDrive's `CircleObjectRangeFilter` does a
+                # circular cull at 55 m for boxes; for map we use the
+                # configured rectangle.
+                if not (
+                    (np.abs(xy[:, 0]) <= lat_lim).any()
+                    and (np.abs(xy[:, 1]) <= fwd_lim).any()
+                ):
+                    continue
+                pts.append(_resample_line(local, num_sample))
+                labels.append(cls)
+
+    if not labels:
+        return (
+            torch.zeros((0,), dtype=torch.long),
+            torch.zeros((0, num_sample, 2), dtype=torch.float32),
+        )
+    return (
+        torch.tensor(labels, dtype=torch.long),
+        torch.from_numpy(np.stack(pts, axis=0)),
+    )
 
 
 def _photo_metric_distortion(
@@ -385,18 +505,37 @@ class SparseDriveTargetBuilder(AbstractTargetBuilder):
         deltas[1:] = poses[1:, :2] - poses[:-1, :2]
 
 
-        # NOTE on det / map / motion targets:
-        # PyTorch's default_collate can't stack variable-length per-scene
-        # tensors (gt_bboxes_3d shapes like (N_i, 9) where N_i varies). The
-        # navsim Lightning runner uses default_collate, so emitting any
-        # variable-length target here breaks the dataloader. The agent's
-        # forward injects empty placeholders for gt_bboxes_3d / gt_labels_3d
-        # / gt_map_* / gt_agent_fut_* and the corresponding losses get
-        # filtered out for the planning-only first pass.
-        # When we wire real detection supervision, this builder will need to
-        # pad to fixed N (or we'll need a custom collate_fn) — left for the
-        # stage-1 follow-up.
+        # Real detection GT for stage-1 supervision.
+        # nuPlan Annotations (variable N per scene) → SparseDrive 9-dim raw
+        # boxes [X, Y, Z, W, L, H, YAW, VX, VY] + class indices, dropping
+        # ego + classes that don't map to nuScenes. The variable-length
+        # (N_i, 9) tensors are passed through to the model as Python lists
+        # by `sparsedrive_collate` — the head's loss path already iterates
+        # the per-batch list (see SparseDriveHead.loss → det_head.loss).
+        current_frame = scene.frames[scene.scene_metadata.num_history_frames - 1]
+        boxes_np, labels_np = navsim_boxes_to_sparsedrive(current_frame.annotations)
+        gt_bboxes_3d = torch.from_numpy(boxes_np)             # (N, 9) float32
+        gt_labels_3d = torch.from_numpy(labels_np).long()     # (N,)   int64
+
+        # Map GT — see `_extract_map_polylines` below; cribs the
+        # transfuser pattern of `map_api.get_proximal_map_objects` +
+        # `.baseline_path.discrete_path`. Returns variable-N polylines as
+        # lists, also handled by sparsedrive_collate.
+        gt_map_labels, gt_map_pts = _extract_map_polylines(
+            scene.map_api,
+            current_frame.ego_status.ego_pose,  # global SE2 [x, y, heading]
+            roi=cfg.map_roi,
+            num_sample=cfg.map_num_sample,
+        )
+
         return {
             "gt_ego_fut_trajs": deltas,
             "gt_ego_fut_masks": torch.ones(cfg.num_future_poses, dtype=torch.float32),
+            "gt_bboxes_3d": gt_bboxes_3d,
+            "gt_labels_3d": gt_labels_3d,
+            "gt_map_labels": gt_map_labels,
+            "gt_map_pts": gt_map_pts,
+            # Per-token track IDs for the cross-frame motion GT walk
+            # (per-agent fut trajs). Wired separately in a follow-up.
+            "track_tokens": current_frame.annotations.track_tokens,
         }

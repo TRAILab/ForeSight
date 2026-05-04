@@ -33,6 +33,15 @@ class SparseDriveConfig:
     # Driving command: NavSim ships a 4-dim onehot (left/straight/right/unknown)
     driving_command_dim: int = 4
 
+    # Map GT extraction (stage-1 perception). Polylines from
+    # `Scene.map_api.get_proximal_map_objects` within `map_roi` metres of
+    # the current ego, transformed to ego-local frame, sub-sampled to
+    # `map_num_sample` evenly spaced points each. Mirrors the nuScenes
+    # `roi_size=(30, 60)` and `num_sample=20` defaults from the SparseDrive
+    # configs (60 m forward × 30 m lateral, 20 sample points per line).
+    map_roi: Tuple[float, float] = (30.0, 60.0)  # (lateral, forward) meters
+    map_num_sample: int = 20
+
     # Loss flags. Stage-2 planning-only first; flip these on once the stage-1 path
     # for nuPlan boxes is implemented.
     use_planning_loss: bool = True

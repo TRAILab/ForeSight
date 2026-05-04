@@ -360,6 +360,15 @@ class SparseDriveAgent(AbstractAgent):
         )
         return {"optimizer": optim, "lr_scheduler": scheduler}
 
+    def get_collate_fn(self):
+        """Return a collate_fn that handles variable-length per-sample GT
+        (gt_bboxes_3d (Ni, 9), gt_map_pts (Ni, 38, 20, 2), gt_agent_fut_*),
+        which the default Lightning collate stacks-then-fails on. Picked
+        up by run_training.py via getattr.
+        """
+        from navsim.agents.sparsedrive.sparsedrive_collate import sparsedrive_collate
+        return sparsedrive_collate
+
     def get_training_callbacks(self) -> List[pl.Callback]:
         import os
         # Hydra cds into the experiment output dir before training; checkpoints

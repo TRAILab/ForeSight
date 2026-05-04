@@ -122,9 +122,19 @@ def main(cfg: DictConfig) -> None:
         train_data, val_data = build_datasets(cfg, agent)
 
     logger.info("Building Datasets")
-    train_dataloader = DataLoader(train_data, **cfg.dataloader.params, shuffle=True)
+    # Agent-provided collate_fn for variable-length per-sample GT (e.g.
+    # detection boxes vary in count across scenes). Default Lightning
+    # collate calls torch.stack which breaks on (Ni, 9)-shaped tensors
+    # with varying Ni. Agents that don't override return None → DataLoader
+    # uses default_collate, preserving prior behavior.
+    extra_dl_kwargs = {}
+    collate_fn = getattr(agent, "get_collate_fn", lambda: None)()
+    if collate_fn is not None:
+        extra_dl_kwargs["collate_fn"] = collate_fn
+        logger.info("Using agent-provided collate_fn: %s", collate_fn.__name__)
+    train_dataloader = DataLoader(train_data, **cfg.dataloader.params, shuffle=True, **extra_dl_kwargs)
     logger.info("Num training samples: %d", len(train_data))
-    val_dataloader = DataLoader(val_data, **cfg.dataloader.params, shuffle=False)
+    val_dataloader = DataLoader(val_data, **cfg.dataloader.params, shuffle=False, **extra_dl_kwargs)
     logger.info("Num validation samples: %d", len(val_data))
 
     logger.info("Building Trainer")
