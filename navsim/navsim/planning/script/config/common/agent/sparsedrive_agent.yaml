@@ -30,6 +30,14 @@ config:
   use_motion_loss: False
   use_map_loss: False
 
+  # Stage-1 NavSim: set freeze_perception=False to actually train det/map
+  # heads against the real GT plumbed in compute_targets. Default True
+  # keeps the planning-only minS2 freeze.
+  freeze_perception: True
+  motion_fut_ts: 16
+  map_roi: [30.0, 60.0]
+  map_num_sample: 20
+
   lr: 1.0e-4
   weight_decay: 0.0
   lr_steps: [50, 75]
