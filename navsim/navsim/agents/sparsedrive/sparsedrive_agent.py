@@ -65,12 +65,14 @@ class SparseDriveAgent(AbstractAgent):
         # still consumes their outputs via cross-attn) but are FROZEN so their
         # weights don't drift under gradients from planning_loss. With empty
         # det/map GT, their unfrozen weights diverge to NaN within ~500 steps.
-        # When real det/map GT is wired through, drop this freeze.
-        head = self._sparsedrive_model.head
-        for name in ("det_head", "map_head"):
-            if hasattr(head, name):
-                for p in getattr(head, name).parameters():
-                    p.requires_grad = False
+        # Stage-1 supervision (real det+map+motion GT in target builder)
+        # opts out via `config.freeze_perception=False`.
+        if config.freeze_perception:
+            head = self._sparsedrive_model.head
+            for name in ("det_head", "map_head"):
+                if hasattr(head, name):
+                    for p in getattr(head, name).parameters():
+                        p.requires_grad = False
 
     # ------------------------------------------------------------------ build
     def _build_model_from_foresight_config(self) -> nn.Module:
@@ -316,14 +318,22 @@ class SparseDriveAgent(AbstractAgent):
         # they're learned (just not directly supervised by classifying empty
         # anchor sets).
         if isinstance(predictions, dict):
+            # Stage-1 supervision: keep det+map losses in backprop. Otherwise
+            # (planning-only) filter them out — placeholder GT makes them noise.
+            keep_det_map = not self._config.freeze_perception
             loss_terms = {
                 k: v
                 for k, v in predictions.items()
                 if torch.is_tensor(v)
                 and v.dim() == 0
                 and v.requires_grad
-                and not k.startswith("det_loss")
-                and not k.startswith("map_loss")
+                and (
+                    keep_det_map
+                    or (
+                        not k.startswith("det_loss")
+                        and not k.startswith("map_loss")
+                    )
+                )
             }
             if loss_terms:
                 total = sum(loss_terms.values())

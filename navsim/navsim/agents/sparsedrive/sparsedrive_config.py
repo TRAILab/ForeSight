@@ -14,7 +14,12 @@ class SparseDriveConfig:
 
     # NavSim-side data shape
     num_history_frames: int = 4         # NavSim default
-    num_future_poses: int = 8           # 4 s @ 0.5 s
+    num_future_poses: int = 8           # 4 s @ 0.5 s — ego planning horizon
+    # Motion head (per-agent) uses a 2× longer horizon than ego planning
+    # in the SparseDrive minS2 / nuScenes configs (fut_ts=16 motion vs
+    # ego_fut_ts=8). Capped at SceneFilter.num_future_frames if smaller —
+    # missing tail timesteps mask=0 in gt_agent_fut_masks.
+    motion_fut_ts: int = 16
 
     # 8 → 6 camera reduction. Drop pure-side cams; mapping mirrors nuScenes.
     # Order matches projects/mmdet3d_plugin/core/box3d.py CAM order.
@@ -48,6 +53,13 @@ class SparseDriveConfig:
     use_detection_loss: bool = False
     use_motion_loss: bool = False
     use_map_loss: bool = False
+
+    # Perception freeze. Default True keeps the current planning-only minS2
+    # behavior (det/map heads loaded from stage-1 nuScenes ckpt and frozen
+    # via requires_grad=False; their losses filtered out of compute_loss).
+    # Set False for stage-1 NavSim training where we have real det+map+motion
+    # GT and want the heads to actually learn.
+    freeze_perception: bool = True
 
     # Optimizer (mirrors transfuser_agent defaults)
     lr: float = 1e-4

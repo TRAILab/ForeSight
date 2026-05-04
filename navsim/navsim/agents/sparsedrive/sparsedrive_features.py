@@ -292,8 +292,12 @@ _NAVSIM_TO_NUSC_CLASS = {
 
 def navsim_boxes_to_sparsedrive(
     annotations: Annotations,
-) -> Tuple[npt.NDArray[np.float32], npt.NDArray[np.int_]]:
-    """nuPlan Annotations -> SparseDrive raw GT (N, 9) + class indices (N,).
+) -> Tuple[npt.NDArray[np.float32], npt.NDArray[np.int_], List[int]]:
+    """nuPlan Annotations -> SparseDrive raw GT (N, 9) + class indices (N,)
+    + the indices into `annotations.*` that survived the class filter.
+
+    The third return value lets callers align motion GT (cross-frame walks
+    by `track_tokens`) to the same set of agents as detection GT.
 
     SparseDrive's training-mode loss path expects RAW boxes in nuScenes layout
     (the head's encode_reg_target handles log-WLH + sin/cos-yaw):
@@ -303,10 +307,11 @@ def navsim_boxes_to_sparsedrive(
     Velocity comes from Annotations.velocity_3d (m/s, lidar frame).
     """
     if len(annotations.boxes) == 0:
-        return np.zeros((0, 9), dtype=np.float32), np.zeros((0,), dtype=np.int64)
+        return np.zeros((0, 9), dtype=np.float32), np.zeros((0,), dtype=np.int64), []
 
     out_boxes: List[npt.NDArray[np.float32]] = []
     out_labels: List[int] = []
+    keep_idx: List[int] = []
     for i, name in enumerate(annotations.names):
         cls = _NAVSIM_TO_NUSC_CLASS.get(name, -1)
         if cls < 0:
@@ -325,10 +330,95 @@ def navsim_boxes_to_sparsedrive(
                      dtype=np.float32)
         )
         out_labels.append(cls)
+        keep_idx.append(i)
 
     if not out_boxes:
-        return np.zeros((0, 9), dtype=np.float32), np.zeros((0,), dtype=np.int64)
-    return np.stack(out_boxes, axis=0), np.array(out_labels, dtype=np.int64)
+        return np.zeros((0, 9), dtype=np.float32), np.zeros((0,), dtype=np.int64), []
+    return np.stack(out_boxes, axis=0), np.array(out_labels, dtype=np.int64), keep_idx
+
+
+def _extract_motion_gt(
+    scene: Scene,
+    keep_idx: List[int],
+    fut_ts: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Per-agent future trajectory deltas in the current ego frame.
+
+    For each box that survived the det class filter at the current frame,
+    walk `scene.frames[curr+1 : curr+1+fut_ts]` looking up the same
+    `track_token`. When found, project that frame's box center into the
+    current ego frame (via global SE3) and accumulate deltas. When not
+    found (occluded, exited scene, etc.), mask = 0 for that timestep.
+
+    Returns:
+        gt_agent_fut_trajs: (N, fut_ts, 2) float32 — per-step xy deltas
+        gt_agent_fut_masks: (N, fut_ts) float32 — 1 = valid, 0 = missing
+    """
+    history = scene.scene_metadata.num_history_frames
+    curr_frame = scene.frames[history - 1]
+    curr_anns = curr_frame.annotations
+    curr_tracks = [curr_anns.track_tokens[i] for i in keep_idx]
+    N = len(curr_tracks)
+
+    if N == 0:
+        return (
+            torch.zeros((0, fut_ts, 2), dtype=torch.float32),
+            torch.zeros((0, fut_ts), dtype=torch.float32),
+        )
+
+    # T_t→curr in absolute global frame (same convention used by T_global
+    # plumbing — global SE2 promoted to SE3 with z=0). Using float64
+    # internally to avoid UTM-translation precision loss; convert to
+    # float32 only for the final delta tensor.
+    curr_pose = np.asarray(curr_frame.ego_status.ego_pose, dtype=np.float64)
+    T_curr_global_inv = np.linalg.inv(_se2_to_se3(curr_pose))
+
+    abs_xy = np.zeros((N, fut_ts, 2), dtype=np.float32)
+    masks = np.zeros((N, fut_ts), dtype=np.float32)
+
+    for t in range(fut_ts):
+        f_idx = history + t
+        if f_idx >= len(scene.frames):
+            break
+        f = scene.frames[f_idx]
+        f_pose = np.asarray(f.ego_status.ego_pose, dtype=np.float64)
+        T_t2curr = T_curr_global_inv @ _se2_to_se3(f_pose)
+        f_tracks = list(f.annotations.track_tokens)
+        for i, track in enumerate(curr_tracks):
+            if track not in f_tracks:
+                continue
+            j = f_tracks.index(track)
+            b = f.annotations.boxes[j]
+            pt = np.array(
+                [
+                    float(b[BoundingBoxIndex.X]),
+                    float(b[BoundingBoxIndex.Y]),
+                    float(b[BoundingBoxIndex.Z]),
+                    1.0,
+                ],
+                dtype=np.float64,
+            )
+            pt_curr = T_t2curr @ pt
+            abs_xy[i, t, 0] = float(pt_curr[0])
+            abs_xy[i, t, 1] = float(pt_curr[1])
+            masks[i, t] = 1.0
+
+    # Deltas in current ego frame; first delta is from origin (current ego)
+    # to the first future xy. Carry forward the last valid abs xy through
+    # missing timesteps so the delta is 0 (mask=0 anyway, won't backprop).
+    for i in range(N):
+        last_valid = np.zeros(2, dtype=np.float32)
+        for t in range(fut_ts):
+            if masks[i, t] == 0:
+                abs_xy[i, t] = last_valid
+            else:
+                last_valid = abs_xy[i, t]
+
+    deltas = np.zeros_like(abs_xy)
+    deltas[:, 0] = abs_xy[:, 0]
+    deltas[:, 1:] = abs_xy[:, 1:] - abs_xy[:, :-1]
+
+    return torch.from_numpy(deltas), torch.from_numpy(masks)
 
 
 def _select_cams(cameras: Cameras, cam_names) -> List:
@@ -513,9 +603,17 @@ class SparseDriveTargetBuilder(AbstractTargetBuilder):
         # by `sparsedrive_collate` — the head's loss path already iterates
         # the per-batch list (see SparseDriveHead.loss → det_head.loss).
         current_frame = scene.frames[scene.scene_metadata.num_history_frames - 1]
-        boxes_np, labels_np = navsim_boxes_to_sparsedrive(current_frame.annotations)
+        boxes_np, labels_np, keep_idx = navsim_boxes_to_sparsedrive(
+            current_frame.annotations
+        )
         gt_bboxes_3d = torch.from_numpy(boxes_np)             # (N, 9) float32
         gt_labels_3d = torch.from_numpy(labels_np).long()     # (N,)   int64
+
+        # Per-agent motion GT — cross-frame walk over `track_tokens`,
+        # aligned to the same N as gt_bboxes_3d via `keep_idx`.
+        gt_agent_fut_trajs, gt_agent_fut_masks = _extract_motion_gt(
+            scene, keep_idx, fut_ts=cfg.motion_fut_ts,
+        )
 
         # Map GT — see `_extract_map_polylines` below; cribs the
         # transfuser pattern of `map_api.get_proximal_map_objects` +
@@ -535,7 +633,6 @@ class SparseDriveTargetBuilder(AbstractTargetBuilder):
             "gt_labels_3d": gt_labels_3d,
             "gt_map_labels": gt_map_labels,
             "gt_map_pts": gt_map_pts,
-            # Per-token track IDs for the cross-frame motion GT walk
-            # (per-agent fut trajs). Wired separately in a follow-up.
-            "track_tokens": current_frame.annotations.track_tokens,
+            "gt_agent_fut_trajs": gt_agent_fut_trajs,
+            "gt_agent_fut_masks": gt_agent_fut_masks,
         }
