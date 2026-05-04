@@ -127,6 +127,18 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Opt-in diagnostic for cross-cluster CR drift on H100 (see
+    # reports/2026_05_03_h100_reproduce.md). Disables TF32 on matmul + cudnn
+    # so eval runs in true FP32. No-op when the env var is unset.
+    if os.environ.get("FORESIGHT_DISABLE_TF32"):
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        try:
+            torch.set_float32_matmul_precision("highest")
+        except AttributeError:
+            pass
+        print(f"[diagnostic] FORESIGHT_DISABLE_TF32 set: matmul.allow_tf32={torch.backends.cuda.matmul.allow_tf32}, cudnn.allow_tf32={torch.backends.cudnn.allow_tf32}", flush=True)
+
     assert (
         args.out or args.eval or args.format_only or args.show or args.show_dir
     ), (

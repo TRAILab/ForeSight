@@ -197,7 +197,7 @@ Stream A: stage-2 loss-zero trio (3372803/4/5)
   - `_s2nomaploss` (Killarney **3386473**): **L2=0.5161 / CR=0.063% / NDS=0.5242 / mAP=0.4160 / mAP_normal=0.3095**. ΔL2=−0.004 (within noise), ΔCR=+0.017 pp. Map collapses (mAP_normal 0.31).
   - `_s2nomotionloss` (Killarney **3386474**): **L2=0.5132 / CR=0.042% / NDS=0.5263 / mAP=0.4132 / mAP_normal=0.5519**. ΔL2=−0.007 (at noise edge), ΔCR=−0.004 pp. Motion collapses (car_ade 4.17).
   - **Outcome: all three planning L2s sit at parity with the seed-0 baseline (max |ΔL2|=0.007); CRs vary by ≤0.030 pp.** First direct test of the supervision-not-interface claim — stage-2 perception losses are not shaping the backbone in any way that matters for planning, given a strong stage-1 init. Stream E (frozen-backbone S2) is the natural next beat.
-- [x] **Stream C — `_decoder6_planwp_evalmatchmode_streamc` — RESULT IN HAND.** Training: Killarney 3389115 (COMPLETED to iter 11679/11720). Eval: Killarney **3394847** (1h16m eval-only, COMPLETED 2026-05-02): **L2=0.3597 / CR=0.026% / NDS=0.5245 / mAP_normal=0.5556**. Combines egostatus + image_at_det + ego_only_planning=True (agent slots dropped). ΔL2=−0.011 vs headline mean (marginally outside noise floor, single-seed); ΔCR=−0.015 pp (at noise floor). **Ties or marginally beats the headline — dropping all agent slots from the planner does not hurt performance.** Submit a second seed to confirm before locking. Motion metrics absent by design.
+- [x] **Stream C — `_decoder6_planwp_evalmatchmode_streamc` — REPRODUCES across seeds + clusters.** Seed 1 eval-only (Killarney 3394847 on 3389115 ckpt): L2=0.3597 / CR=0.026%. Seed 2 train+eval (Killarney **3400093**, COMPLETED 2026-05-03): **L2=0.3669 / CR=0.042% / NDS=0.5239 / mAP_normal=0.5541**. Cross-cluster: Fir 38335845 (L2=0.3700/CR=0.040%), Rorqual 11262874 (L2=0.3727/CR=0.040%). **Mean across 4 reads: L2=0.3673 / CR=0.037%** vs 3-seed headline 0.3692/0.040%. Streamc ties headline within noise — ego_only_planning is the locked architecture for "agent slots dropped". The seed-1 0.3597 win was a single-seed favourable draw; mean has settled at headline parity.
 
 ## New cluster notes (2026-05-03)
 
@@ -416,7 +416,8 @@ NeurIPS 2026 abstract deadline (typical: mid-May) — tight but feasible if we l
 | **3397346** | `_egostatus_minS2` | **L2=0.3563 / CR=0.041%** — ties/marginally beats 3-seed headline mean (0.3692 / 0.040%). **Paper architecture locked.** |
 | **3397345 → 3406308** | `_egostatus_s2nopercep` | Training completed; eval crashed on NaN det boxes; eval-only rerun on iter_11720.pth landed: **L2=0.3572 / CR=0.061%** (ΔL2=−0.012 vs headline; CR +0.021 pp at noise edge). Stream A combined alone is empty for planning. |
 | **3394848** | `_egostatus_frozenpercep` | **L2=0.3698 / CR=0.044%** — within noise of headline; freezing S2 perception stack is safe |
-| **3394847** | `_streamc` eval-only | L2=0.3597 / CR=0.026% (already logged) |
+| **3394847** | `_streamc` eval-only | L2=0.3597 / CR=0.026% (seed 1 eval-only on egostatus ckpt) |
+| **3400093** | `_streamc` seed 2 (train+eval) | **L2=0.3669 / CR=0.042%** — full retrain reproduces directionally; mean across 4 reads (incl. Fir/Rorqual) L2=0.3673/CR=0.037% |
 | **3394849** | `_egostatus` seed 2 | **L2=0.3660 / CR=0.039%** — locks 3-seed mean at 0.3692/0.040% |
 | **3396706** | `ptaux2d_egostatus` | L2=0.3627 / CR=0.056% |
 | **3396707** | `ptaux2d_dino_egostatus` | L2=0.3655 / CR=0.056% |
@@ -425,9 +426,9 @@ NeurIPS 2026 abstract deadline (typical: mid-May) — tight but feasible if we l
 | **Apollo joint_nodetach** | stage-1 with `detach_perception=False` | Last open stage-1 hypothesis; its stage-2 transfer will also go through minS2 |
 
 **Decision tree (resolved):**
-- minS2 ties headline → **paper architecture locked.** Next: submit minS2 seed-2 to confirm the marginal L2 win. Pair best stage-1 (`_ptaux2d_dseg`, 3396708) with minS2 architecture.
-- B1.6/B1.7 evals (3401950, 3401952) close the last detection-forward dependency at inference: B1.6 L2=0.3665/CR=0.067%, B1.7 L2=0.3729/CR=0.056%. Both tie L2 within noise but trade ~0.02–0.03 pp CR. Worth a seed-2 if the "fully perception-free at inference" headline is to be claimed.
-- Cross-cluster: Streamc reproduces cleanly on Fir (0.3700/0.040%) and Rorqual (0.3727/0.040%); egostatus L2 reproduces but CR elevated outside Killarney — investigate after seed-2 minS2.
+- minS2 ties headline → **paper architecture locked.** Streamc seed-2 (K3400093) reproduces (mean L2=0.3673/CR=0.037% across 4 reads, ties headline). In-flight on Killarney (RUNNING 2026-05-03): minS2 seed-2 (3406306), `_ptaux2d_dseg_minS2` (3406307, best stage-1 × locked arch), `_minS2_B1p6` retrain (3406567), `_minS2_B1p8`/`B1p9` (3406568/70 — new conflict-sampler variants), `_ptaux2d_dseg_minS2_B1p6` (3406571). Pending S1 transfers (3408313-16) cover dn / aux2p5d / rot3dv2 / dn_rot3d_aux2p5d.
+- B1.6/B1.7 evals (3401950, 3401952) close the last detection-forward dependency at inference: B1.6 L2=0.3665/CR=0.067%, B1.7 L2=0.3729/CR=0.056%. Both tie L2 within noise but trade ~0.02–0.03 pp CR. The new B1.8/B1.9 + B1.6 retrain are testing whether a full retrain (vs eval-only on the egostatus ckpt) recovers the CR.
+- Cross-cluster: Streamc reproduces cleanly on Fir (0.3700/0.040%), Rorqual (0.3727/0.040%), and now Killarney seed-2 (0.3669/0.042%); egostatus L2 reproduces (Rorqual 11262822 L2=0.3638) but CR remains elevated on H100 clusters (Fir 0.087%, Rorqual 0.094-0.119%, Tamia 0.243%) — TF32-on-H100 hypothesis still standing, diagnostic test (`allow_tf32=False` on Fir) still pending.
 
 ## Background notes (older state, kept for context)
 
