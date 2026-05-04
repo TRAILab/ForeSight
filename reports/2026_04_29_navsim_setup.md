@@ -424,7 +424,7 @@ Higher is better for all sub-metrics.
 | **3751 → 3753 eval** | `navsim_planonly_minS2` fp32 bs=8 | 1 | **0.6489** | 0.9304 | 0.7610 | 0.6159 | 0.8454 | 0.9998 | 0.8795 | Net flat vs baseline. Redistributes errors: EP/Comf up (planner more confident), DAC/DDC down (worse on edges). 1 epoch likely too short to see minS2's full benefit |
 | **3755 → 3756 eval** ❌ | + hflip shared-seed (REVERTED) | 1 | **0.3076** | 0.6695 | 0.4697 | 0.2957 | 0.5257 | 0.5297 | 0.7083 | -0.34 PDMS regression. Two bugs: (1) `compute_features` runs at PDM eval too, mirroring ~50% of test predictions; (2) T_global stays in unmirrored UTM but lidar coords mirror, breaking `instance_bank` warp. Reverted; will redesign with training-only gating + T_global mirror handling later |
 | **3757 → 3758 eval** ❌ | + minS2 arch knobs (cumulative_refinement, deformable_*, multimode) | 1 | **0.5670** | 0.8833 | 0.7144 | 0.5597 | 0.7631 | 0.9954 | 0.8567 | -0.082 PDMS regression. Adds learnable params (per-layer refinement, deformable sampling at every waypoint) that need >1 epoch to settle. Reverted; could revisit at 10-epoch scale |
-| TBD overnight | best Tier 2 (= cycle 1 minS2) | 10 | TBD | — | — | — | — | — | — | Promotion gate — minS2 was tuned for 10 epochs in nuScenes |
+| **3759 → 3760 eval** | 10ep minS2 (promotion gate) | 10 | **0.6138** | 0.9091 | 0.7342 | 0.5877 | 0.8134 | 0.9962 | 0.8569 | Train loss dropped 0.183→0.103 but **all** PDMS sub-metrics regressed vs 1ep. Overfitting: planner has too few trainable params + open-loop L1 ≠ closed-loop PDMS. Pivot to stage-1 perception GT |
 | TBD | overnight: best 1-epoch config | 10 | TBD | — | — | — | — | — | — | Promotion gate after Tier-2 sweeps |
 
 ## Current State (2026-05-03, updated from 2026-05-01)
