@@ -341,23 +341,18 @@ The original ranked list (DINOv1, dadense, occupancy, additive suite, …) has b
 | # | Stage-1 recipe | Status | S2 transfer L2 / CR | Notes |
 |---|---|---|---|---|
 | 1 | `aux2d` (depth aux) | landed | 0.3627 / 0.056% (3396706) | tied default within noise |
-| 2 | `aux2d_dseg` v1 (3 polylines + 3 agent channels) | landed | **0.3621 / 0.043%** (3396708) | **best swap** — Δ−0.007 L2 at noise floor |
+| 2 | `aux2d_dseg` v1 (3 polylines + 3 agent channels) | landed | 0.3621 / 0.043% (3396708) | strong swap — was best L2 of the prior batch |
 | 3 | `aux2d_dino` (DINOv1 SSL-init) | landed | 0.3655 / 0.056% (3396707) | null lift; SSL prior on R50 saturated. DINOv2 not pursued (needs ViT swap) |
 | 4 | `nomap_dn_rotaug` (bundled) | landed | 0.3700 / 0.052% (3396709) | confounds nomap + dn + rotaug |
 | 5 | `egoonly` (motion only) | landed | 0.3946 / 0.055% (3388946) | minimum-perception regresses ~0.025 L2 |
 | 6 | **`aux2d_dsegv2`** (dseg v1 + 3 polygon channels: drivable_area, walkway, stop_line) | **S1 in flight** (Fir 38443120, Tamia 273023) | TBD | tests planning-relevant filled-region supervision on top of best swap |
 | 7 | `aux2d_only` (no det, no map; only depth aux) | **S1 in flight** (Fir 38411464, Tamia 272925) | TBD | thesis ablation: is *any* perception supervision necessary at S1? |
 | 8 | `nodet_aux2d` (no det; map+aux2d) | **S1 in flight** (Fir 38379927, Tamia 272887) | TBD | symmetric mirror of `nomap_aux2d` for the "backbone-shaping is the load-bearing role" claim |
-| 9 | `joint_nodetach` (`detach_perception=False`) | S1 ~73% on Apollo | TBD | last untested S1 mechanism — planning gradient flows back through perception heads |
-
-**S1 ckpts existing but not previously transferred to modern stack — now in flight on Killarney** (`_decoder6_planwp_evalmatchmode_egostatus` recipe):
-
-| Job | S1 init | Tests |
-|---|---|---|
-| 3408313 | `dn` (denoising queries) | training-time matching stability lever |
-| 3408314 | `aux2p5d` | 2.5D depth-regression aux |
-| 3408315 | `rot3dv2` | 3D rotation augmentation |
-| 3408316 | `dn_rot3d_aux2p5d` | full stacked recipe |
+| 9 | `joint_nodetach` (`detach_perception=False`) | **S1 landed on Apollo 2026-05-04**; S2 transfer pending | S1 self-eval: L2=0.5673 / CR=0.102% / NDS=0.4924 / mAP_normal=0.5572 / car_EPA=0.4611 — best joint-S1 self-eval yet (Arm B `_joint` was 0.6428, joint_detach baseline 0.6825). Stage-2 transfer through K/V-off headline is next. |
+| 10 | `dn` (denoising queries) | landed | 0.3578 / 0.053% (K3408313) | ties headline within noise |
+| 11 | `aux2p5d` (2.5D depth-regression aux) | landed | **0.3572 / 0.046%** (K3408314) | **best L2 swap so far** — beats dseg by 0.005 (within noise but consistent direction). NDS=0.5517 |
+| 12 | `rot3dv2` (3D rotation augmentation) | landed | 0.3623 / **0.044%** (K3408315) | strongest map (mAP_normal=0.5918) — highest of any S1 swap |
+| 13 | `dn_rot3d_aux2p5d` (full stacked recipe) | landed | 0.3607 / **0.036%** (K3408316) | **best CR swap** (below headline 0.040%); best NDS=0.5548; best car_EPA=0.5250. Most balanced overall. |
 
 **Dropped from active plan** (reasoning):
 - *DINOv2-init*: requires architectural backbone swap (ResNet → ViT); out of scope this cycle.
@@ -426,7 +421,7 @@ NeurIPS 2026 abstract deadline (typical: mid-May) — tight but feasible if we l
 | **Apollo joint_nodetach** | stage-1 with `detach_perception=False` | Last open stage-1 hypothesis; its stage-2 transfer will also go through minS2 |
 
 **Decision tree (resolved):**
-- minS2 ties headline → **paper architecture locked.** Streamc seed-2 (K3400093) reproduces (mean L2=0.3673/CR=0.037% across 4 reads). **minS2 seed-2 lands (K3406306): L2=0.3724 / CR=0.050%** — 2-seed minS2 mean L2=0.3644/CR=0.046%, ties headline (0.3692/0.040%) within noise. **`_ptaux2d_dseg_minS2` (K3406307): L2=0.3708 / CR=0.046%** — best stage-1 × locked arch ties seed-2 minS2; NDS=0.5347 (highest of the batch, as expected from stronger S1 perception). Pending S1 transfers (3408313-16, dn / aux2p5d / rot3dv2 / dn_rot3d_aux2p5d) still RUNNING (~7h elapsed, 12h limit).
+- minS2 ties headline → **paper architecture locked.** Streamc seed-2 (K3400093) reproduces (mean L2=0.3673/CR=0.037% across 4 reads). **minS2 seed-2 lands (K3406306): L2=0.3724 / CR=0.050%** — 2-seed minS2 mean L2=0.3644/CR=0.046%, ties headline (0.3692/0.040%) within noise. **`_ptaux2d_dseg_minS2` (K3406307): L2=0.3708 / CR=0.046%** — best stage-1 × locked arch ties seed-2 minS2; NDS=0.5347 (highest of the batch). **S1 transfers 3408313-16 LANDED (2026-05-04 ~05:00): dn (0.3578/0.053%), aux2p5d (0.3572/0.046%), rot3dv2 (0.3623/0.044%), dn_rot3d_aux2p5d (0.3607/0.036%).** dn_rot3d_aux2p5d is the new strongest S1: lowest CR of any single-S1 swap, NDS=0.5548, car_EPA=0.5250. aux2p5d is the new strongest L2 (0.3572 vs prior dseg 0.3621). **dseg×B1.6 seed-2 (K3412422) RUNNING with `--seed 1`** to confirm the 0.3706/0.048% detection-free win.
 - B1.6/B1.7 eval-only evals (3401950, 3401952) tied L2 within noise but raised CR ~0.02–0.03 pp. **Full B1.6 retrain (K3406567): L2=0.3629 / CR=0.064%** — L2 marginally below headline mean (within noise), CR still elevated by ~0.024 pp vs minS2 (0.041%). New conflict-sampler variants: **B1.8 (K3406568): L2=0.3644 / CR=0.072%**; **B1.9 (K3406570): L2=0.3691 / CR=0.065%** — both tie L2 within noise, both elevate CR. **`_ptaux2d_dseg_minS2_B1p6` (K3406571): L2=0.3706 / CR=0.048%** — stronger stage-1 (dseg) recovers most of the CR cost of dropping det-anchor positions: dseg+B1.6 CR=0.048% vs default-S1+B1.6 CR=0.064%, a ~0.016 pp recovery. **Best fully detection-free path is dseg+B1.6** (CR within noise of minS2's 0.046%).
 - Cross-cluster H100 CR diagnostic (Fir, 2026-05-03): **TF32-off (38503552): L2=0.3772 / CR=0.047%** — Fir-trained ckpt evalled with `allow_tf32=False` lands canonical CR. **Killarney-ckpt eval on Fir default-TF32 (38504768): L2=0.3716 / CR=0.044%** — also canonical. Combined with the prior Tamia post-pull canonical read (272885 0.032%) and Fir 38378856 (0.048%), the elevated-CR Fir runs (38335844 0.087%, Rorqual 11262822 0.119%) now look like high-variance reads on a small-N sample, with the TF32-off + Killarney-ckpt controls both landing canonical. Streamc continues to reproduce cleanly across all clusters (mean L2=0.3673/CR=0.037%).
 
