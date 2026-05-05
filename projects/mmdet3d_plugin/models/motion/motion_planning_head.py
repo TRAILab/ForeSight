@@ -228,6 +228,7 @@ class MotionPlanningHead(BaseModule):
         graph_model=None,
         cross_graph_model=None,
         deformable_model=None,
+        plan_self_attn=None,
         norm_layer=None,
         ffn=None,
         refine_layer=None,
@@ -567,6 +568,7 @@ class MotionPlanningHead(BaseModule):
             "cross_gnn": [cross_graph_model, ATTENTION],
             "rev_gnn": [rev_graph_model, ATTENTION],
             "deformable": [deformable_model, ATTENTION],
+            "plan_self_attn": [plan_self_attn, ATTENTION],
             "norm": [norm_layer, NORM_LAYERS],
             "ffn": [ffn, FEEDFORWARD_NETWORK],
             "refine": [refine_layer, PLUGIN_LAYERS],
@@ -1873,6 +1875,20 @@ class MotionPlanningHead(BaseModule):
                 )
             elif op == "norm" or op == "ffn":
                 instance_feature = self.layers[i](instance_feature)
+                if op == "norm" and i > 0 and self.operation_order[i - 1] == "plan_self_attn":
+                    plan_mode_query = self.layers[i](plan_mode_query)
+            elif op == "plan_self_attn":
+                plan_endpoint = plan_anchor[..., self.deformable_waypoint, :]
+                plan_self_pos = self.plan_anchor_encoder(
+                    gen_sineembed_for_position(plan_endpoint, hidden_dim=self.embed_dims)
+                )
+                plan_mode_query = self.layers[i](
+                    plan_mode_query,
+                    key=plan_mode_query,
+                    value=plan_mode_query,
+                    query_pos=plan_self_pos,
+                    key_pos=plan_self_pos,
+                )
             elif op == "cross_gnn":
                 if map_output is None:
                     continue
