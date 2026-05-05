@@ -52,6 +52,42 @@ class InstanceQueue(nn.Module):
         self.ego_period = None
         self.ego_feature_queue = []
         self.ego_anchor_queue = []
+        self.ego_status_queue = []
+
+    def get_ego_status_history(self, K, batch_size, mask, device, dtype):
+        """Return last K ego_status vectors as (bs, K, 9), oldest→newest.
+
+        Pads missing history with zeros at the *front* (older slots). When
+        ``mask[i]`` is False the entire history for batch item ``i`` is zeroed
+        — same convention as ``prev_ego_status`` masking on sequence start.
+        """
+        D = 9
+        if not self.ego_status_queue:
+            return torch.zeros((batch_size, K, D), device=device, dtype=dtype)
+        recent = self.ego_status_queue[-K:]
+        stacked = torch.stack(recent, dim=1).to(device=device, dtype=dtype)
+        if stacked.shape[1] < K:
+            pad = torch.zeros(
+                (batch_size, K - stacked.shape[1], D),
+                device=device, dtype=dtype,
+            )
+            stacked = torch.cat([pad, stacked], dim=1)
+        if mask is not None:
+            stacked = torch.where(
+                mask[:, None, None], stacked, stacked.new_tensor(0)
+            )
+        return stacked
+
+    def cache_ego_status(self, ego_status, history_K):
+        """Append the current frame's ego_status to the history queue.
+
+        ``ego_status`` may be (bs, 9) or (bs, 1, 9); stored as (bs, 9).
+        """
+        if ego_status.dim() == 3:
+            ego_status = ego_status[:, 0]
+        self.ego_status_queue.append(ego_status.detach())
+        if len(self.ego_status_queue) > max(int(history_K), 1):
+            self.ego_status_queue.pop(0)
 
     def get(
         self,

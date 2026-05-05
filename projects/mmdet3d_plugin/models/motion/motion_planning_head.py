@@ -326,6 +326,8 @@ class MotionPlanningHead(BaseModule):
         plan_ego_status_encode_enable=False,
         plan_ego_status_indices=(0, 1, 5, 6, 7),
         motion_target_in_agent_frame=False,
+        ego_state_estimator=None,
+        use_predicted_ego_status=False,
     ):
         super(MotionPlanningHead, self).__init__()
         self.fut_ts = fut_ts
@@ -487,6 +489,23 @@ class MotionPlanningHead(BaseModule):
         self.plan_magnitude_loss_weight = float(plan_magnitude_loss_weight)
         self.plan_ego_status_encode_enable = bool(plan_ego_status_encode_enable)
         self.plan_ego_status_indices = list(plan_ego_status_indices)
+        # Predicted ego_status pipeline: when use_predicted_ego_status=True the
+        # estimator's output replaces metas['ego_status'] in all downstream
+        # consumers (anchor velnorm scaling, plan_ego_status_encoder). The
+        # true ego_status is only used as the auxiliary L1 supervision target
+        # and to populate the history queue.
+        self.use_predicted_ego_status = bool(use_predicted_ego_status)
+        if ego_state_estimator is not None:
+            self.ego_state_estimator = build_from_cfg(
+                ego_state_estimator, PLUGIN_LAYERS
+            )
+        else:
+            self.ego_state_estimator = None
+        if self.use_predicted_ego_status:
+            assert self.ego_state_estimator is not None, (
+                "use_predicted_ego_status=True requires ego_state_estimator config"
+            )
+        self._predicted_ego_status = None  # populated each forward
         # When True, motion regression operates in each agent's heading-aligned
         # frame: the k-means motion anchor stays in agent frame (no
         # _agent2lidar rotation), the model predicts agent-frame deltas, the
@@ -736,6 +755,17 @@ class MotionPlanningHead(BaseModule):
         refine_indices = [i for i, op in enumerate(operation_order) if op == 'refine']
         self._dn_refine_idx = refine_indices[-1] if refine_indices else None
 
+    def _effective_ego_status(self, metas):
+        """Return the ego_status tensor consumers should use this forward.
+
+        When ``use_predicted_ego_status`` is enabled, returns the estimator's
+        prediction stored in ``self._predicted_ego_status``; otherwise returns
+        the true ``metas['ego_status']``.
+        """
+        if self.use_predicted_ego_status and self._predicted_ego_status is not None:
+            return self._predicted_ego_status
+        return metas['ego_status']
+
     def _get_initial_plan_anchor(self, bs, metas):
         """Per-batch metric plan_anchor at decoder init.
 
@@ -751,7 +781,7 @@ class MotionPlanningHead(BaseModule):
             scaled = base * self.plan_anchor_refmag[None, ..., None, None]
             plan_anchor = scaled.expand(bs, -1, -1, -1, -1)
         elif self.plan_anchor_norm_mode == 'velnorm':
-            ego_status = metas['ego_status'].to(base.dtype)
+            ego_status = self._effective_ego_status(metas).to(base.dtype)
             v_xy = ego_status[..., 6:8]
             v_0 = torch.linalg.norm(v_xy, dim=-1)  # (bs,)
             v_0 = v_0.clamp_min(self.plan_anchor_velnorm_eps)
@@ -1450,6 +1480,25 @@ class MotionPlanningHead(BaseModule):
             anchor_handler,
         )
         ego_feature_raw = ego_feature
+        # Predict current-frame ego_status from history (and optionally visual
+        # features), to be used in place of metas['ego_status'] downstream.
+        # The true ego_status is still consumed for the auxiliary L1 loss and
+        # for populating the history queue (see cache_planning).
+        if self.use_predicted_ego_status:
+            hist = self.instance_queue.get_ego_status_history(
+                K=self.ego_state_estimator.history_K,
+                batch_size=bs,
+                mask=mask,
+                device=ego_feature.device,
+                dtype=ego_feature.dtype,
+            )
+            self._predicted_ego_status = self.ego_state_estimator(
+                hist,
+                ego_feature=ego_feature_raw[:, 0]
+                if self.ego_state_estimator.variant == 'full' else None,
+            )
+        else:
+            self._predicted_ego_status = None
         ego_feature = self._project_instance_feature(ego_feature)
         ego_anchor_embed = self._project_anchor_embed(anchor_encoder(ego_anchor))
         temp_instance_feature = self._project_instance_feature(temp_instance_feature)
@@ -1499,7 +1548,7 @@ class MotionPlanningHead(BaseModule):
         # per-stage rebuild after refine, so ego state stays in scope across
         # decoder layers.
         if self.plan_ego_status_encode_enable:
-            es_in = metas['ego_status'][:, self.plan_ego_status_indices].to(
+            es_in = self._effective_ego_status(metas)[:, self.plan_ego_status_indices].to(
                 plan_mode_query.dtype
             )
             ego_status_embed = self.plan_ego_status_encoder(es_in)  # (bs, D)
@@ -2224,6 +2273,15 @@ class MotionPlanningHead(BaseModule):
         self.instance_queue.cache_motion(cache_motion_feature, det_output, metas)
         # Cache only the real ego token, not DN ego tokens.
         self.instance_queue.cache_planning(cache_ego_feature, plan_status)
+        # Append the true current-frame ego_status to the history queue used
+        # by the ego-state estimator on the next forward. We cache the TRUE
+        # value (not the prediction) so the queue remains a faithful
+        # operational history; the supervision target also reads from CAN.
+        if self.use_predicted_ego_status:
+            self.instance_queue.cache_ego_status(
+                metas['ego_status'],
+                history_K=self.ego_state_estimator.history_K,
+            )
         # Push current frame's image features onto the planning temporal cache
         # for the next forward.
         self._cache_planning_temporal(feature_maps, metas)
@@ -2303,6 +2361,15 @@ class MotionPlanningHead(BaseModule):
             motion_model_outs=motion_model_outs, det_output=det_output,
         )
         loss.update(planning_loss)
+        if (
+            self.use_predicted_ego_status
+            and self._predicted_ego_status is not None
+            and 'ego_status' in data
+        ):
+            target = data['ego_status'].to(self._predicted_ego_status.dtype)
+            loss['ego_state_aux_l1'] = self.ego_state_estimator.loss(
+                self._predicted_ego_status, target
+            )
         return loss
 
     @force_fp32(apply_to=("model_outs"))
