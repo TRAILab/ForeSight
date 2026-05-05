@@ -1,6 +1,7 @@
 from .sparsedrive import SparseDrive
 from .sparsedrive_head import SparseDriveHead
 from .gt_sparse_drive_head import GTSparseDriveHead
+from .ego_planner_head import EgoPlannerHead, EgoPlannerSparseDriveHead
 from .blocks import (
     DeformableFeatureAggregation,
     DenseDepthNet,
@@ -24,6 +25,8 @@ __all__ = [
     "SparseDrive",
     "SparseDriveHead",
     "GTSparseDriveHead",
+    "EgoPlannerHead",
+    "EgoPlannerSparseDriveHead",
     "DeformableFeatureAggregation",
     "DenseDepthNet",
     "DenseSegHead",
