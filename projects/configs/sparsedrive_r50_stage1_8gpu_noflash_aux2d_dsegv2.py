@@ -13,7 +13,7 @@ total_batch_size = 48
 num_gpus = 8
 batch_size = total_batch_size // num_gpus
 num_iters_per_epoch = int(length[version] // (num_gpus * batch_size))
-num_epochs = 100
+num_epochs = 200  # 8gpu schedule has 586 iters/epoch; 200 matches 4gpu_bs24 max_iters=117200 for Tamia ckpt resume
 checkpoint_epoch_interval = 20
 
 checkpoint_config = dict(
