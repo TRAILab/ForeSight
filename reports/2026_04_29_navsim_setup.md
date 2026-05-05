@@ -427,8 +427,7 @@ Higher is better for all sub-metrics.
 | **3759 → 3760 eval** | 10ep minS2 (promotion gate) | 10 | **0.6138** | 0.9091 | 0.7342 | 0.5877 | 0.8134 | 0.9962 | 0.8569 | Train loss dropped 0.183→0.103 but **all** PDMS sub-metrics regressed vs 1ep. Overfitting: planner has too few trainable params + open-loop L1 ≠ closed-loop PDMS. Pivot to stage-1 perception GT |
 | **3765 → 3766 eval** | stage-1 1ep (det+map+motion + unfreeze, **placeholder anchors**) | 1 | **0.6498** | **0.9454** | 0.7621 | 0.5939 | **0.8756** | 0.9999 | **0.9203** | Real perception supervision lifts NAC +0.02, TTC +0.03, DDC +0.04 vs minS2. DAC stuck (placeholder anchors cap it). EP regressed -0.03. PDMS basically flat |
 | **3768 → 3769 eval** | stage-1 1ep + **real anchors** (33k navtrain plan + 1.9M motion) | 1 | **0.6387** | 0.9189 | 0.7541 | 0.6193 | 0.8246 | 0.9988 | 0.8778 | Slight regression vs placeholder. EP restored to 0.62 (placeholder cost was real); but NAC/TTC/DDC lost their bumps. 1ep too short — 10ep is the cleaner test |
-| **3770 (in flight)** | stage-1 10ep + real anchors | 10 | TBD | — | — | — | — | — | — | Overnight; the real promotion gate. nuScenes minS2 was tuned for 10ep |
-| TBD | overnight: best 1-epoch config | 10 | TBD | — | — | — | — | — | — | Promotion gate after Tier-2 sweeps |
+| **3770 (cancelled at ep 3 / 5h 55m)** | stage-1 10ep + real anchors | 4 (of 10) | not eval'd | — | — | — | — | — | — | Project paused — see "Pause snapshot" below. Loss curve: 0.135→0.106→0.104→0.0991. Already below minS2's epoch 9 of 0.103 by ep 3. ckpts `sparsedrive-epoch=0[0-3]-step=*-v[18]/v1.ckpt` saved on DGX for later eval. |
 
 ## Current State (2026-05-03, updated from 2026-05-01)
 
@@ -558,6 +557,128 @@ moving all target tensors to `img.device` at the start of `forward`.
 nuScenes checkpoint to give det/map meaningful pretrained weights, freeze
 them, skip their losses. Cross-attention then sees real (frozen) detection
 features instead of noise.
+
+## Pause snapshot (2026-05-05, project paused for the week)
+
+3770 cancelled at epoch 3 / 5h 55m wall. All DGX jobs scancel'd. Coming
+back fresh: **start from this section.**
+
+### Best result so far
+**stage-1 + placeholder anchors (3765 → 3766) PDMS = 0.6498** at 1 epoch.
+Within noise of baseline navsim_planonly's 0.6502 — but with strong
+sub-metric wins (NAC +0.02, TTC +0.03, DDC +0.04). Stage-1 supervision
+is doing real work; it's just being held back by other gaps.
+
+### What landed today (committed and on DGX)
+- **Numerical sanity** (image norm, real timestamps, abs SE3 T_global,
+  ego_status[5] rot_rate_z, photo-metric distortion) — fixed the top
+  suspect for training instability.
+- **minS2 recipe ported** (plan_ego_status_encode + ego_only_planning
+  + zero motion losses + full freeze + use_rescore=False + eval_skip_map).
+- **Stage-1 GT plumbed**: real detection (`navsim_boxes_to_sparsedrive`),
+  real map polylines (`_extract_map_polylines` with permute), real
+  per-agent motion (`_extract_motion_gt` cross-frame track walk),
+  custom `sparsedrive_collate` for variable-length per-batch GT.
+- **Real plan + motion k-means anchors** on navtrain (33k plan trajs,
+  1.9M motion trajs across 5 nuPlan classes; 11 min job).
+- **Eval-time speedup infra** (`_eval_fp16` autocast, `eval_skip_map`,
+  `worker=ray_distributed_torch` with per-task GPU allocation) — opt-in,
+  defaults safe.
+- **Stage-1 config variant** (`sparsedrive_r50_navsim_stage1.py`) with
+  `freeze_perception=False` flag, restored loss weights, num_map=10,
+  skip_perception_kv=False, lr_mult=0.1 on backbone.
+- **DGX bash gotchas fixed**: cache_path inconsistency (train vs cache
+  scripts), eval setup args leaking into navsim_setup case, ckpt save
+  on val_check_interval=0, agent's eval-mode device handling, (x,y,h)
+  trajectory for PDM scoring.
+
+### Where 3770 (10ep stage-1, real anchors) cancelled
+| Epoch | planning_loss_reg | motion_loss_reg |
+| --- | --- | --- |
+| 0 | 0.135 | 74.5 |
+| 1 | 0.106 | 74.5 |
+| 2 | 0.104 | 74.5 |
+| **3** | **0.0991** | 74.5 |
+
+For comparison, **minS2 10ep had planning_loss_reg=0.103 at ep 9**.
+Stage-1 reached 0.0991 at ep 3 — the model is converging much faster
+with real perception supervision. Whether that translates to PDMS
+gains is **unmeasured** (no eval after 3768).
+
+ckpts are on DGX at `/raid/home/spapais/ForeSight/checkpoints/`:
+- `sparsedrive-epoch=00-step=00002660-v8.ckpt` (ep 0 of 3770)
+- `sparsedrive-epoch=01-step=00005320-v1.ckpt`
+- `sparsedrive-epoch=02-step=00007980-v1.ckpt`
+- `sparsedrive-epoch=03-step=00010640-v1.ckpt` (latest from 3770)
+
+### How to resume (next session, 30-min priming)
+
+1. **Verify VPN** to DGX: `nmcli con show --active | grep utias-robotics`
+2. **Eval the 3770 ckpts** to see what stage-1 actually scored at 1/2/3
+   epochs (~50 min each, can pipeline). If ep 3 PDMS ≥ 0.65, stage-1 is
+   on track and longer training is worth it.
+3. Then resume the **Tier A roll-up** below (each 1-epoch cycle is
+   ~2 hr: 47 min train + ~50 min eval + restart overhead).
+
+```bash
+# Eval 3770's epoch 3 ckpt
+ssh trail_dgx "bash -i -c 'cd /raid/home/spapais/ForeSight && \
+  sbatch --export=ALL --gres=gpu:1 --mem=64gb --cpus-per-task=16 \
+  scripts/dgx_navsim_run.sh bash /workspace/ForeSight/scripts/navsim_eval.sh \
+  /workspace/ForeSight/checkpoints/sparsedrive-epoch=03-step=00010640-v1.ckpt \
+  navtest worker.max_workers=8 \
+  agent.config.foresight_config=/workspace/ForeSight/projects/configs/sparsedrive_r50_navsim_stage1.py \
+  agent.config.freeze_perception=false'"
+```
+
+### Tier A roll-up (next session, ordered by effort/impact)
+
+Tasks #28-31 in TaskList. All **stage-1 compatible** (build on the
+stage-1 config, not minS2). Each is one 1-epoch cycle:
+
+1. **Hflip done right** (#28) — training-only gating (skip in eval) +
+   T_global mirror (negate row 1 of the SE3) so instance_bank's
+   T_temp2cur stays in the same frame. Helpers `_decide_hflip` and
+   `_hflip_seed` already in `sparsedrive_features.py`.
+2. **3D rotation aug + random scale/crop** (#29) — port `BBoxRotation`
+   (±5.4° yaw co-rotates lidar2img + gt_bboxes_3d + gt_agent_fut_trajs +
+   ego_status; existing impl in `projects/mmdet3d_plugin/datasets/pipelines/augment.py`)
+   and `resize_lim=(0.40, 0.47)` random scale + bot_pct_lim crop.
+3. **Conflict head** (#30) — flip `with_conflict_head=True` +
+   `conflict_loss_weight=0.10`, `conflict_smooth_max_tau=5.0`,
+   `conflict_label_source='evalmatch_mode'` in
+   `motion_plan_head` and `instance_queue` blocks of the stage-1 config.
+   Plugin code already supports it.
+4. **Det + map anchor regen on navtrain** (#31) — write a 3D-box
+   k-means tool + 2D-polyline k-means tool. Currently nuScenes-fitted.
+
+After Tier A is in (best 1-epoch config picked from sweep), **launch a
+fresh 10-epoch stage-1 overnight** as a new promotion gate. Expected
+PDMS by my budget: **0.71-0.78**.
+
+### Open issues to fix before the next push
+- **Hflip's two bugs** (eval-time leak + T_global frame mismatch). #28
+  is the rewrite.
+- **`os.getcwd()` ckpt naming** dumps everything in the repo root with
+  `-vN` suffixes; should use `HydraConfig.get().runtime.output_dir`.
+  Annoying but not blocking.
+- **Mixed precision crashes** (#20) — fp16 NaN'd in deeper decoder
+  layers, bf16 hit mmcv's focal_loss CUDA kernel. Needs `@force_fp32`
+  boundaries. Engineering project; ~2-4 hr. Iteration-speed only,
+  no PDMS.
+- **`limit_val_batches=0`** — we skip val entirely. No early-stopping
+  signal for overnight runs. Either run periodic eval-on-ckpt during
+  training, or bring up cheap val PDMS.
+
+### Tier B/C/D (multi-day backlog)
+- Tier B: lidar depth aux supervision, all 8 cams, on-the-fly aug,
+  mixed precision done right.
+- Tier C: scheduler tuning, val-time signal, track_token continuity,
+  camera intrinsic mismatch, sequence sampler.
+- Tier D: real stage-1 NavSim training, DiffusionDrive's diffusion
+  planner port, closed-loop fine-tuning.
+
+See "Tier B-D" below for full list and impact budget.
 
 ## Iteration Plan (2026-05-03 PM)
 
