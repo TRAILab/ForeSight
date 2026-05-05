@@ -54,14 +54,14 @@ class InstanceQueue(nn.Module):
         self.ego_anchor_queue = []
         self.ego_status_queue = []
 
-    def get_ego_status_history(self, K, batch_size, mask, device, dtype):
-        """Return last K ego_status vectors as (bs, K, 9), oldest→newest.
+    def get_ego_status_history(self, K, batch_size, mask, device, dtype, ego_status_dim=10):
+        """Return last K ego_status vectors as (bs, K, D), oldest→newest.
 
         Pads missing history with zeros at the *front* (older slots). When
         ``mask[i]`` is False the entire history for batch item ``i`` is zeroed
         — same convention as ``prev_ego_status`` masking on sequence start.
         """
-        D = 9
+        D = int(ego_status_dim)
         if not self.ego_status_queue:
             return torch.zeros((batch_size, K, D), device=device, dtype=dtype)
         recent = self.ego_status_queue[-K:]

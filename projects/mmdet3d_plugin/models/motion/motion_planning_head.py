@@ -1491,6 +1491,7 @@ class MotionPlanningHead(BaseModule):
                 mask=mask,
                 device=ego_feature.device,
                 dtype=ego_feature.dtype,
+                ego_status_dim=self.ego_state_estimator.ego_status_dim,
             )
             self._predicted_ego_status = self.ego_state_estimator(
                 hist,

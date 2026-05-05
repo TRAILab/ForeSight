@@ -419,7 +419,7 @@ model = dict(
                 type='EgoStateEstimator',
                 variant='lite',
                 history_K=4,
-                ego_status_dim=9,
+                ego_status_dim=10,
                 hidden_dim=128,
                 aux_loss_weight=0.1,
             ),
