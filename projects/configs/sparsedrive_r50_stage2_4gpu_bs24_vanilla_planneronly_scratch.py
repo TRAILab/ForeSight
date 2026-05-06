@@ -49,9 +49,11 @@ workflow = [("train", 1)]
 fp16 = dict(loss_scale=32.0)
 input_shape = (704, 256)
 
-# DDP needs this since perception heads produce zero gradients (their
-# losses are all zeroed) but their parameters still exist in the module.
-find_unused_parameters = True
+# with_cp=True + multi-use parameters (e.g. plan_anchor_encoder invoked at
+# init and inside every refine stage) hits DDP "marked ready twice" under
+# default settings. Diag confirms 0 unused params, so static_graph is safe
+# and is PyTorch's documented fix for this class of error.
+static_graph = True
 
 
 # ================== model ========================
