@@ -1,6 +1,8 @@
 from .motion_planning_head import MotionPlanningHead
 from .kinematic_motion_planning_head import KinematicMotionPlanningHead
 from .motion_blocks import MotionPlanningRefinementModule
+from .planning_only_blocks import PlanningOnlyRefinementModule
+from .planning_only_head import PlanningOnlyHead
 from .instance_queue import InstanceQueue
 from .ego_state_estimator import EgoStateEstimator
 from .target import MotionTarget, PlanningTarget
