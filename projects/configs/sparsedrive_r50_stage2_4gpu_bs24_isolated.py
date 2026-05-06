@@ -37,6 +37,8 @@ workflow = [("train", 1)]
 fp16 = dict(loss_scale=32.0)
 input_shape = (704, 256)
 
+find_unused_parameters = True
+
 
 # ================== model ========================
 class_names = [
