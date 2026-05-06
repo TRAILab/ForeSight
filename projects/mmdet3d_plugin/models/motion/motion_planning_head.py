@@ -300,6 +300,11 @@ class MotionPlanningHead(BaseModule):
         ego_only_planning=False,
         conflict_input='agent_token',
         conflict_image_sampler=None,
+        # If True (and conflict_input='image_at_plan'), re-sample image features
+        # at every refine stage using the latest plan_anchor (cumsum of
+        # plan_reg.detach()) instead of sampling once at the static k-means
+        # plan_anchor and reusing the features across all stages.
+        conflict_resample_per_stage=False,
         # Detection/map-free conflict-sampler variants (B1.5/B1.6/B1.7).
         # init_anchor_path: path to a fixed anchor file (e.g. kmeans det 900);
         # init_topk: per-scene top-K-nearest-to-ego selection from that file.
@@ -381,6 +386,12 @@ class MotionPlanningHead(BaseModule):
         self.skip_perception_kv = skip_perception_kv
         self.ego_only_planning = ego_only_planning
         self.conflict_input = conflict_input
+        self.conflict_resample_per_stage = bool(conflict_resample_per_stage)
+        if self.conflict_resample_per_stage and conflict_input != 'image_at_plan':
+            raise ValueError(
+                "conflict_resample_per_stage=True is only supported with "
+                f"conflict_input='image_at_plan', got {conflict_input!r}"
+            )
         _valid_conflict_inputs = (
             'agent_token', 'image_at_det', 'image_at_plan', 'image_at_init_topk',
             'image_at_init_topk_and_plan', 'image_at_ego_grid',
@@ -1686,7 +1697,14 @@ class MotionPlanningHead(BaseModule):
         # det BEV cells. Tests whether the conflict head needs detection's learned
         # semantic abstraction (`agent_token`) or raw image content at the agent's
         # spatial location (`image_at_det`).
-        if self.with_conflict_head and self.conflict_input.startswith('image_at_'):
+        if (
+            self.with_conflict_head
+            and self.conflict_input.startswith('image_at_')
+            and not (
+                self.conflict_resample_per_stage
+                and self.conflict_input == 'image_at_plan'
+            )
+        ):
             if self.conflict_input == 'image_at_det':
                 sampler_anchors = det_anchors
                 # No per-mode partition; flat pool. K = num_det_anchor.
@@ -1812,9 +1830,19 @@ class MotionPlanningHead(BaseModule):
                 )
         else:
             conflict_image_features = None
-            self._conflict_per_mode_K = None
             self._scene_query_features = None
             self._scene_query_anchors = None
+            if (
+                self.with_conflict_head
+                and self.conflict_input == 'image_at_plan'
+                and self.conflict_resample_per_stage
+            ):
+                # Per-stage path: features computed inside the refine loop using
+                # the live plan_anchor; loss aggregator still expects K=T
+                # samples per plan mode.
+                self._conflict_per_mode_K = self.ego_fut_ts
+            else:
+                self._conflict_per_mode_K = None
         _deformable_stage_idx = 0
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
@@ -2184,6 +2212,37 @@ class MotionPlanningHead(BaseModule):
                 motion_query = motion_mode_query + (instance_feature + anchor_embed)[:, :num_anchor].unsqueeze(2)
                 # Use only the ego token (index num_anchor), not DN tokens that follow it.
                 plan_query = plan_mode_query.unsqueeze(1) + (instance_feature + anchor_embed)[:, num_anchor:num_anchor+1].unsqueeze(2)
+                if (
+                    self.with_conflict_head
+                    and self.conflict_input == 'image_at_plan'
+                    and self.conflict_resample_per_stage
+                ):
+                    # Resample image features at the latest plan_anchor (cumsum
+                    # of plan_reg.detach() from the previous stage; at stage 0
+                    # the live plan_anchor is the per-batch expanded k-means
+                    # prior). plan_anchor: (bs, M_total, T, 2) cumulative XY
+                    # in lidar frame.
+                    bs_local = det_anchors.shape[0]
+                    M_total = plan_anchor.shape[1]
+                    T_wp = plan_anchor.shape[2]
+                    K = M_total * T_wp
+                    anc = plan_anchor.new_zeros(bs_local, K, 11)
+                    anc[..., 0:2] = plan_anchor.reshape(bs_local, K, 2)
+                    anc[..., 7] = 1.0  # cos(yaw=0)
+                    sampler_anchors = anc.contiguous().to(
+                        det_anchors.device, dtype=det_anchors.dtype
+                    )
+                    sampler_query = sampler_anchors.new_zeros(
+                        bs_local, K, self.embed_dims
+                    )
+                    sampler_anchor_embed = anchor_encoder(sampler_anchors)
+                    conflict_image_features = self.conflict_image_sampler(
+                        sampler_query,
+                        sampler_anchors,
+                        sampler_anchor_embed,
+                        feature_maps,
+                        metas,
+                    )
                 if not self.with_conflict_head:
                     agent_features_for_refine = None
                 elif self.conflict_input.startswith('image_at_'):
