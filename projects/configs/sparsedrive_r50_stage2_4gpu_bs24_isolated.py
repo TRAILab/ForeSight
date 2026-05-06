@@ -711,10 +711,12 @@ runner = dict(
 )
 
 # ================== eval ========================
+# task_config has with_map=False (head architecturally removed), so eval_mode
+# must match — otherwise format_map_results crashes on missing 'scores' key.
 eval_mode = dict(
     with_det=True,
     with_tracking=True,
-    with_map=True,
+    with_map=False,
     with_motion=True,
     with_planning=True,
     tracking_threshold=0.2,

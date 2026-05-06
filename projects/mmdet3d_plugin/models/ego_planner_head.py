@@ -374,7 +374,8 @@ class EgoPlannerSparseDriveHead(BaseModule):
         return self.planner.loss(model_outs, data)
 
     def post_process(self, model_outs, data):
-        planning_result = self.planner.post_process(model_outs, data)
-        return [
-            {"img_bbox": pr} for pr in planning_result
-        ]
+        # Return list of inner-result dicts (unwrapped). `SparseDrive.simple_test`
+        # already wraps each result in {"img_bbox": ...}; double-wrapping here
+        # produces {"img_bbox": {"img_bbox": {...}}} and breaks planning_eval
+        # which does `res['img_bbox']['final_planning']`.
+        return self.planner.post_process(model_outs, data)
