@@ -419,13 +419,15 @@ model = dict(
                 feature_map_scale=(input_shape[1]/strides[-1], input_shape[0]/strides[-1]),
             ),
             operation_order=(
+                # cross_gnn is removed because the isolated stage-2 path
+                # nulls perception K/V; building cross_graph_model leaves
+                # its attn params unused -> DDP fails. Drop cross_gnn + the
+                # post-cross_gnn norm; keep temp_gnn + gnn + ffn flow.
                 [
                     "temp_gnn",
                     "gnn",
                     "norm",
-                    "cross_gnn",
-                    "norm",
-                    "ffn",                    
+                    "ffn",
                     "norm",
                 ] * 3 +
                 [

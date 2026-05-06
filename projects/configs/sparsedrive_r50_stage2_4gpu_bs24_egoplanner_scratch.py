@@ -87,23 +87,29 @@ model = dict(
     img_backbone=dict(
         type="ResNet",
         depth=50,
-        num_stages=4,
+        # Truncate to num_depth_layers stages — layer4 has no consumer
+        # because the planner ignores feature_maps and depth_branch only
+        # uses levels 0..num_depth_layers. ResNet asserts
+        # len(strides)==len(dilations)==num_stages so override both.
+        num_stages=num_depth_layers,
+        strides=(1, 2, 2, 2)[:num_depth_layers],
+        dilations=(1, 1, 1, 1)[:num_depth_layers],
         frozen_stages=-1,
         norm_eval=False,
         style="pytorch",
         with_cp=True,
-        out_indices=(0, 1, 2, 3),
+        out_indices=tuple(range(num_depth_layers)),
         norm_cfg=dict(type="BN", requires_grad=True),
         pretrained="ckpt/resnet50-19c8e357.pth",
     ),
     img_neck=dict(
         type="FPN",
-        num_outs=num_levels,
+        num_outs=num_depth_layers,
         start_level=0,
+        end_level=num_depth_layers - 1,
         out_channels=embed_dims,
-        add_extra_convs="on_output",
         relu_before_extra_convs=True,
-        in_channels=[256, 512, 1024, 2048],
+        in_channels=[256, 512, 1024, 2048][:num_depth_layers],
     ),
     depth_branch=dict(
         type="DenseDepthNet",
