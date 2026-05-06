@@ -45,9 +45,6 @@ workflow = [("train", 1)]
 fp16 = dict(loss_scale=32.0)
 input_shape = (704, 256)
 
-# planner ignores feature_maps → backbone + neck + depth_branch get no gradient
-find_unused_parameters = True
-
 
 # ================== model ========================
 class_names = [
