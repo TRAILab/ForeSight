@@ -693,7 +693,14 @@ optimizer = dict(
     weight_decay=0.001,
     paramwise_cfg=dict(
         custom_keys={
-            "img_backbone": dict(lr_mult=0.1),
+            # det head is kept architecturally for the planner's anchor_encoder
+            # / instance_bank but its losses are all zeroed. Without freezing
+            # the backbone + det head, gradients from map+plan losses drift the
+            # backbone away from the stage-1 distribution that det was trained
+            # on, and det collapses (NDS → 0) — observed on K3448827.
+            "img_backbone": dict(lr_mult=0.0),
+            "img_neck": dict(lr_mult=0.0),
+            "head.det_head": dict(lr_mult=0.0),
         }
     ),
 )
