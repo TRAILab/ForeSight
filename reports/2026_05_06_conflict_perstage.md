@@ -42,7 +42,15 @@ Variant 2 also serves as the no-egostatus B1.7 reference (none currently exists 
 
 ## Results
 
-_(pending)_
+Submitted 2026-05-06 on Killarney (single seed, 4-GPU, stage-2 from
+`ckpt/sparsedrive_stage1.pth`):
+
+| # | Config stem | Killarney job |
+|---|---|---|
+| 1 | `..._evalmatchmode_egostatus_minS2_B1p7_perstage` | K3444443 |
+| 2 | `..._evalmatchmode_minS2_B1p7_perstage` | K3444448 |
+
+_Metrics pending job completion._
 
 ## Discussion
 

@@ -15,7 +15,7 @@ else
 fi
 
 # Run docker container
-docker run --gpus all -it --rm --shm-size=16g \
+docker run --gpus all -i --rm --shm-size=16g \
     -v $DATA_DIR:/workspace/ForeSight/data/nuscenes \
     -v $CODE_DIR:/workspace/ForeSight/ \
     --env WANDB_API_KEY=$WANDB_API_KEY \

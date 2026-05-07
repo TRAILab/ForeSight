@@ -18,9 +18,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description='MMDet benchmark a model')
     parser.add_argument('config', help='test config file path')
     parser.add_argument('--checkpoint', default=None, help='checkpoint file')
-    parser.add_argument('--samples', default=1000, help='samples to benchmark')
+    parser.add_argument('--samples', type=int, default=1000, help='samples to benchmark')
     parser.add_argument(
-        '--log-interval', default=50, help='interval of logging')
+        '--log-interval', type=int, default=50, help='interval of logging')
     parser.add_argument(
         '--fuse-conv-bn',
         action='store_true',

@@ -53,7 +53,7 @@ class CamRender:
 
     def render(
         self,
-        data, 
+        data,
         result,
         index,
     ):
@@ -65,6 +65,132 @@ class CamRender:
         save_path = os.path.join(self.pred_dir, str(index).zfill(4) + '.jpg')
         self.save_fig(save_path)
         return save_path
+
+    def render_plan_only(self, data, result, index, out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+        self.reset_canvas()
+        self.render_image_data(data, index)
+        self.draw_detection_gt(data)
+        self.draw_motion_gt(data)
+        self.draw_planning_pred(data, result)
+        self.draw_planning_gt(data)
+        self._render_cam_legend()
+        save_path = os.path.join(out_dir, str(index).zfill(4) + '.jpg')
+        self.save_fig(save_path)
+        return save_path
+
+    def _render_cam_legend(self):
+        ax = self.axes[0, 1]
+        items = [
+            ('Pred plan', (1.0, 0.5, 0.0)),
+            ('GT plan',   (0.1, 0.1, 0.1)),
+            ('GT motion', (0.0, 0.4, 0.8)),
+        ]
+        for k, (name, color) in enumerate(items):
+            ax.scatter([60], [60 + k * 60], color=color, s=180,
+                       edgecolors='white', linewidths=2)
+            ax.text(95, 60 + k * 60, name, fontsize=18, color='white',
+                    va='center',
+                    bbox=dict(facecolor='black', alpha=0.5, pad=2))
+
+    def draw_detection_gt(self, data):
+        bboxes = data['gt_bboxes_3d']
+        if hasattr(bboxes, 'numpy'):
+            bboxes = bboxes.numpy()
+        bboxes = np.asarray(bboxes)
+        labels = np.asarray(data['gt_labels_3d'])
+        for j, cam in enumerate(CAM_NAMES_NUSC):
+            idx = CAM_NAMES_NUSC_converter.index(cam)
+            cam_intrinsic = data['cam_intrinsic'][idx]
+            extrinsic = data['lidar2cam'][idx]
+            trans = extrinsic[3, :3]
+            rot = Quaternion(matrix=extrinsic[:3, :3]).inverse
+            imsize = (1600, 900)
+            for i in range(bboxes.shape[0]):
+                if labels[i] == -1:
+                    continue
+                color = color_mapping[i % len(color_mapping)]
+                center = bboxes[i, 0:3]
+                nusc_dims = bboxes[i, 3:6][..., [1, 0, 2]]
+                quat = Quaternion(axis=[0, 0, 1], radians=bboxes[i, 6])
+                box = NuScenesBox(center, nusc_dims, quat)
+                box.rotate(rot)
+                box.translate(trans)
+                if box_in_image(box, cam_intrinsic, imsize):
+                    box.render(self.axes[j // 3, j % 3], view=cam_intrinsic,
+                               normalize=True, colors=(color, color, color), linewidth=4)
+            self.axes[j // 3, j % 3].set_xlim(0, imsize[0])
+            self.axes[j // 3, j % 3].set_ylim(imsize[1], 0)
+
+    def draw_motion_gt(self, data):
+        bboxes = np.asarray(data['gt_bboxes_3d'])
+        labels = np.asarray(data['gt_labels_3d'])
+        fut_trajs = np.asarray(data['gt_agent_fut_trajs'])
+        fut_masks = np.asarray(data['gt_agent_fut_masks'])
+        for j, cam in enumerate(CAM_NAMES_NUSC):
+            idx = CAM_NAMES_NUSC_converter.index(cam)
+            cam_intrinsic = data['cam_intrinsic'][idx]
+            extrinsic = data['lidar2cam'][idx]
+            trans = extrinsic[3, :3]
+            rot = Quaternion(matrix=extrinsic[:3, :3]).inverse
+            imsize = (1600, 900)
+            for i in range(bboxes.shape[0]):
+                if labels[i] == -1:
+                    continue
+                masks = fut_masks[i].astype(bool)
+                if not masks[0]:
+                    continue
+                color = color_mapping[i % len(color_mapping)]
+                center_xy = bboxes[i, :2]
+                trajs = fut_trajs[i][masks].cumsum(axis=0) + center_xy
+                trajs = np.concatenate([center_xy.reshape(1, 2), trajs], axis=0)
+                z = np.full((trajs.shape[0], 1), bboxes[i, 2] - bboxes[i, 5] / 2)
+                traj3d = np.concatenate([trajs, z], axis=1)
+                quat = Quaternion(axis=[0, 0, 1], radians=bboxes[i, 6])
+                box = NuScenesBox(bboxes[i, 0:3], bboxes[i, 3:6][..., [1, 0, 2]], quat)
+                box.rotate(rot); box.translate(trans)
+                if not box_in_image(box, cam_intrinsic, imsize):
+                    continue
+                traj_points = traj3d @ extrinsic[:3, :3] + trans
+                self._render_traj(traj_points, cam_intrinsic, j, color=tuple(color), s=15)
+
+    def draw_planning_gt(self, data):
+        masks = np.asarray(data['gt_ego_fut_masks']).astype(bool)
+        if not masks[0]:
+            return
+        plan = np.asarray(data['gt_ego_fut_trajs'])[masks]
+        plan[np.abs(plan) < 0.01] = 0.0
+        plan = plan.cumsum(axis=0)
+        plan = np.concatenate([np.zeros((1, 2)), plan], axis=0)
+        z = np.full((plan.shape[0], 1), -1.8)
+        plan = np.concatenate([plan, z], axis=1)
+        idx = 0
+        cam_intrinsic = data['cam_intrinsic'][idx]
+        extrinsic = data['lidar2cam'][idx]
+        trans = extrinsic[3, :3]
+        traj_points = plan @ extrinsic[:3, :3] + trans
+        self._render_traj_gradient(traj_points, cam_intrinsic, j=1,
+                                   colormap='Greys', cmap_range=(0.4, 1.0),
+                                   s=140)
+
+    def _render_traj_gradient(self, traj_points, cam_intrinsic, j,
+                              colormap='Greys', cmap_range=(0.0, 1.0),
+                              s=120, points_per_step=10):
+        total_steps = (len(traj_points) - 1) * points_per_step + 1
+        total_xy = np.zeros((total_steps, 3))
+        for k in range(total_steps - 1):
+            unit_vec = traj_points[k // points_per_step + 1] - \
+                       traj_points[k // points_per_step]
+            total_xy[k] = (k / points_per_step - k // points_per_step) * \
+                          unit_vec + traj_points[k // points_per_step]
+        total_xy[-1] = traj_points[-1]
+        in_range_mask = total_xy[:, 2] > 0.1
+        proj = view_points(total_xy.T, cam_intrinsic, normalize=True)[:2, :]
+        proj = proj[:, in_range_mask]
+        colors = matplotlib.colormaps[colormap](
+            np.linspace(cmap_range[0], cmap_range[1], total_steps))[:, :3]
+        colors = colors[in_range_mask]
+        self.axes[j // 3, j % 3].scatter(proj[0], proj[1], c=colors, s=s)
 
     def load_image(self, data_path, cam):
         """Update the axis of the plot with the provided image."""

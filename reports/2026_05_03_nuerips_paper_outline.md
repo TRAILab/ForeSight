@@ -27,6 +27,22 @@ The field treats both as essential. We separate them empirically and show that *
 
 **(iii) State of the art on nuScenes camera-based end-to-end planning** — L2 = 0.37 m, CR = 0.04% (3-seed mean) — with a strictly simpler inference graph than every prior method.
 
+## Positioning
+
+Two recent trends in end-to-end driving offer complementary benefits at complementary costs.
+
+- **SSL / world-model methods (SSR, LAW)** remove perception from the inference path, but require new self-supervised training objectives and learned token bottlenecks — not retrofittable to existing perception-trained pipelines.
+- **Multi-task parallel architectures (DriveTransformer, ParaDrive)** preserve standard perception supervisors and exploit shared backbone representations, but keep all task heads coupled through shared queries or joint self-attention at inference.
+
+Our method combines the inference simplicity of the first with the shared-supervision benefits of the second, with **neither a world-model substitute nor inference-time task coupling**. The two axes — *what supervises the backbone* and *what enters the planner at inference* — have historically been tied together; we untie them. The result is a drop-in retrofit to existing perception-trained stacks that uses no world-model auxiliaries, no learned compression, and no inference-time coupling between tasks.
+
+We make two architectural simplifications, supported at different evidence levels:
+
+1. **Intermediate detection, map, and motion tokens add little to planning at inference** once camera features are directly accessible — yet their training losses remain critical for shaping planning-relevant visual features. Supported by controlled ablation (token-count grid, loss-zeroing trio, frozen-backbone diagnostic).
+2. **The BEV lift itself is unnecessary** — multi-view camera features sampled along the predicted trajectory provide sufficient spatial grounding without an intermediate BEV transformation. Supported by architectural design and concurrent evidence (LAW, DriveTransformer reach SOTA without BEV).
+
+The first claim is the load-bearing contribution; the second is consistent with an emerging consensus in concurrent work.
+
 ## Headline numbers (locked across 3 seeds)
 
 - **K/V-off paper headline:** L2 = 0.369, CR = 0.040%
@@ -122,6 +138,42 @@ multi-camera images ─► backbone + FPN ─┤─ map head     ─ aux loss
 ```
 
 Perception heads are auxiliary supervisors. They are not on the inference forward path; they exist for backbone shaping and for eval-reporting (NDS / mAP).
+
+---
+
+## Related works comparison
+
+Six representative camera-based end-to-end planners, characterized by what enters the planner at inference and how perception is supervised at training. Verified by reading each repo's main forward pass.
+
+| Method | Features | Plan ← feats | Plan ← queries | Training supervisors | Inference perception? | Coupling |
+|---|---|---|---|---|---|---|
+| UniAD [Hu '23] | BEV | ✓ | ✗ (motion via concat-MLP) | det+track+map+motion+occ | ✓ | Sequential |
+| VAD / VADv2 [Jiang '23] | BEV | ✗ | ✓ motion + map | det+map+motion | ✓ | Sequential |
+| SparseDrive [Sun '24] | Camera | ✗ | ✓ det + map + motion (shared) | det+map+motion | ✓ | Sequential |
+| DiffusionDrive [Liao '24] | BEV (cam+LiDAR) † | ✓ | ✓ agent | det+BEV-seg | ✓ | Sequential |
+| DriveTransformer [Jia '25] | Camera | ✓ | ✓ agent+map (joint self-attn) | det+map+motion | ✓ | Parallel |
+| SSR [Li '25] | BEV (token bottleneck) | ✓ | ✗ | BEV world model | ✗ | Direct |
+| LAW [Li '25] | Camera (per-view token bottleneck) | ✓ | ✗ | latent world model | ✗ | Direct |
+| **Ours** | **Camera** | ✓ | ✗ | det+map+motion + dense aux | ✗ | **Direct** |
+
+† DiffusionDrive's TransFuser backbone fuses camera + LiDAR; not strictly camera-only.
+
+**Taxonomy:**
+- **Sequential** — perception runs first, planning consumes its outputs as concat features, K/V, or shared queries.
+- **Parallel** — all task queries co-decode in the same transformer, mixing every layer.
+- **Direct** — planner reads features only; no perception/agent/map queries enter the planning decoder.
+
+The bold ✗ in *Inference perception?* is the contribution claim. SSR, LAW, and ours are the only three Direct entries. SSR and LAW share a pattern — **learned token compression + world-model supervision** — while ours is **no compression + standard perception supervisors**. This is the cleanest single-axis differentiation and the strongest narrative angle of the paper.
+
+### Per-method one-liner contrasts
+
+- **UniAD** — Where UniAD cascades motion and occupancy predictions into the planner via concat-MLP fusion before BEV cross-attention, ours removes that cascade entirely; the planner reads image features without any perception or prediction tokens.
+- **VAD** — Where VAD chains the planner through dedicated agent and map cross-attention decoders, ours skips both; image features alone carry the agent and map information learned during training.
+- **SparseDrive** — Where SparseDrive feeds detection and map tokens as K/V into a joint motion+planning decoder, ours nulls those K/V channels and runs the planner ego-only; perception heads become pure training-time supervisors.
+- **DiffusionDrive** — Where DiffusionDrive cross-attends every diffusion step to BEV features and agent queries, ours samples camera features directly at trajectory waypoints; no diffusion loop, no agent-query coupling, camera-only.
+- **DriveTransformer** — Where DriveTransformer co-decodes agent, map, and ego queries through joint self-attention every layer, ours decodes the planner alone; no perception or map queries enter the planning transformer.
+- **SSR** — Where SSR funnels BEV through a learned 16-token bottleneck, our planner samples multi-view camera features directly at trajectory waypoints; no BEV lift, no compression.
+- **LAW** — Where LAW compresses each camera view through learnable view queries and supervises with a latent world model, ours samples camera features directly at trajectory waypoints and supervises with standard perception decoders; no compression, no world model.
 
 ---
 

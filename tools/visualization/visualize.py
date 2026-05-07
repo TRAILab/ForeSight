@@ -47,6 +47,15 @@ class Visualizer:
         data = self.dataset.get_data_info(index)
         result = self.results[index]['img_bbox']
 
+        if getattr(self, 'plan_only', False):
+            self.bev_render.render_plan_only(
+                data, result, index,
+                os.path.join(self.out_dir, 'bev_plan_pred_only'))
+            self.cam_render.render_plan_only(
+                data, result, index,
+                os.path.join(self.out_dir, 'cam_plan_pred_only'))
+            return
+
         bev_gt_path, bev_pred_path = self.bev_render.render(data, result, index)
         cam_pred_path = self.cam_render.render(data, result, index)
         self.combine(bev_gt_path, bev_pred_path, cam_pred_path, index)
@@ -88,9 +97,18 @@ def parse_args():
         help='prediction result to visualize'
         'If submission file is not provided, only gt will be visualized')
     parser.add_argument(
-        '--out-dir', 
+        '--out-dir',
         default='vis',
         help='directory where visualize results will be saved')
+    parser.add_argument('--start', type=int, default=START)
+    parser.add_argument('--end', type=int, default=END)
+    parser.add_argument('--interval', type=int, default=INTERVAL)
+    parser.add_argument('--no-video', action='store_true',
+        help='skip stitching frames into a video')
+    parser.add_argument('--plan-only', action='store_true',
+        help='only render bev_plan_pred_only/ and cam_plan_pred_only/ (gt agents+motion+map+plan, pred plan)')
+    parser.add_argument('--indices', default=None,
+        help='comma-separated list of frame indices; overrides --start/--end/--interval')
     args = parser.parse_args()
 
     return args
@@ -98,13 +116,19 @@ def parse_args():
 def main():
     args = parse_args()
     visualizer = Visualizer(args, plot_choices)
+    visualizer.plan_only = args.plan_only
 
-    for idx in tqdm(range(START, END, INTERVAL)):
-        if idx > len(visualizer.results):
+    if args.indices is not None:
+        idx_list = [int(x) for x in args.indices.split(',') if x.strip()]
+    else:
+        idx_list = list(range(args.start, args.end, args.interval))
+    for idx in tqdm(idx_list):
+        if idx >= len(visualizer.results):
             break
         visualizer.add_vis(idx)
-    
-    visualizer.image2video()
+
+    if not args.no_video and not args.plan_only:
+        visualizer.image2video()
 
 if __name__ == '__main__':
     main()

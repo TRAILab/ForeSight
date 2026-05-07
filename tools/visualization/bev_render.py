@@ -110,7 +110,7 @@ class BEVRender:
 
     def render(
         self,
-        data, 
+        data,
         result,
         index,
     ):
@@ -138,6 +138,58 @@ class BEVRender:
         self.save_fig(save_path_pred)
 
         return save_path_gt, save_path_pred
+
+    def render_plan_only(self, data, result, index, out_dir, zoom=25.0):
+        os.makedirs(out_dir, exist_ok=True)
+        saved_xlim, saved_ylim = self.xlim, self.ylim
+        self.xlim = self.ylim = zoom
+        self.reset_canvas()
+        saved = self.plot_choices
+        self.plot_choices = dict(draw_pred=True, det=True, track=False,
+                                 motion=True, map=True, planning=True)
+        self.draw_detection_gt(data)
+        self.draw_motion_gt(data)
+        self.draw_map_gt(data)
+        self.draw_planning_gt(data, colormap='Greys', cmap_range=(0.4, 1.0),
+                              dot_size=110)
+        self.draw_planning_pred(data, result, top_k=1)
+        self._render_sdc_car()
+        self._render_legend_plan_only()
+        self.plot_choices = saved
+        self.xlim, self.ylim = saved_xlim, saved_ylim
+        save_path = os.path.join(out_dir, str(index).zfill(4) + '.jpg')
+        self.save_fig(save_path)
+        return save_path
+
+    def _render_legend_plan_only(self):
+        rows = [
+            ('Pred plan', 'autumn', (0.0, 1.0), 't=0', 't=3s'),
+            ('GT plan',   'Greys',  (0.4, 1.0), 't=0', 't=3s'),
+            ('GT motion', 'winter', (0.0, 1.0), 't=0', 't=6s'),
+        ]
+        # Place legend in bottom-right of the current view
+        span = self.xlim
+        x_label = 0.40 * span
+        x_strip_l = 0.60 * span
+        x_strip_r = 0.92 * span
+        y_top = -0.74 * self.ylim
+        y_bot = -0.98 * self.ylim
+        n = len(rows)
+        row_h = (y_top - y_bot) / n
+        strip_half = row_h * 0.18
+        for i, (name, cmap, rng, lt, rt) in enumerate(rows):
+            y_c = y_top - (i + 0.5) * row_h
+            grad = np.linspace(rng[0], rng[1], 256).reshape(1, -1)
+            grad_rgb = matplotlib.colormaps[cmap](grad)[..., :3]
+            self.axes.imshow(grad_rgb,
+                             extent=(x_strip_l, x_strip_r,
+                                     y_c - strip_half, y_c + strip_half),
+                             aspect='auto', zorder=3)
+            self.axes.text(x_label, y_c, name, fontsize=22, va='center')
+            self.axes.text(x_strip_l - 0.3, y_c, lt, fontsize=14,
+                           va='center', ha='right')
+            self.axes.text(x_strip_r + 0.3, y_c, rt, fontsize=14,
+                           va='center', ha='left')
 
     def save_fig(self, filename):
         plt.subplots_adjust(top=1, bottom=0, right=1, left=0,
@@ -312,7 +364,7 @@ class BEVRender:
             y = pts[:, 1]
             plt.plot(x, y, color=color, linewidth=3, marker='o', linestyle='-', markersize=7)
 
-    def draw_planning_gt(self, data):
+    def draw_planning_gt(self, data, colormap='autumn', cmap_range=(0.0, 1.0), dot_size=50):
         if not self.plot_choices['planning']:
             return
 
@@ -325,7 +377,7 @@ class BEVRender:
             plan_traj = plan_traj.cumsum(axis=0)
             plan_traj = np.concatenate((np.zeros((1, plan_traj.shape[1])), plan_traj), axis=0)
             self._render_traj(plan_traj, traj_score=1.0,
-                colormap='autumn', dot_size=50)
+                colormap=colormap, dot_size=dot_size, cmap_range=cmap_range)
 
     def draw_planning_pred(self, data, result, top_k=3):
         if not (self.plot_choices['draw_pred'] and self.plot_choices['planning'] and "planning" in result):
@@ -370,16 +422,17 @@ class BEVRender:
                             colormap='autumn', dot_size=50)
 
     def _render_traj(
-        self, 
-        future_traj, 
-        traj_score=1, 
-        colormap='winter', 
-        points_per_step=20, 
-        dot_size=25
+        self,
+        future_traj,
+        traj_score=1,
+        colormap='winter',
+        points_per_step=20,
+        dot_size=25,
+        cmap_range=(0.0, 1.0),
     ):
         total_steps = (len(future_traj) - 1) * points_per_step + 1
         dot_colors = matplotlib.colormaps[colormap](
-            np.linspace(0, 1, total_steps))[:, :3]
+            np.linspace(cmap_range[0], cmap_range[1], total_steps))[:, :3]
         dot_colors = dot_colors * traj_score + \
             (1 - traj_score) * np.ones_like(dot_colors)
         total_xy = np.zeros((total_steps, 2))

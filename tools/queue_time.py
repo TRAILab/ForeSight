@@ -34,18 +34,34 @@ CACHE_DIR = Path(
 )
 DEFAULT_CLUSTERS = ("narval", "trillium", "killarney", "killarney_h100")
 ADDITIONAL_QUEUE_HEATMAP_CLUSTERS = ("tamia", "rorqual", "fir")
+MAP_CLUSTERS = tuple(dict.fromkeys((*DEFAULT_CLUSTERS, *ADDITIONAL_QUEUE_HEATMAP_CLUSTERS, "vulcan", "nibi", "utias")))
 SACCT_CLUSTERS = tuple(dict.fromkeys((*DEFAULT_CLUSTERS, *ADDITIONAL_QUEUE_HEATMAP_CLUSTERS)))
 PENDING_HEATMAP_CLUSTERS = tuple(dict.fromkeys((*DEFAULT_CLUSTERS, *ADDITIONAL_QUEUE_HEATMAP_CLUSTERS)))
 QUEUE_HEATMAP_CLUSTERS = PENDING_HEATMAP_CLUSTERS
 TERMINAL_CLUSTERS = ("narval", "trillium", "killarney", "killarney_h100")
 DRAC_ALLOCATED_SUMMARY_CLUSTERS = ("narval", "trillium")
 OTHER_SUMMARY_CLUSTERS = ("killarney", "killarney_h100", "tamia", "fir", "rorqual")
+MEMBER_ALLOCATED_USAGE_CLUSTERS = DRAC_ALLOCATED_SUMMARY_CLUSTERS
+MEMBER_OTHER_USAGE_CLUSTERS = OTHER_SUMMARY_CLUSTERS
+GPU_UTIL_USAGE_CLUSTERS = ("trillium", "fir")
 CLUSTER_LOCATION = {
     "killarney": "Vector, Toronto",
     "killarney_h100": "Vector, Toronto",
     "tamia": "Mila, Montreal",
     "fir": "SFU, Vancouver",
     "rorqual": "ETS, Montreal",
+}
+CLUSTER_GEO = {
+    "narval": {"site": "DRAC, Montreal", "lat": 45.5019, "lon": -73.5674},
+    "trillium": {"site": "SciNet, Toronto", "lat": 43.6532, "lon": -79.3832},
+    "killarney": {"site": "Vector, Toronto", "lat": 43.6616, "lon": -79.3910},
+    "killarney_h100": {"site": "Vector, Toronto", "lat": 43.6616, "lon": -79.3910},
+    "tamia": {"site": "Mila, Montreal", "lat": 45.5088, "lon": -73.5878},
+    "fir": {"site": "SFU, Vancouver", "lat": 49.2781, "lon": -122.9199},
+    "rorqual": {"site": "ETS, Montreal", "lat": 45.4948, "lon": -73.5620},
+    "vulcan": {"site": "Amii, Edmonton", "lat": 53.5462, "lon": -113.4937},
+    "nibi": {"site": "Waterloo", "lat": 43.4723, "lon": -80.5449},
+    "utias": {"site": "UTIAS, Toronto", "lat": 44.1800, "lon": -79.2600},
 }
 TRAIL_CLUSTERS = ("dgx", "apollo", "turing", "lovelace", "ums", "um1", "um2", "um3")
 DASHBOARD_STALE_CLUSTERS = tuple(dict.fromkeys((*SACCT_CLUSTERS, *TRAIL_CLUSTERS)))
@@ -56,9 +72,17 @@ SACCT_FIELDS = (
     "Submit",
     "Start",
     "End",
+    "State",
     "Timelimit",
+    "AllocCPUS",
+    "ReqMem",
     "ReqTRES",
     "AllocTRES",
+    "AveRSS",
+    "MaxDiskRead",
+    "MaxDiskWrite",
+    "TRESUsageInAve",
+    "TRESUsageInTot",
 )
 CLUSTER_INFO: dict[str, dict[str, str]] = {
     "narval": {
@@ -156,6 +180,7 @@ CLUSTER_INFO: dict[str, dict[str, str]] = {
         "init": "source ~/.bashrc",
         "node_type": "4xH100-SXM5-80GB",
         "account": "def-swasland-ab",
+        "share_account": "def-swasland-ab_gpu",
         "sbatch_opts": "--account=def-swasland-ab --ntasks=1 --cpus-per-task=12 --mem=200gb --time=11:59:00 --gres=gpu:h100:4",
         "sbatch_opts_short": "--account=def-swasland-ab --ntasks=1 --cpus-per-task=6 --mem=100gb --time=2:59:00 --partition=gpubase_bygpu_b1 --gres=gpu:h100:2",
         "sbatch_opts_24h": "--account=def-swasland-ab --ntasks=1 --cpus-per-task=12 --mem=200gb --time=23:59:00 --gres=gpu:h100:4",
@@ -237,6 +262,7 @@ CLUSTER_INFO: dict[str, dict[str, str]] = {
         # running/pending and the rest of the snapshot.
         "gpu_source": "nvidia-smi",
         "gpu_exclude_pattern": "Display",
+        "usable_gpus": 4,
     },
     "apollo": {
         "kind": "smi",
@@ -297,15 +323,18 @@ CLUSTER_INFO: dict[str, dict[str, str]] = {
 }
 SNAPSHOT_TIMEOUT = 25
 SUBMIT_TIMEOUT = 15
+SSH_CONNECT_TIMEOUT = int(os.environ.get("QUEUE_TIME_SSH_CONNECT_TIMEOUT", "3"))
+SSH_SERVER_ALIVE_INTERVAL = int(os.environ.get("QUEUE_TIME_SSH_SERVER_ALIVE_INTERVAL", "5"))
+SSH_SERVER_ALIVE_COUNT_MAX = int(os.environ.get("QUEUE_TIME_SSH_SERVER_ALIVE_COUNT_MAX", "1"))
 # Options applied to every `ssh` invocation. ConnectTimeout fails an
-# unreachable host in 10s instead of waiting ~75s for the OS-level TCP
-# timeout; BatchMode prevents password prompts from hanging stdin in cron;
-# ServerAlive kills mid-stream hangs (e.g. flaky VPN) within ~20s.
+# unreachable host quickly instead of waiting for the OS-level TCP timeout;
+# BatchMode prevents password prompts from hanging stdin in cron; ServerAlive
+# kills mid-stream hangs (e.g. flaky VPN) after one missed keepalive by default.
 SSH_OPTS = (
-    "-o", "ConnectTimeout=10",
+    "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
     "-o", "BatchMode=yes",
-    "-o", "ServerAliveInterval=10",
-    "-o", "ServerAliveCountMax=2",
+    "-o", f"ServerAliveInterval={SSH_SERVER_ALIVE_INTERVAL}",
+    "-o", f"ServerAliveCountMax={SSH_SERVER_ALIVE_COUNT_MAX}",
 )
 GPU_TRES_RE = re.compile(r"^gres/gpu(?::[^=,]+)?=(\d+)$")
 GPU_FROM_GRES_RE = re.compile(r"(?:gres[/:])?gpu(?::\w+)?:(\d+)")
@@ -320,6 +349,13 @@ TIME_BUCKETS: tuple[tuple[str, int, int | None], ...] = (
     ("7d",  72 * 3600 + 1,     None),
 )
 GPU_GROUPS = (4, 2, 1)
+LEVELFS_USER = os.environ.get("QUEUE_TIME_LEVELFS_USER", "spapais")
+TRAIL_FAVICON_URL = (
+    "https://static.wixstatic.com/media/"
+    "40d842_8fc236af72fc4289aaab95c04bc9a6c6%7Emv2.png/"
+    "v1/fill/w_32%2Ch_32%2Clg_1%2Cusm_0.66_1.00_0.01/"
+    "40d842_8fc236af72fc4289aaab95c04bc9a6c6%7Emv2.png"
+)
 
 
 def _heatmap_gpu_groups(cluster: str) -> tuple[int, ...]:
@@ -542,6 +578,10 @@ def _append_trail_history(cluster: str, snap: dict[str, object]) -> None:
     total = snap.get("gpus_total")
     if used is None or total is None:
         return
+    usable = CLUSTER_INFO.get(cluster, {}).get("usable_gpus")
+    if isinstance(usable, int):
+        total = min(int(total), usable)
+        used = min(int(used), usable)
     # Per-kind job count: SLURM running jobs for DGX, distinct GPU-using
     # containers for SMI hosts. Falls back to 0 when not measured.
     if snap.get("kind") == "smi":
@@ -565,6 +605,13 @@ def _append_trail_history(cluster: str, snap: dict[str, object]) -> None:
             "jobs": jobs,
             "users": [str(u) for u in users],
         }
+        user_gpu = snap.get("user_gpu") or {}
+        if isinstance(user_gpu, dict):
+            rec_dict["user_gpu"] = {
+                str(user): metrics
+                for user, metrics in user_gpu.items()
+                if isinstance(metrics, dict)
+            }
         if isinstance(mem_total_bytes, int) and mem_total_bytes > 0 \
                 and isinstance(mem_used_bytes, int) and mem_used_bytes >= 0:
             rec_dict["mem_used_bytes"] = int(mem_used_bytes)
@@ -621,6 +668,9 @@ def _load_trail_history(
                     users = []
                 mem_used = rec.get("mem_used_bytes")
                 mem_total = rec.get("mem_total_bytes")
+                user_gpu = rec.get("user_gpu") or {}
+                if not isinstance(user_gpu, dict):
+                    user_gpu = {}
                 out.append({
                     "ts": ts,
                     "used": int(rec.get("used", 0)),
@@ -629,6 +679,7 @@ def _load_trail_history(
                     "users": [str(u) for u in users],
                     "mem_used_bytes": int(mem_used) if isinstance(mem_used, (int, float)) else None,
                     "mem_total_bytes": int(mem_total) if isinstance(mem_total, (int, float)) else None,
+                    "user_gpu": user_gpu,
                 })
             except Exception:
                 continue
@@ -691,6 +742,68 @@ def parse_time_limit_seconds(value: str) -> int | None:
     return days * SECONDS_PER_DAY + h * 3600 + m * 60 + sec
 
 
+def parse_slurm_duration_seconds(value: str) -> int | None:
+    """Parse sacct CPU time strings such as '01:02:03' or '2-01:02:03'."""
+    return parse_time_limit_seconds(value)
+
+
+def parse_memory_bytes(value: str) -> int | None:
+    """Parse Slurm memory strings such as 120G, 68206184K, or 192500Mc."""
+    if not value:
+        return None
+    s = value.strip()
+    if s in ("Unknown", "N/A", "0"):
+        return None
+    # ReqMem may end in c/n for per-cpu/per-node. The caller handles that
+    # semantic; this parser converts only the magnitude.
+    if s[-1:].lower() in ("c", "n"):
+        s = s[:-1]
+    m = re.match(r"^([0-9]+(?:\.[0-9]+)?)([kmgtp]?)b?$", s, re.IGNORECASE)
+    if not m:
+        return None
+    value_float = float(m.group(1))
+    unit = m.group(2).upper()
+    scale = {
+        "": 1,
+        "K": 1024,
+        "M": 1024 ** 2,
+        "G": 1024 ** 3,
+        "T": 1024 ** 4,
+        "P": 1024 ** 5,
+    }[unit]
+    return int(value_float * scale)
+
+
+def format_bytes_short(num_bytes: float | int | None) -> str:
+    if num_bytes is None:
+        return "—"
+    value = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if abs(value) < 1024.0 or unit == "PB":
+            if unit == "B":
+                return f"{value:.0f}{unit}"
+            return f"{value:.1f}{unit}"
+        value /= 1024.0
+    return f"{value:.1f}PB"
+
+
+def extract_tres_value(tres: str, key: str) -> str | None:
+    for item in str(tres or "").split(","):
+        if item.startswith(f"{key}="):
+            return item.split("=", 1)[1]
+    return None
+
+
+def parse_req_mem_total_bytes(req_mem: str, alloc_cpus: int, req_tres: str) -> int | None:
+    if req_mem:
+        per_cpu = req_mem.strip().lower().endswith("c")
+        parsed = parse_memory_bytes(req_mem)
+        if parsed is not None:
+            return parsed * max(1, alloc_cpus) if per_cpu else parsed
+    tres_mem = extract_tres_value(req_tres, "mem")
+    return parse_memory_bytes(tres_mem or "")
+
+
 def extract_gpu_count(req_tres: str, alloc_tres: str) -> int | None:
     """Find the GPU count in 'gres/gpu(:type)?=N' TRES strings."""
     for tres in (alloc_tres, req_tres):
@@ -742,7 +855,7 @@ def query_cluster(
     remote_cmd = (
         f"{info['init']} && {users_assign} && "
         'if [ -n "$USERS" ]; then '
-        'sacct -u "$USERS" -X --parsable2 --noheader '
+        'sacct -u "$USERS" --parsable2 --noheader '
         f"--starttime {shlex.quote(start_time)} --endtime {shlex.quote(end_time)} "
         f"--format={shlex.quote(sacct_format)} 2>/dev/null; "
         "fi"
@@ -760,11 +873,77 @@ def query_cluster(
 
     now_epoch = int(datetime.now().timestamp())
     rows: list[dict[str, object]] = []
+    step_usage: dict[str, dict[str, object]] = {}
+    top_level_lines: list[list[str]] = []
     for line in result.stdout.splitlines():
         fields = line.split("|")
         if len(fields) != len(SACCT_FIELDS):
             continue
-        job_id, user, submit, start, end, row_time_limit, req_tres, alloc_tres = fields
+        (
+            job_id,
+            user,
+            submit,
+            start,
+            end,
+            state,
+            row_time_limit,
+            alloc_cpus_str,
+            req_mem,
+            req_tres,
+            alloc_tres,
+            ave_rss,
+            max_disk_read,
+            max_disk_write,
+            tres_usage_in_ave,
+            tres_usage_in_tot,
+        ) = fields
+
+        if "." in job_id:
+            base_job_id, step_name = job_id.split(".", 1)
+            if step_name != "batch":
+                continue
+            cpu_total = parse_slurm_duration_seconds(
+                extract_tres_value(tres_usage_in_tot, "cpu") or ""
+            )
+            ave_mem = parse_memory_bytes(ave_rss) or parse_memory_bytes(
+                extract_tres_value(tres_usage_in_ave, "mem") or ""
+            )
+            disk_total = parse_memory_bytes(
+                extract_tres_value(tres_usage_in_tot, "fs/disk") or ""
+            )
+            if disk_total is None:
+                read_bytes = parse_memory_bytes(max_disk_read) or 0
+                write_bytes = parse_memory_bytes(max_disk_write) or 0
+                disk_total = read_bytes + write_bytes if read_bytes or write_bytes else None
+            gpuutil = extract_tres_value(tres_usage_in_ave, "gres/gpuutil")
+            step_usage[base_job_id] = {
+                "cpu_total_seconds": cpu_total,
+                "ave_rss_bytes": ave_mem,
+                "disk_io_bytes": disk_total,
+                "gpuutil": float(gpuutil) if gpuutil and gpuutil.replace(".", "", 1).isdigit() else None,
+            }
+            continue
+        top_level_lines.append(fields)
+
+    for fields in top_level_lines:
+        (
+            job_id,
+            user,
+            submit,
+            start,
+            end,
+            state,
+            row_time_limit,
+            alloc_cpus_str,
+            req_mem,
+            req_tres,
+            alloc_tres,
+            ave_rss,
+            max_disk_read,
+            max_disk_write,
+            tres_usage_in_ave,
+            tres_usage_in_tot,
+        ) = fields
 
         gres_filter = info.get("gres_filter", "")
         if gres_filter:
@@ -778,6 +957,10 @@ def query_cluster(
         time_limit_seconds = parse_time_limit_seconds(row_time_limit)
         if time_limit_seconds is None:
             continue
+        try:
+            alloc_cpus = int(alloc_cpus_str)
+        except ValueError:
+            alloc_cpus = 0
         submit_epoch = parse_slurm_time(submit)
         if submit_epoch is None:
             continue
@@ -805,6 +988,8 @@ def query_cluster(
             run_seconds = max(0, end_epoch - start_epoch)
         else:
             run_seconds = max(0, min(now_epoch - start_epoch, time_limit_seconds))
+        req_mem_bytes = parse_req_mem_total_bytes(req_mem, alloc_cpus, req_tres)
+        usage = step_usage.get(job_id, {})
 
         rows.append(
             {
@@ -819,6 +1004,13 @@ def query_cluster(
                 "gpus": gpus,
                 "pending": pending,
                 "user": user,
+                "state": state,
+                "alloc_cpus": alloc_cpus,
+                "req_mem_bytes": req_mem_bytes,
+                "cpu_total_seconds": usage.get("cpu_total_seconds"),
+                "ave_rss_bytes": usage.get("ave_rss_bytes"),
+                "disk_io_bytes": usage.get("disk_io_bytes"),
+                "gpuutil": usage.get("gpuutil"),
             }
         )
     return rows
@@ -939,11 +1131,13 @@ def query_snapshot(cluster: str, info: dict[str, str], timeout: int) -> dict[str
         f" 2>/dev/null | awk '{{print $1 \"|\" $2 \"|\" $3}}'",
         'echo "PEND_JOBS_END"',
     ]
-    if info.get("account"):
-        account = shlex.quote(info["account"])
+    share_account = info.get("share_account") or info.get("account") or info.get("sacct_account")
+    if share_account:
+        account = shlex.quote(share_account)
+        levelfs_user = shlex.quote(LEVELFS_USER)
         parts.append(
-            f'LFS=$(sshare -l -A {account} --parsable2 --noheader 2>/dev/null | '
-            'awk -F"|" \'$2==""{print $9; exit}\'); '
+            f'LFS=$(sshare -l -A {account} -u {levelfs_user} --parsable2 --noheader 2>/dev/null | '
+            'awk -F"|" \'$2=="" && $9!=""{print $9; exit}\'); '
             'echo "LEVELFS ${LFS:-N/A}"'
         )
     else:
@@ -957,6 +1151,12 @@ def query_snapshot(cluster: str, info: dict[str, str], timeout: int) -> dict[str
         )
         parts.append(
             f'echo "RUNNING $(squeue -p {partition} -t RUNNING --noheader 2>/dev/null | wc -l)"'
+        )
+        parts.append(
+            f"squeue -p {partition} -t RUNNING -h -O 'UserName,tres-per-node,tres-per-job' "
+            "2>/dev/null | awk '"
+            "{g=0; for(i=2;i<=NF;i++){if(match($i,/(gres[\\/:])?gpu(:[^:[:space:]]+)?:([0-9]+)/,m)){g=m[3]+0; break}} "
+            "if(g>0) printf \"USER_GPU %s %d\\n\", $1, g}'"
         )
         if info.get("gpu_source") == "nvidia-smi":
             # On hosts where SLURM gres counts include non-trainable GPUs
@@ -991,6 +1191,7 @@ def query_snapshot(cluster: str, info: dict[str, str], timeout: int) -> dict[str
     per_gpu: list[dict[str, object]] = []
     smi_total = 0
     smi_used = 0
+    user_gpu: dict[str, dict[str, float]] = defaultdict(lambda: {"allocated_gpus": 0.0})
     exclude_pattern = info.get("gpu_exclude_pattern", "")
     for line in result.stdout.splitlines():
         if line == "PEND_JOBS_BEGIN":
@@ -1086,6 +1287,11 @@ def query_snapshot(cluster: str, info: dict[str, str], timeout: int) -> dict[str
                 snapshot["running"] = int(tokens[1])
             except ValueError:
                 pass
+        elif tokens[0] == "USER_GPU" and len(tokens) == 3:
+            try:
+                user_gpu[tokens[1]]["allocated_gpus"] += float(tokens[2])
+            except ValueError:
+                pass
         elif tokens[0] == "MEM" and len(tokens) == 3:
             try:
                 snapshot["mem_total_bytes"] = int(tokens[1])
@@ -1094,8 +1300,13 @@ def query_snapshot(cluster: str, info: dict[str, str], timeout: int) -> dict[str
                 pass
     snapshot["pending_by_bucket"] = dict(pending_by_bucket)
     snapshot["per_gpu"] = per_gpu
-    if info.get("gpu_source") == "nvidia-smi" and per_gpu:
-        # Trust nvidia-smi over scontrol AllocTRES for these clusters.
+    if user_gpu:
+        snapshot["user_gpu"] = dict(user_gpu)
+        snapshot["users"] = sorted(user_gpu)
+    if info.get("gpu_source") == "nvidia-smi" and per_gpu and not info.get("usable_gpus"):
+        # Trust nvidia-smi over scontrol AllocTRES only for hosts where Slurm
+        # does not need a trainable-GPU cap. DGX SSH may expose only the
+        # caller's cgroup-visible GPUs, so Slurm + usable_gpus is safer there.
         snapshot["gpus_total"] = smi_total
         snapshot["gpus_used"] = smi_used
     return snapshot
@@ -1122,16 +1333,18 @@ def query_smi_snapshot(
     # GPU lines use `|` as the separator since GPU names contain spaces.
     remote_script = r"""
 set -e
-nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu \
+nvidia-smi --query-gpu=uuid,name,memory.used,memory.total,utilization.gpu \
   --format=csv,noheader,nounits 2>/dev/null \
   | awk -F',' '{
-      gsub(/^ +| +$/, "", $1); gsub(/ /, "", $2); gsub(/ /, "", $3); gsub(/ /, "", $4);
-      printf "GPU %s|%s|%s|%s\n", $1, $2, $3, $4
+      for(i=1;i<=5;i++) gsub(/^ +| +$/, "", $i);
+      gsub(/ /, "", $3); gsub(/ /, "", $4); gsub(/ /, "", $5);
+      printf "GPU %s|%s|%s|%s|%s\n", $1, $2, $3, $4, $5
     }'
 free -b 2>/dev/null | awk '/^Mem:/ {printf "MEM %.0f %.0f\n", $2 + 0, $2 - $7}'
 echo PROC_BEGIN
-nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null \
-  | awk '{gsub(/ /,""); print}' | sort -u | while read pid; do
+nvidia-smi --query-compute-apps=pid,gpu_uuid,used_gpu_memory --format=csv,noheader,nounits 2>/dev/null \
+  | awk -F',' '{for(i=1;i<=3;i++) gsub(/^ +| +$/, "", $i); gsub(/ /, "", $3); print $1 "|" $2 "|" $3}' \
+  | sort -u | while IFS='|' read pid gpu_uuid used_mem; do
     [ -z "$pid" ] && continue
     cgroup=$(head -1 /proc/$pid/cgroup 2>/dev/null || true)
     cid=""
@@ -1148,7 +1361,7 @@ nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null \
         user=$(ps -o user= -p $pid 2>/dev/null | tr -d ' ')
     fi
     [ -z "$user" ] && user=unknown
-    echo "PROC $pid ${cid:-none} $user"
+    echo "PROC $pid ${gpu_uuid:-unknown} ${used_mem:-0} ${cid:-none} $user"
 done
 echo PROC_END
 who 2>/dev/null | awk '{print "WHO " $1}' | sort -u
@@ -1169,7 +1382,7 @@ who 2>/dev/null | awk '{print "WHO " $1}' | sort -u
     gpus_used = 0
     per_gpu: list[dict[str, object]] = []
     in_proc = False
-    procs: list[tuple[str, str, str]] = []  # (pid, container, user)
+    procs: list[tuple[str, str, int, str, str]] = []  # (pid, gpu_uuid, used_mem, container, user)
     who_users: set[str] = set()
     exclude_pattern = info.get("gpu_exclude_pattern", "")
     for line in result.stdout.splitlines():
@@ -1181,23 +1394,29 @@ who 2>/dev/null | awk '{print "WHO " $1}' | sort -u
             continue
         if in_proc:
             toks = line.split()
-            if len(toks) == 4 and toks[0] == "PROC":
-                procs.append((toks[1], toks[2], toks[3]))
+            if len(toks) == 6 and toks[0] == "PROC":
+                try:
+                    used_mem = int(toks[3])
+                except ValueError:
+                    used_mem = 0
+                procs.append((toks[1], toks[2], used_mem, toks[4], toks[5]))
             continue
         if line.startswith("GPU "):
             fields = line[4:].split("|")
-            if len(fields) != 4:
+            if len(fields) != 5:
                 continue
-            name = fields[0]
+            uuid = fields[0]
+            name = fields[1]
             if exclude_pattern and exclude_pattern in name:
                 continue
             try:
-                mem_used = int(fields[1])
-                mem_total = int(fields[2])
-                util = int(fields[3])
+                mem_used = int(fields[2])
+                mem_total = int(fields[3])
+                util = int(fields[4])
             except ValueError:
                 continue
             per_gpu.append({
+                "uuid": uuid,
                 "name": name,
                 "mem_used": mem_used,
                 "mem_total": mem_total,
@@ -1225,7 +1444,14 @@ who 2>/dev/null | awk '{print "WHO " $1}' | sort -u
     # PID-namespace owner is meaningless on the host.
     named_users: list[str] = []
     unattributed_containers = 0
-    for _, cid, u in procs:
+    user_gpu: dict[str, dict[str, object]] = defaultdict(lambda: {
+        "gpu_uuids": set(),
+        "mem_used_mb": 0.0,
+        "gpu_util_pct_sum": 0.0,
+        "gpu_util_gpus": 0.0,
+    })
+    gpu_users: dict[str, set[str]] = defaultdict(set)
+    for _, gpu_uuid, used_mem, cid, u in procs:
         if u == "_container_":
             unattributed_containers += 1
             continue
@@ -1235,9 +1461,27 @@ who 2>/dev/null | awk '{print "WHO " $1}' | sort -u
             unattributed_containers += 1
             continue
         named_users.append(u)
+        metrics = user_gpu[u]
+        gpu_uuids = metrics["gpu_uuids"]
+        if isinstance(gpu_uuids, set) and gpu_uuid and gpu_uuid != "unknown":
+            gpu_uuids.add(gpu_uuid)
+            gpu_users[gpu_uuid].add(u)
+        metrics["mem_used_mb"] = float(metrics["mem_used_mb"]) + max(0, used_mem)
+    gpu_util_by_uuid = {
+        str(g.get("uuid")): float(g.get("util", 0) or 0)
+        for g in per_gpu
+        if g.get("uuid")
+    }
+    for gpu_uuid, users_on_gpu in gpu_users.items():
+        if not users_on_gpu:
+            continue
+        util_share = gpu_util_by_uuid.get(gpu_uuid, 0.0) / len(users_on_gpu)
+        for u in users_on_gpu:
+            user_gpu[u]["gpu_util_pct_sum"] = float(user_gpu[u]["gpu_util_pct_sum"]) + util_share
+            user_gpu[u]["gpu_util_gpus"] = float(user_gpu[u]["gpu_util_gpus"]) + 1.0
     if not named_users and who_users:
         named_users = sorted(who_users)
-    container_ids = {c for _, c, _ in procs if c and c != "none"}
+    container_ids = {c for _, _, _, c, _ in procs if c and c != "none"}
 
     snapshot["gpus_total"] = gpus_total or None
     snapshot["gpus_used"] = gpus_used if gpus_total else None
@@ -1245,6 +1489,15 @@ who 2>/dev/null | awk '{print "WHO " $1}' | sort -u
     snapshot["containers"] = len(container_ids)
     snapshot["unattributed_containers"] = unattributed_containers
     snapshot["per_gpu"] = per_gpu
+    snapshot["user_gpu"] = {
+        user: {
+            "allocated_gpus": len(metrics["gpu_uuids"]) if isinstance(metrics["gpu_uuids"], set) else 0,
+            "mem_used_mb": float(metrics["mem_used_mb"]),
+            "gpu_util_pct_sum": float(metrics["gpu_util_pct_sum"]),
+            "gpu_util_gpus": float(metrics["gpu_util_gpus"]),
+        }
+        for user, metrics in user_gpu.items()
+    }
     # Stable, de-duplicated user list (ordered by first appearance).
     seen: set[str] = set()
     users_ordered: list[str] = []
@@ -1485,8 +1738,9 @@ def compute_cluster_snapshot_rows(
         pending = snap.get("pending")
         pending_str = "N/A" if pending is None else str(pending)
         lfs = snap.get("levelfs")
+        share_account = info.get("share_account") or info.get("account") or info.get("sacct_account")
         if lfs is None:
-            lfs_str = "1.000" if not info.get("account") else "N/A"
+            lfs_str = "1.000" if not share_account else "N/A"
         else:
             lfs_str = f"{float(lfs):.3f}"
 
@@ -1537,6 +1791,182 @@ def compute_cluster_snapshot_rows(
                 "trail_users_7d": users_7d_str,
             }
         )
+    return result
+
+
+def format_ratio_pct(used: float, requested: float) -> str:
+    if requested <= 0:
+        return "—"
+    return f"{100.0 * used / requested:.0f}%"
+
+
+def compute_member_usage_rows(
+    rows: list[dict[str, object]],
+    clusters: tuple[str, ...],
+    now: int | None = None,
+    days: int = TRAIL_LOOKBACK_DAYS,
+) -> list[dict[str, object]]:
+    """Aggregate member resource usage over a cluster cohort."""
+    if now is None:
+        now = int(datetime.now().timestamp())
+    cutoff = now - days * SECONDS_PER_DAY
+    cluster_set = set(clusters)
+    by_user: dict[str, dict[str, object]] = defaultdict(lambda: {
+        "gpu_hours": 0.0,
+        "time_used_seconds": 0.0,
+        "time_req_seconds": 0.0,
+        "cpu_used_seconds": 0.0,
+        "cpu_req_seconds": 0.0,
+        "mem_used_byte_seconds": 0.0,
+        "mem_req_byte_seconds": 0.0,
+        "disk_io_bytes": 0.0,
+        "low_activity_gpu_hours": 0.0,
+        "gpuutil_weighted": 0.0,
+        "gpuutil_gpu_hours": 0.0,
+        "jobs": 0,
+        "clusters": set(),
+    })
+    for r in rows:
+        if int(r.get("submit_epoch", 0) or 0) < cutoff:
+            continue
+        if r.get("pending"):
+            continue
+        cluster = str(r.get("cluster") or "")
+        if cluster not in cluster_set:
+            continue
+        user = str(r.get("user") or "").strip()
+        if not user:
+            continue
+        gpus = int(r.get("gpus", 0) or 0)
+        run_seconds = int(r.get("run_seconds", 0) or 0)
+        time_limit_seconds = int(r.get("time_limit_seconds", 0) or 0)
+        if gpus <= 0 or run_seconds <= 0:
+            continue
+        user_stats = by_user[user]
+        gpu_hours = gpus * run_seconds / 3600.0
+        user_stats["gpu_hours"] = float(user_stats["gpu_hours"]) + gpu_hours
+        user_stats["time_used_seconds"] = float(user_stats["time_used_seconds"]) + run_seconds
+        user_stats["time_req_seconds"] = float(user_stats["time_req_seconds"]) + time_limit_seconds
+        user_stats["jobs"] = int(user_stats["jobs"]) + 1
+        user_clusters = user_stats["clusters"]
+        if isinstance(user_clusters, set):
+            user_clusters.add(cluster)
+
+        alloc_cpus = int(r.get("alloc_cpus", 0) or 0)
+        cpu_req_seconds = alloc_cpus * run_seconds
+        cpu_used_seconds = r.get("cpu_total_seconds")
+        if isinstance(cpu_used_seconds, (int, float)) and cpu_used_seconds >= 0 and cpu_req_seconds > 0:
+            user_stats["cpu_used_seconds"] = float(user_stats["cpu_used_seconds"]) + float(cpu_used_seconds)
+            user_stats["cpu_req_seconds"] = float(user_stats["cpu_req_seconds"]) + cpu_req_seconds
+
+        ave_rss_bytes = r.get("ave_rss_bytes")
+        req_mem_bytes = r.get("req_mem_bytes")
+        if (
+            isinstance(ave_rss_bytes, (int, float))
+            and isinstance(req_mem_bytes, (int, float))
+            and ave_rss_bytes >= 0
+            and req_mem_bytes > 0
+        ):
+            user_stats["mem_used_byte_seconds"] = (
+                float(user_stats["mem_used_byte_seconds"]) + float(ave_rss_bytes) * run_seconds
+            )
+            user_stats["mem_req_byte_seconds"] = (
+                float(user_stats["mem_req_byte_seconds"]) + float(req_mem_bytes) * run_seconds
+            )
+
+        disk_io_bytes = r.get("disk_io_bytes")
+        if isinstance(disk_io_bytes, (int, float)) and disk_io_bytes > 0:
+            user_stats["disk_io_bytes"] = float(user_stats["disk_io_bytes"]) + float(disk_io_bytes)
+
+        gpuutil = r.get("gpuutil")
+        if isinstance(gpuutil, (int, float)) and gpuutil >= 0:
+            avg_gpu_util_pct = min(100.0, float(gpuutil) / max(1, gpus))
+            user_stats["gpuutil_weighted"] = (
+                float(user_stats["gpuutil_weighted"]) + avg_gpu_util_pct * gpu_hours
+            )
+            user_stats["gpuutil_gpu_hours"] = float(user_stats["gpuutil_gpu_hours"]) + gpu_hours
+
+        cpu_ratio = (
+            float(cpu_used_seconds) / cpu_req_seconds
+            if isinstance(cpu_used_seconds, (int, float)) and cpu_req_seconds > 0
+            else None
+        )
+        mem_ratio = (
+            float(ave_rss_bytes) / float(req_mem_bytes)
+            if isinstance(ave_rss_bytes, (int, float))
+            and isinstance(req_mem_bytes, (int, float))
+            and req_mem_bytes > 0
+            else None
+        )
+        per_gpu_gpuutil = (
+            float(gpuutil) / max(1, gpus)
+            if isinstance(gpuutil, (int, float)) and gpuutil >= 0
+            else None
+        )
+        cpus_per_gpu_used = (
+            float(cpu_used_seconds) / (run_seconds * gpus)
+            if isinstance(cpu_used_seconds, (int, float)) and run_seconds > 0 and gpus > 0
+            else None
+        )
+        mem_gb_used = (
+            float(ave_rss_bytes) / (1024 ** 3)
+            if isinstance(ave_rss_bytes, (int, float))
+            else None
+        )
+        if (
+            gpu_hours >= 1.0
+            and run_seconds >= 10 * 60
+            and cpus_per_gpu_used is not None
+            and cpus_per_gpu_used > 0
+            and cpus_per_gpu_used < 1.0
+            and mem_gb_used is not None
+            and mem_gb_used < 10.0
+            and (per_gpu_gpuutil is None or per_gpu_gpuutil < 30)
+        ):
+            user_stats["low_activity_gpu_hours"] = (
+                float(user_stats["low_activity_gpu_hours"]) + gpu_hours
+            )
+
+    result: list[dict[str, object]] = []
+    for user, stats in by_user.items():
+        gpu_hours = float(stats["gpu_hours"])
+        gpuutil_gpu_hours = float(stats["gpuutil_gpu_hours"])
+        if gpuutil_gpu_hours >= 0.5:
+            gpuutil_avg = float(stats["gpuutil_weighted"]) / gpuutil_gpu_hours
+            gpuutil_display = f"{gpuutil_avg:.0f}% ({gpuutil_gpu_hours:.0f} GPU hrs)"
+        else:
+            gpuutil_display = "-"
+        result.append({
+            "member": user,
+            "gpu_hours": gpu_hours,
+            "gpu_hours_display": f"{gpu_hours:.0f}",
+            "clusters": (
+                ", ".join(
+                    _CLUSTER_ABBR.get(c, c)
+                    for c in sorted(stats["clusters"])  # type: ignore[arg-type]
+                )
+                if isinstance(stats["clusters"], set) and stats["clusters"]
+                else "-"
+            ),
+            "time_ratio": format_ratio_pct(
+                float(stats["time_used_seconds"]),
+                float(stats["time_req_seconds"]),
+            ),
+            "cpu_ratio": format_ratio_pct(
+                float(stats["cpu_used_seconds"]),
+                float(stats["cpu_req_seconds"]),
+            ),
+            "mem_ratio": format_ratio_pct(
+                float(stats["mem_used_byte_seconds"]),
+                float(stats["mem_req_byte_seconds"]),
+            ),
+            "disk_io": format_bytes_short(float(stats["disk_io_bytes"])),
+            "low_activity_gpu_hours": float(stats["low_activity_gpu_hours"]),
+            "low_activity_display": f"{float(stats['low_activity_gpu_hours']):.0f}",
+            "gpuutil_display": gpuutil_display,
+            "jobs": int(stats["jobs"]),
+        })
+    result.sort(key=lambda r: (-float(r["gpu_hours"]), str(r["member"])))
     return result
 
 
@@ -1596,6 +2026,138 @@ def _trail_unique_users_list(cluster: str, days: int = 7) -> list[str] | None:
             if u:
                 seen.add(str(u))
     return sorted(seen)
+
+
+def compute_utias_member_usage_rows(
+    days: int = TRAIL_LOOKBACK_DAYS,
+    now: int | None = None,
+) -> list[dict[str, object]]:
+    """Approximate per-member UTIAS usage from sampled host history.
+
+    New samples carry per-user GPU process data where available. Older samples
+    only have host-level used GPU counts, so they fall back to dividing each
+    sample interval equally across named active users.
+    """
+    if now is None:
+        now = int(datetime.now().timestamp())
+    by_user: dict[str, dict[str, object]] = defaultdict(lambda: {
+        "gpu_hours": 0.0,
+        "gpu_util_weighted": 0.0,
+        "gpu_util_gpu_hours": 0.0,
+        "samples": 0,
+        "days_used": set(),
+        "clusters": set(),
+    })
+    max_interval = 6 * 3600
+    for cluster in TRAIL_CLUSTERS:
+        hist = _load_trail_history(cluster, days=days)
+        if not hist:
+            continue
+        for idx, rec in enumerate(hist):
+            ts = int(rec.get("ts", 0) or 0)
+            if ts <= 0:
+                continue
+            if idx + 1 < len(hist):
+                next_ts = int(hist[idx + 1].get("ts", ts) or ts)
+            else:
+                next_ts = now
+            interval = max(0, min(max_interval, next_ts - ts))
+            if interval <= 0:
+                continue
+            user_gpu = rec.get("user_gpu") or {}
+            if isinstance(user_gpu, dict) and user_gpu:
+                for user, metrics in user_gpu.items():
+                    if not isinstance(metrics, dict):
+                        continue
+                    allocated_gpus = float(metrics.get("allocated_gpus", 0.0) or 0.0)
+                    if allocated_gpus <= 0:
+                        continue
+                    gpu_hours = allocated_gpus * interval / 3600.0
+                    stats = by_user[str(user)]
+                    stats["gpu_hours"] = float(stats["gpu_hours"]) + gpu_hours
+                    stats["samples"] = int(stats["samples"]) + 1
+                    days_used = stats["days_used"]
+                    if isinstance(days_used, set):
+                        days_used.add(datetime.fromtimestamp(ts).date().isoformat())
+                    clusters = stats["clusters"]
+                    if isinstance(clusters, set):
+                        clusters.add(cluster)
+                    gpu_util_gpus = float(metrics.get("gpu_util_gpus", 0.0) or 0.0)
+                    gpu_util_pct_sum = float(metrics.get("gpu_util_pct_sum", 0.0) or 0.0)
+                    if gpu_util_gpus > 0:
+                        avg_util = gpu_util_pct_sum / gpu_util_gpus
+                        stats["gpu_util_weighted"] = (
+                            float(stats["gpu_util_weighted"]) + avg_util * gpu_hours
+                        )
+                        stats["gpu_util_gpu_hours"] = (
+                            float(stats["gpu_util_gpu_hours"]) + gpu_hours
+                        )
+                continue
+
+            users = [str(u) for u in rec.get("users") or [] if str(u)]
+            if not users:
+                continue
+            used = int(rec.get("used", 0) or 0)
+            if used <= 0:
+                continue
+            share_gpu_hours = used * interval / 3600.0 / len(users)
+            for user in users:
+                stats = by_user[user]
+                stats["gpu_hours"] = float(stats["gpu_hours"]) + share_gpu_hours
+                stats["samples"] = int(stats["samples"]) + 1
+                days_used = stats["days_used"]
+                if isinstance(days_used, set):
+                    days_used.add(datetime.fromtimestamp(ts).date().isoformat())
+                clusters = stats["clusters"]
+                if isinstance(clusters, set):
+                    clusters.add(cluster)
+
+    result: list[dict[str, object]] = []
+    for user, stats in by_user.items():
+        clusters = stats["clusters"]
+        cluster_labels = (
+            ", ".join(_CLUSTER_ABBR.get(c, c) for c in sorted(clusters))
+            if isinstance(clusters, set) and clusters else "-"
+        )
+        gpu_hours = float(stats["gpu_hours"])
+        util_gpu_hours = float(stats["gpu_util_gpu_hours"])
+        gpu_util_display = (
+            f"{float(stats['gpu_util_weighted']) / util_gpu_hours:.0f}% ({util_gpu_hours:.0f} GPU hrs)"
+            if util_gpu_hours >= 0.5 else "-"
+        )
+        result.append({
+            "member": user,
+            "gpu_hours": gpu_hours,
+            "gpu_hours_display": f"{gpu_hours:.0f}",
+            "gpu_util_display": gpu_util_display,
+            "servers": cluster_labels,
+            "samples": int(stats["samples"]),
+            "days_used": len(stats["days_used"]) if isinstance(stats["days_used"], set) else 0,
+        })
+    result.sort(key=lambda r: (-float(r["gpu_hours"]), str(r["member"])))
+    return result
+
+
+def utias_history_available_days(
+    days: int = TRAIL_LOOKBACK_DAYS,
+    now: int | None = None,
+) -> float | None:
+    if now is None:
+        now = int(datetime.now().timestamp())
+    oldest: int | None = None
+    newest: int | None = None
+    cutoff = now - days * SECONDS_PER_DAY
+    for cluster in TRAIL_CLUSTERS:
+        for rec in _load_trail_history(cluster, days=days):
+            ts = int(rec.get("ts", 0) or 0)
+            if ts < cutoff:
+                continue
+            oldest = ts if oldest is None else min(oldest, ts)
+            newest = ts if newest is None else max(newest, ts)
+    if oldest is None:
+        return None
+    end = max(newest or oldest, now)
+    return max(0.0, min(float(days), (end - oldest) / SECONDS_PER_DAY))
 
 
 def compute_trail_snapshot_rows(
@@ -1860,6 +2422,68 @@ def print_trail_snapshot(snapshots: dict[str, dict[str, object]]) -> None:
         print(line)
 
 
+def print_member_usage(
+    title: str,
+    rows: list[dict[str, object]],
+    clusters: tuple[str, ...],
+) -> None:
+    print(title)
+    usage_rows = compute_member_usage_rows(rows, clusters)
+    headers = [
+        "Member",
+        f"{TRAIL_LOOKBACK_DAYS}D GPU HRS",
+        f"{TRAIL_LOOKBACK_DAYS}D GPU Util",
+        f"{TRAIL_LOOKBACK_DAYS}D Inactive GPU Hrs",
+        f"{TRAIL_LOOKBACK_DAYS}D CLUSTERS",
+        f"{TRAIL_LOOKBACK_DAYS}D CPU Used/Req",
+        f"{TRAIL_LOOKBACK_DAYS}D Mem Used/Req",
+    ]
+    widths = [16, 12, 22, 27, 28, 17, 17]
+    body = [
+        [
+            str(r["member"]),
+            str(r["gpu_hours_display"]),
+            str(r["gpuutil_display"]),
+            str(r["low_activity_display"]),
+            str(r["clusters"]),
+            str(r["cpu_ratio"]),
+            str(r["mem_ratio"]),
+        ]
+        for r in usage_rows
+    ]
+    if not body:
+        body = [["—", "0", "-", "0", "-", "—", "—"]]
+    for line in _box_table(headers, widths, body):
+        print(line)
+
+
+def print_utias_member_usage() -> None:
+    print("Member Usage UTIAS Server:")
+    usage_rows = compute_utias_member_usage_rows()
+    headers = [
+        "Member",
+        f"{TRAIL_LOOKBACK_DAYS}D GPU HRS",
+        f"{TRAIL_LOOKBACK_DAYS}D GPU Util",
+        f"{TRAIL_LOOKBACK_DAYS}D Servers",
+        f"{TRAIL_LOOKBACK_DAYS}D DAYS USED",
+    ]
+    widths = [16, 12, 22, 30, 11]
+    body = [
+        [
+            str(r["member"]),
+            str(r["gpu_hours_display"]),
+            str(r["gpu_util_display"]),
+            str(r["servers"]),
+            str(r["days_used"]),
+        ]
+        for r in usage_rows
+    ]
+    if not body:
+        body = [["—", "0", "-", "-", "0"]]
+    for line in _box_table(headers, widths, body):
+        print(line)
+
+
 def print_bucket_table(
     rows: list[dict[str, object]],
     snapshots: dict[str, dict[str, object]],
@@ -2055,14 +2679,82 @@ def plot_series(
     _latest = latest_epoch(rows)
     _max_day = day_start(_latest) if _latest is not None else int(datetime.now().timestamp())
 
+    import math as _math
+    all_medians = [
+        float(row["daily_median"])
+        for key in top_keys
+        for row in series.get(key, [])
+        if row["daily_median"] is not None
+    ]
+    max_median = max(all_medians) if all_medians else 3600
+    cap_hours = min(max(1, _math.ceil(max_median / 3600)), 24)
+    cap = cap_hours * 3600
+
     plot_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, (ax_trend, ax_dist) = plt.subplots(
-        1,
+    fig, (ax_trend, ax_hours) = plt.subplots(
         2,
-        figsize=(18, 7),
-        sharey=True,
-        gridspec_kw={"width_ratios": [3, 1]},
+        1,
+        figsize=(14, 7.5),
+        sharex=True,
+        gridspec_kw={"height_ratios": [3, 2], "hspace": 0.08},
     )
+
+    def _plot_daily_gpu_hours_ax(ax: object) -> None:
+        colors = {"narval": "#1f77b4", "trillium": "#2ca02c", "killarney": "#d62728"}
+        cluster_labels = {"narval": "Narval", "trillium": "Trillium", "killarney": "Killarney"}
+
+        if not rows:
+            ax.text(
+                0.5,
+                0.5,
+                "no data",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                color="#9ca3af",
+                fontsize=13,
+            )
+            ax.axis("off")
+            return
+
+        earliest_day = day_start(min(int(r["submit_epoch"]) for r in rows))
+        max_day = day_start(max(int(r["submit_epoch"]) for r in rows))
+        plot_start = max(earliest_day, max_day - (window_days - 1) * SECONDS_PER_DAY)
+
+        gpu_hrs_by_cluster_day: dict[str, dict[int, float]] = {c: defaultdict(float) for c in colors}
+        for row in rows:
+            cluster = str(row["cluster"])
+            if cluster not in colors:
+                continue
+            run_secs = int(row.get("run_seconds") or 0)
+            gpus = int(row.get("gpus") or 0)
+            if run_secs > 0 and gpus > 0:
+                gpu_hrs_by_cluster_day[cluster][day_start(int(row["submit_epoch"]))] += gpus * run_secs / 3600
+
+        for cluster in DEFAULT_CLUSTERS:
+            if cluster not in colors:
+                continue
+            data = gpu_hrs_by_cluster_day[cluster]
+            days, gpu_hrs = [], []
+            d = plot_start
+            while d <= max_day:
+                days.append(day_label(d))
+                gpu_hrs.append(data.get(d, 0.0))
+                d += SECONDS_PER_DAY
+            ax.plot(days, gpu_hrs, color=colors[cluster], linewidth=2.0, marker="o", markersize=4,
+                    label=cluster_labels[cluster])
+
+        ax.set_ylabel("GPU hours", fontsize=15)
+        ax.set_ylim(bottom=0)
+        ax.tick_params(axis="both", labelsize=14)
+        ax.grid(True, linewidth=0.5, alpha=0.35)
+        ax.legend(fontsize=13, loc="upper right")
+        ax.set_xlim(
+            day_label(max_day - (window_days - 1) * SECONDS_PER_DAY),
+            day_label(max_day + SECONDS_PER_DAY),
+        )
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ax.xaxis.get_major_locator()))
 
     if not top_keys:
         ax_trend.text(
@@ -2076,206 +2768,204 @@ def plot_series(
             fontsize=13,
         )
         ax_trend.axis("off")
-        ax_dist.axis("off")
-        fig.tight_layout()
-        fig.savefig(plot_path, dpi=160)
-        plt.close(fig)
-        return
+    else:
+        cmap = plt.get_cmap("tab10")
 
-    import math as _math
-    all_medians = [
-        float(row["daily_median"])
-        for key in top_keys
-        for row in series.get(key, [])
-        if row["daily_median"] is not None
-    ]
-    max_median = max(all_medians) if all_medians else 3600
-    cap_hours = min(max(1, _math.ceil(max_median / 3600)), 12)
-    cap = cap_hours * 3600
-    cmap = plt.get_cmap("tab10")
+        for idx, key in enumerate(top_keys):
+            cluster, gpus, bucket = key
+            cluster_series = series.get(key, [])
+            if not cluster_series:
+                continue
+            days = [day_label(int(row["day"])) for row in cluster_series]
+            daily_median = _to_floats([row["daily_median"] for row in cluster_series])
+            daily_low = _to_floats([row["daily_low"] for row in cluster_series])
+            daily_high = _to_floats([row["daily_high"] for row in cluster_series])
+            color = cmap(idx % 10)
+            display_name = _bucket_label(cluster, gpus, bucket)
+            sample_count = len(bucket_values.get(key, []))
 
-    for idx, key in enumerate(top_keys):
-        cluster, gpus, bucket = key
-        cluster_series = series.get(key, [])
-        if not cluster_series:
-            continue
-        days = [day_label(int(row["day"])) for row in cluster_series]
-        daily_median = _to_floats([row["daily_median"] for row in cluster_series])
-        daily_low = _to_floats([row["daily_low"] for row in cluster_series])
-        daily_high = _to_floats([row["daily_high"] for row in cluster_series])
-        color = cmap(idx % 10)
-        display_name = _bucket_label(cluster, gpus, bucket)
-        sample_count = len(bucket_values.get(key, []))
+            # Drop days with no data so the line connects across gaps instead of breaking.
+            valid = [i for i, v in enumerate(daily_median) if not np.isnan(v)]
+            vdays = [days[i] for i in valid]
+            vmedian = [daily_median[i] for i in valid]
+            vlow = [daily_low[i] if not np.isnan(daily_low[i]) else daily_median[i] for i in valid]
+            vhigh = [daily_high[i] if not np.isnan(daily_high[i]) else daily_median[i] for i in valid]
 
-        # Drop days with no data so the line connects across gaps instead of breaking.
-        valid = [i for i, v in enumerate(daily_median) if not np.isnan(v)]
-        vdays = [days[i] for i in valid]
-        vmedian = [daily_median[i] for i in valid]
-        vlow = [daily_low[i] if not np.isnan(daily_low[i]) else daily_median[i] for i in valid]
-        vhigh = [daily_high[i] if not np.isnan(daily_high[i]) else daily_median[i] for i in valid]
+            ax_trend.fill_between(
+                vdays,
+                vlow,
+                vhigh,
+                color=color,
+                alpha=0.18,
+                linewidth=0,
+                label="_nolegend_",
+            )
+            ax_trend.plot(
+                vdays,
+                vmedian,
+                color=color,
+                linewidth=2.0,
+                marker="o",
+                markersize=4,
+                label=f"{display_name} (n={sample_count})",
+            )
 
-        ax_trend.fill_between(
-            vdays,
-            vlow,
-            vhigh,
-            color=color,
-            alpha=0.18,
-            linewidth=0,
-            label="_nolegend_",
-        )
-        ax_trend.plot(
-            vdays,
-            vmedian,
-            color=color,
-            linewidth=2.0,
-            marker="o",
-            markersize=4,
-            label=f"{display_name} (n={sample_count})",
-        )
+        ax_trend.set_ylabel("Queue Time (hrs) - Median & IQR", fontsize=15)
+        ax_trend.set_ylim(0, cap)
+        ax_trend.yaxis.set_major_locator(mticker.MultipleLocator(3600))
+        ax_trend.yaxis.set_major_formatter(lambda value, _: f"{int(round(value / 3600))}")
+        ax_trend.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
+        ax_trend.tick_params(axis="both", labelsize=14)
+        ax_trend.grid(True, linewidth=0.5, alpha=0.35)
 
-    ax_trend.set_title("")
-    ax_trend.set_xlabel("Day", fontsize=15)
-    ax_trend.set_ylabel("Queue time (hours)", fontsize=15)
-    ax_trend.set_ylim(0, cap)
-    ax_trend.yaxis.set_major_locator(mticker.MultipleLocator(3600))
-    ax_trend.yaxis.set_major_formatter(lambda value, _: f"{int(round(value / 3600))}")
-    ax_trend.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax_trend.xaxis.set_major_formatter(
-        mdates.ConciseDateFormatter(ax_trend.xaxis.get_major_locator())
-    )
-    ax_trend.tick_params(axis="both", labelsize=14)
-    ax_trend.grid(True, linewidth=0.5, alpha=0.35)
-    ax_trend.set_xlim(
-        day_label(_max_day - (window_days - 1) * SECONDS_PER_DAY),
-        day_label(_max_day + SECONDS_PER_DAY),
-    )
-    handles, labels = ax_trend.get_legend_handles_labels()
-    handle_for_label = dict(zip(labels, handles))
-    ordered: list[tuple[object, str]] = []
-    for key in top_keys:
-        cluster, gpus, bucket = key
-        line_label = f"{_bucket_label(cluster, gpus, bucket)} (n={len(bucket_values.get(key, []))})"
-        if line_label in handle_for_label:
-            ordered.append((handle_for_label[line_label], line_label))
-    ax_trend.legend(
-        [h for h, _ in ordered],
-        [l for _, l in ordered],
-        ncol=2,
-        fontsize=13,
-        loc="upper right",
-    )
-
-    bin_edges = np.linspace(0, cap, 21)
-    for idx, key in enumerate(top_keys):
-        cluster, gpus, bucket = key
-        values = bucket_values.get(key, [])
-        if not values:
-            continue
-        over = sum(1 for v in values if v > cap)
-        color = cmap(idx % 10)
-        label = _bucket_label(cluster, gpus, bucket)
-        if over:
-            label += f" (>{cap_hours}h: {over})"
-        ax_dist.hist(
-            values,
-            bins=bin_edges,
-            orientation="horizontal",
-            color=color,
-            alpha=0.35,
-            edgecolor=color,
-            linewidth=1.5,
-            density=True,
-            histtype="stepfilled",
-            label=label,
+        handles, labels = ax_trend.get_legend_handles_labels()
+        handle_for_label = dict(zip(labels, handles))
+        ordered: list[tuple[object, str]] = []
+        for key in top_keys:
+            cluster, gpus, bucket = key
+            line_label = f"{_bucket_label(cluster, gpus, bucket)} (n={len(bucket_values.get(key, []))})"
+            if line_label in handle_for_label:
+                ordered.append((handle_for_label[line_label], line_label))
+        ax_trend.legend(
+            [h for h, _ in ordered],
+            [l for _, l in ordered],
+            ncol=2,
+            fontsize=13,
+            loc="upper right",
         )
 
-    ax_dist.set_title("")
-    ax_dist.set_xlabel("Density", fontsize=15)
-    ax_dist.tick_params(axis="both", labelsize=14)
-    ax_dist.grid(True, linewidth=0.5, alpha=0.35)
-    ax_dist.legend(fontsize=11, loc="upper right")
+    _plot_daily_gpu_hours_ax(ax_hours)
+    ax_hours.set_xlabel("Day", fontsize=15)
 
     fig.tight_layout()
     fig.savefig(plot_path, dpi=160)
     plt.close(fig)
 
 
-def plot_daily_gpu_hours(
-    rows: list[dict[str, object]],
-    window_days: int,
+def plot_cluster_location_map(
+    clusters: tuple[str, ...] = MAP_CLUSTERS,
 ) -> bytes:
-    """PNG: daily GPU hours consumed per cluster (all buckets, all GPU counts)."""
+    """PNG Plate Carree lon/lat map of Canada cluster locations."""
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
     import io as _io
     import matplotlib
     matplotlib.use("Agg")
-    import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
 
-    colors = {"narval": "#1f77b4", "trillium": "#2ca02c", "killarney": "#d62728"}
-    cluster_labels = {"narval": "Narval", "trillium": "Trillium", "killarney": "Killarney"}
+    # Coarse southern Canada outline in Plate Carree lon/lat coordinates.
+    canada_outline = [
+        (-141.0, 65.0), (-138.0, 62.0), (-134.5, 58.5), (-130.5, 54.0),
+        (-127.8, 50.3), (-124.8, 48.3), (-123.2, 49.0), (-110.0, 49.0),
+        (-95.2, 49.0), (-88.5, 48.0), (-84.8, 46.5), (-82.5, 42.0),
+        (-79.2, 43.0), (-75.3, 44.8), (-71.4, 45.0), (-67.8, 47.1),
+        (-62.8, 45.9), (-57.5, 48.0), (-54.0, 52.0), (-58.0, 56.5),
+        (-64.0, 60.5), (-72.0, 64.0), (-76.0, 65.0), (-141.0, 65.0),
+    ]
+    province_borders = [
+        [(-120.0, 49.0), (-120.0, 57.0)],  # BC / AB
+        [(-110.0, 49.0), (-110.0, 57.0)],  # AB / SK
+        [(-102.0, 49.0), (-102.0, 57.0)],  # SK / MB
+        [(-95.2, 49.0), (-95.1, 52.8), (-94.8, 56.0), (-94.0, 57.0)],  # MB / ON
+        [(-74.7303, 45.0213), (-75.7003, 45.4201), (-79.4663, 46.3168),
+         (-79.4663, 57.0)],  # ON / QC
+        [(-71.5, 45.0), (-70.8, 47.0), (-70.5, 57.0)],  # QC / NB
+    ]
+    offsets = [
+        (0.0, 0.0), (0.55, 0.32), (-0.55, 0.32), (0.55, -0.32),
+        (-0.55, -0.32), (0.0, 0.65), (0.0, -0.65),
+    ]
+    map_label_override = {
+        "killarney": "Killarney",
+        "killarney_h100": "Killarney",
+        "utias": "TRAIL",
+    }
+    map_color_override = {
+        "narval": "#f97316",
+    }
+    label_offsets = {
+        "nibi": (-0.25, 0.22, "right", "bottom"),
+        "trillium": (0.25, -0.28, "center", "top"),
+        "killarney": (0.25, 0.10, "left", "bottom"),
+        "rorqual": (-0.25, 0.22, "right", "bottom"),
+        "narval": (0.0, -0.28, "center", "top"),
+        "tamia": (0.25, 0.22, "left", "bottom"),
+        "utias": (0.0, 0.32, "center", "bottom"),
+    }
+    marker_y_offsets = {
+        "narval": -0.18,
+        "trillium": -0.18,
+        "killarney": -0.18,
+    }
+    fig, ax = plt.subplots(figsize=(13, 6.7))
+    ix, iy = zip(*canada_outline)
+    ax.fill(ix, iy, facecolor="#f8fafc", edgecolor="#334155", linewidth=1.4, zorder=0)
+    for border in province_borders:
+        bx, by = zip(*border)
+        ax.plot(bx, by, color="#94a3b8", linewidth=0.9, linestyle="-", zorder=1)
 
-    if not rows:
-        fig, ax = plt.subplots(figsize=(14, 4))
-        ax.text(0.5, 0.5, "no data", ha="center", va="center",
-                transform=ax.transAxes, color="#9ca3af", fontsize=13)
-        buf = _io.BytesIO()
-        fig.savefig(buf, dpi=160, format="png", bbox_inches="tight")
-        plt.close(fig)
-        buf.seek(0)
-        return buf.read()
-
-    earliest_day = day_start(min(int(r["submit_epoch"]) for r in rows))
-    max_day = day_start(max(int(r["submit_epoch"]) for r in rows))
-    plot_start = max(earliest_day, max_day - (window_days - 1) * SECONDS_PER_DAY)
-
-    gpu_hrs_by_cluster_day: dict[str, dict[int, float]] = {c: defaultdict(float) for c in colors}
-    for row in rows:
-        cluster = str(row["cluster"])
-        if cluster not in colors:
+    plotted_by_site: dict[tuple[float, float], int] = defaultdict(int)
+    plotted_labels: set[str] = set()
+    for cluster in clusters:
+        geo = CLUSTER_GEO.get(cluster)
+        if not geo:
             continue
-        run_secs = int(row.get("run_seconds") or 0)
-        gpus = int(row.get("gpus") or 0)
-        if run_secs > 0 and gpus > 0:
-            gpu_hrs_by_cluster_day[cluster][day_start(int(row["submit_epoch"]))] += gpus * run_secs / 3600
-
-    fig, ax = plt.subplots(figsize=(14, 5))
-    for cluster in DEFAULT_CLUSTERS:
-        if cluster not in colors:
+        label = map_label_override.get(cluster, _CLUSTER_ABBR.get(cluster, cluster))
+        if label in plotted_labels:
             continue
-        data = gpu_hrs_by_cluster_day[cluster]
-        days, gpu_hrs = [], []
-        d = plot_start
-        while d <= max_day:
-            days.append(day_label(d))
-            gpu_hrs.append(data.get(d, 0.0))
-            d += SECONDS_PER_DAY
-        ax.plot(days, gpu_hrs, color=colors[cluster], linewidth=2.0, marker="o", markersize=4,
-                label=cluster_labels[cluster])
-
-    ax.set_xlabel("Day", fontsize=15)
-    ax.set_ylabel("GPU hours", fontsize=15)
-    ax.set_ylim(bottom=0)
-    ax.set_xlim(
-        day_label(max_day - (window_days - 1) * SECONDS_PER_DAY),
-        day_label(max_day + SECONDS_PER_DAY),
+        plotted_labels.add(label)
+        lon = float(geo["lon"])
+        lat = float(geo["lat"])
+        key = (round(lon, 1), round(lat, 1))
+        idx = plotted_by_site[key]
+        plotted_by_site[key] += 1
+        dx, dy = offsets[idx % len(offsets)]
+        color = map_color_override.get(cluster, _CLUSTER_COLOR.get(cluster, "#111827"))
+        x, y = lon + dx, lat + dy + marker_y_offsets.get(cluster, 0.0)
+        ax.scatter(
+            x, y, s=95, color=color, edgecolor="white", linewidth=1.5,
+            zorder=3, clip_on=True,
+        )
+        tx, ty, ha, va = label_offsets.get(cluster, (0.45, 0.12, "left", "center"))
+        ax.text(
+            x + tx,
+            y + ty,
+            label,
+            ha=ha,
+            va=va,
+            fontsize=10,
+            fontweight="bold",
+            color=color,
+            zorder=4,
+            clip_on=True,
+        )
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xticks([-120, -110, -100, -90, -80, -70])
+    ax.set_yticks([45, 50, 55])
+    ax.set_xlim(-129.67, -61.06)
+    ax.set_ylim(42, 55)
+    ax.grid(False)
+    ax.tick_params(
+        axis="both",
+        which="both",
+        length=0,
+        labelbottom=False,
+        labelleft=False,
     )
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ax.xaxis.get_major_locator()))
-    ax.tick_params(axis="both", labelsize=14)
-    ax.grid(True, linewidth=0.5, alpha=0.35)
-    ax.legend(fontsize=13, loc="upper right")
+    for side in ("top", "right", "bottom", "left"):
+        ax.spines[side].set_visible(False)
+    ax.set_facecolor("#e0f2fe")
+    fig.patch.set_facecolor("white")
 
     fig.tight_layout()
     buf = _io.BytesIO()
-    fig.savefig(buf, dpi=160, format="png", bbox_inches="tight")
+    fig.savefig(buf, dpi=150, format="png", bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     return buf.read()
 
 
-_CLUSTER_ABBR = {"narval": "Narval", "trillium": "Trillium", "killarney": "Killarney-L40S", "killarney_h100": "Killarney-H100", "fir": "Fir", "rorqual": "Rorqual", "tamia": "TamIA", "dgx": "DGX", "apollo": "Apollo", "turing": "Turing", "lovelace": "Lovelace", "ums": "UMS", "um1": "UM1", "um2": "UM2", "um3": "UM3"}
-_CLUSTER_COLOR = {"narval": "#1f77b4", "trillium": "#2ca02c", "killarney": "#d62728", "killarney_h100": "#ff7f0e", "fir": "#9467bd", "rorqual": "#17becf", "tamia": "#8c564b"}
+_CLUSTER_ABBR = {"narval": "Narval", "trillium": "Trillium", "killarney": "Killarney-L40S", "killarney_h100": "Killarney-H100", "fir": "Fir", "rorqual": "Rorqual", "tamia": "TamIA", "vulcan": "Vulcan", "nibi": "Nibi", "utias": "UTIAS", "dgx": "DGX", "apollo": "Apollo", "turing": "Turing", "lovelace": "Lovelace", "ums": "UMS", "um1": "UM1", "um2": "UM2", "um3": "UM3"}
+_CLUSTER_COLOR = {"narval": "#2563eb", "trillium": "#2ca02c", "killarney": "#d62728", "killarney_h100": "#ff7f0e", "fir": "#9467bd", "rorqual": "#17becf", "tamia": "#8c564b", "vulcan": "#eab308", "nibi": "#ec4899", "utias": "#475569"}
 
 
 def _fmt_queue(seconds: float | None) -> str:
@@ -2960,9 +3650,91 @@ def write_html(
         OTHER_SUMMARY_CLUSTERS,
         include_location=True,
         location_last=True,
-        include_levelfs=False,
         include_users=False,
     )
+    def _member_usage_table_html(clusters: tuple[str, ...]) -> str:
+        usage_rows = compute_member_usage_rows(rows, clusters)
+        html_rows = []
+        for r in usage_rows:
+            html_rows.append(
+                "        <tr>"
+                f'<td class="cluster">{html.escape(str(r["member"]))}</td>'
+                f'<td>{html.escape(str(r["gpu_hours_display"]))}</td>'
+                f'<td>{html.escape(str(r["gpuutil_display"]))}</td>'
+                f'<td>{html.escape(str(r["low_activity_display"]))}</td>'
+                f'<td>{html.escape(str(r["clusters"]))}</td>'
+                f'<td>{html.escape(str(r["cpu_ratio"]))}</td>'
+                f'<td>{html.escape(str(r["mem_ratio"]))}</td>'
+                "</tr>"
+            )
+        return "\n".join(html_rows) if html_rows else (
+            '        <tr><td colspan="7" class="muted">No member usage in this window.</td></tr>'
+        )
+
+    allocated_member_usage_table_html = _member_usage_table_html(
+        MEMBER_ALLOCATED_USAGE_CLUSTERS
+    )
+    other_member_usage_table_html = _member_usage_table_html(
+        MEMBER_OTHER_USAGE_CLUSTERS
+    )
+
+    utias_member_usage_rows = compute_utias_member_usage_rows()
+    utias_member_usage_html_rows = []
+    for r in utias_member_usage_rows:
+        utias_member_usage_html_rows.append(
+            "        <tr>"
+            f'<td class="cluster">{html.escape(str(r["member"]))}</td>'
+            f'<td>{html.escape(str(r["gpu_hours_display"]))}</td>'
+            f'<td>{html.escape(str(r["gpu_util_display"]))}</td>'
+            f'<td>{html.escape(str(r["servers"]))}</td>'
+            f'<td>{html.escape(str(r["days_used"]))}</td>'
+            "</tr>"
+        )
+    utias_member_usage_table_html = (
+        "\n".join(utias_member_usage_html_rows)
+        if utias_member_usage_html_rows
+        else '        <tr><td colspan="5" class="muted">No UTIAS member usage in this window.</td></tr>'
+    )
+
+    def _cluster_list_text(clusters: tuple[str, ...]) -> str:
+        subtitle_abbr = {**_CLUSTER_ABBR, "killarney": "Killarney", "killarney_h100": "Killarney"}
+        labels: list[str] = []
+        for c in clusters:
+            label = subtitle_abbr.get(c, c)
+            if label not in labels:
+                labels.append(label)
+        return ", ".join(labels)
+
+    def _gpu_util_cluster_list_text(clusters: tuple[str, ...]) -> str:
+        util_clusters = tuple(c for c in clusters if c in GPU_UTIL_USAGE_CLUSTERS)
+        return _cluster_list_text(util_clusters) if util_clusters else "none"
+
+    allocated_member_usage_subtitle = (
+        f"{_cluster_list_text(MEMBER_ALLOCATED_USAGE_CLUSTERS)} - "
+        f"GPU util only on {_gpu_util_cluster_list_text(MEMBER_ALLOCATED_USAGE_CLUSTERS)} - "
+        "Inactive = cpus/gpu<1 & mem<10GB"
+    )
+    other_member_usage_subtitle = (
+        f"{_cluster_list_text(MEMBER_OTHER_USAGE_CLUSTERS)} - "
+        f"GPU util only on {_gpu_util_cluster_list_text(MEMBER_OTHER_USAGE_CLUSTERS)} - "
+        "Inactive = cpus/gpu<1 & mem<10GB"
+    )
+    utias_member_usage_subtitle = (
+        f"{_cluster_list_text(TRAIL_CLUSTERS)}"
+    )
+    utias_days_available = utias_history_available_days()
+    if utias_days_available is None:
+        utias_history_alert_html = (
+            '  <p class="usage-alert">⚠ No UTIAS member history is available yet; '
+            "this table will populate as new samples are collected.</p>"
+        )
+    elif utias_days_available < TRAIL_LOOKBACK_DAYS - 0.5:
+        utias_history_alert_html = (
+            '  <p class="usage-alert">⚠ Only showing data from '
+            f"{max(1, round(utias_days_available))} days temporarily due to recent tracking changes.</p>"
+        )
+    else:
+        utias_history_alert_html = ""
 
     trail_rows = compute_trail_snapshot_rows(snapshots)
     trail_html_rows: list[str] = []
@@ -3027,15 +3799,26 @@ def write_html(
         stale_banner_html = ""
 
     # --- inline PNG helper ---
-    def _img(png_bytes: bytes, alt: str) -> str:
+    def _png_data_url(png_bytes: bytes) -> str:
         b64 = base64.b64encode(png_bytes).decode("ascii")
-        return f'<img src="data:image/png;base64,{b64}" alt="{html.escape(alt)}">'
+        return f"data:image/png;base64,{b64}"
 
-    # --- trend plot ---
+    def _img(png_bytes: bytes, alt: str) -> str:
+        return f'<img src="{_png_data_url(png_bytes)}" alt="{html.escape(alt)}">'
+
+    # --- history plot ---
     if plot_path is not None and plot_path.exists():
-        trend_html = _img(plot_path.read_bytes(), "Daily median queue time per cluster")
+        trend_html = _img(plot_path.read_bytes(), "Historical trends and daily GPU hours")
     else:
-        trend_html = '<p class="muted">Trend plot not available.</p>'
+        trend_html = '<p class="muted">Historical trends plot not available.</p>'
+
+    # --- cluster locations ---
+    try:
+        cluster_map_style = (
+            f' style="--cluster-map-bg: url({_png_data_url(plot_cluster_location_map())});"'
+        )
+    except Exception:
+        cluster_map_style = ""
 
     # --- heatmaps / distribution (TRAIL members) ---
     now_epoch = int(datetime.now().timestamp())
@@ -3079,19 +3862,15 @@ def write_html(
     except Exception:
         trail_timeline_html = '<p class="muted">TRAIL utilisation timeline unavailable.</p>'
 
-    # --- daily job count ---
-    try:
-        job_count_html = _img(
-            plot_daily_gpu_hours(rows, window_days),
-            "Daily GPU hours",
-        )
-    except Exception:
-        job_count_html = '<p class="muted">Daily job count plot unavailable.</p>'
-
     # Optional inline TRAIL logo. Looks for env override first, otherwise a
     # `trail_logo.{svg,png}` next to the output HTML. SVGs are inlined as
     # markup; PNGs are base64-encoded.
     logo_html = ""
+    favicon_url = os.environ.get("QUEUE_TIME_FAVICON", TRAIL_FAVICON_URL)
+    favicon_html = (
+        f'<link rel="icon" type="image/png" href="{html.escape(favicon_url, quote=True)}">\n'
+        f'<link rel="shortcut icon" type="image/png" href="{html.escape(favicon_url, quote=True)}">'
+    )
     logo_env = os.environ.get("QUEUE_TIME_LOGO")
     candidates: list[Path] = []
     if logo_env:
@@ -3139,7 +3918,8 @@ def write_html(
 <meta charset="utf-8">
 <meta http-equiv="refresh" content="{refresh}">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TRAIL Cluster Status</title>
+{favicon_html}
+<title>TRAIL Compute Status Dashboard</title>
 <style>
   :root {{
     --bg: #fafafa;
@@ -3208,6 +3988,16 @@ def write_html(
   }}
   .ts {{ color: var(--muted); font-size: 0.85rem; margin-top: 1.25rem; }}
   .muted {{ color: var(--muted); }}
+  .usage-alert {{
+    margin: -0.15rem 0 0.65rem;
+    color: #92400e;
+    background: #fffbeb;
+    border: 1px solid #f59e0b;
+    border-left: 4px solid #b45309;
+    border-radius: 6px;
+    padding: 0.45rem 0.7rem;
+    font-size: 0.85rem;
+  }}
   .cohort-divider {{
     margin: 2.5rem 0 1.25rem;
     padding: 0.5rem 1rem;
@@ -3236,12 +4026,31 @@ def write_html(
   tr.stale td {{ background: #fffbeb; }}
   .stale-tag {{ color: #b45309; font-weight: 500; font-size: 0.82rem; }}
   .host-tag {{ color: #6b7280; font-size: 0.82rem; font-weight: 400; }}
-  .header {{ display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 0 0 1.5rem; }}
+  .header {{
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 1rem;
+    min-height: 260px;
+    margin: 0 0 1.5rem;
+    padding: 1.4rem 1.5rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background:
+      radial-gradient(ellipse at bottom left, rgba(255,255,255,0.96) 0%, rgba(255,255,255,0.78) 33%, rgba(255,255,255,0.18) 66%, rgba(255,255,255,0) 100%),
+      radial-gradient(ellipse at top right, rgba(255,255,255,0.92) 0%, rgba(255,255,255,0.64) 33%, rgba(255,255,255,0.16) 66%, rgba(255,255,255,0) 100%),
+      var(--cluster-map-bg, linear-gradient(135deg, #ffffff, #f3f4f6));
+    background-size: 58% 56%, 42% 42%, contain;
+    background-repeat: no-repeat;
+    background-position: bottom left, top right, center;
+    overflow: hidden;
+  }}
   .header h1 {{ margin: 0; }}
   .header .subtitle {{ margin: 0.15rem 0 0; }}
-  .header-text {{ display: flex; flex-direction: column; }}
+  .header-text {{ display: flex; flex-direction: column; align-self: flex-end; }}
   .logo {{
     flex: 0 0 auto;
+    align-self: flex-start;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -3284,18 +4093,57 @@ def write_html(
 </script>
 </head>
 <body>
-  <div class="header">
+  <div class="header"{cluster_map_style}>
     <div class="header-text">
-      <h1>TRAIL Cluster Status</h1>
+      <h1>TRAIL Compute Status Dashboard</h1>
       <p class="subtitle">{subtitle}</p>
     </div>
     {logo_html}
   </div>
 {stale_banner_html}
 
-  <div class="cohort-divider">All compute summary</div>
+  <div class="cohort-divider">Member Usage</div>
 
-  <h2 class="section">Allocated Clusters</h2>
+  <h2 class="section">Member Usage Allocated Cluster <span class="muted">- {html.escape(allocated_member_usage_subtitle)}</span></h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Member</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS</th><th>{TRAIL_LOOKBACK_DAYS}D GPU Util</th><th>{TRAIL_LOOKBACK_DAYS}D Inactive GPU Hrs</th><th>{TRAIL_LOOKBACK_DAYS}D CLUSTERS</th><th>{TRAIL_LOOKBACK_DAYS}D CPU Used/Req</th><th>{TRAIL_LOOKBACK_DAYS}D Mem Used/Req</th>
+      </tr>
+    </thead>
+    <tbody>
+{allocated_member_usage_table_html}
+    </tbody>
+  </table>
+
+  <h2 class="section">Member Usage Other Cluster <span class="muted">- {html.escape(other_member_usage_subtitle)}</span></h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Member</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS</th><th>{TRAIL_LOOKBACK_DAYS}D GPU Util</th><th>{TRAIL_LOOKBACK_DAYS}D Inactive GPU Hrs</th><th>{TRAIL_LOOKBACK_DAYS}D CLUSTERS</th><th>{TRAIL_LOOKBACK_DAYS}D CPU Used/Req</th><th>{TRAIL_LOOKBACK_DAYS}D Mem Used/Req</th>
+      </tr>
+    </thead>
+    <tbody>
+{other_member_usage_table_html}
+    </tbody>
+  </table>
+
+  <h2 class="section">Member Usage UTIAS Server <span class="muted">- {html.escape(utias_member_usage_subtitle)}</span></h2>
+{utias_history_alert_html}
+  <table>
+    <thead>
+      <tr>
+        <th>Member</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS</th><th>{TRAIL_LOOKBACK_DAYS}D GPU Util</th><th>{TRAIL_LOOKBACK_DAYS}D Servers</th><th>{TRAIL_LOOKBACK_DAYS}D DAYS USED</th>
+      </tr>
+    </thead>
+    <tbody>
+{utias_member_usage_table_html}
+    </tbody>
+  </table>
+
+  <div class="cohort-divider">Cluster Usage</div>
+
+  <h2 class="section">Allocated Cluster Usage</h2>
   <table>
     <thead>
       <tr>
@@ -3307,7 +4155,8 @@ def write_html(
     </tbody>
   </table>
 
-  <h2 class="section">UTIAS Servers</h2>
+  <h2 class="section">UTIAS Server Usage</h2>
+{utias_history_alert_html}
   <table>
     <thead>
       <tr>
@@ -3319,11 +4168,11 @@ def write_html(
     </tbody>
   </table>
 
-  <h2 class="section">Other Clusters</h2>
+  <h2 class="section">Other Cluster Usage</h2>
   <table>
     <thead>
       <tr>
-        <th>Cluster</th><th>Node Type</th><th>GPU NODES</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS</th><th>{TRAIL_LOOKBACK_DAYS}D QUEUE TIME</th><th>Location</th>
+        <th>Cluster</th><th>Node Type</th><th>GPU NODES</th><th>LEVELFS</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS</th><th>{TRAIL_LOOKBACK_DAYS}D QUEUE TIME</th><th>Location</th>
       </tr>
     </thead>
     <tbody>
@@ -3331,24 +4180,21 @@ def write_html(
     </tbody>
   </table>
 
-  <div class="cohort-divider">UTIAS SERVERS</div>
+  <div class="cohort-divider">UTIAS SERVERS historical data</div>
 
   <h2 class="section">GPU utilisation over time <span class="muted">· last {window_days} days, % of GPUs in use, sampled each refresh</span></h2>
   {trail_timeline_html}
 
-  <div class="cohort-divider">External clusters</div>
-
-  <h2 class="section">Current pending jobs <span class="muted">· all cluster users, live squeue</span></h2>
-  {heatmap_pending_html}
+  <div class="cohort-divider">External clusters historical data</div>
 
   <h2 class="section">Queue time, last observed vs 14d median <span class="muted">· external clusters · ↖ most recent job (or longest current pending) · ↘ median over last 14 days</span></h2>
   {heatmap_queue_html}
 
-  <h2 class="section">Historical queue time trend <span class="muted">· Daily median and IQR, 14 days, top 5 queue-time buckets</span></h2>
+  <h2 class="section">Historical Trends - 14d, queue times only shown for top 5 ...</h2>
   {trend_html}
 
-  <h2 class="section">Daily GPU hours <span class="muted">· TRAIL members, all GPU counts, last {window_days} days</span></h2>
-  {job_count_html}
+  <div class="cohort-divider">External clusters live data</div>
+  {heatmap_pending_html}
 
   <p class="ts">Last updated {html.escape(timestamp)}</p>
 </body>
@@ -3543,6 +4389,20 @@ def run_report(args: argparse.Namespace) -> int:
     print()
     print("UTIAS servers:")
     print_trail_snapshot(snapshots)
+    print()
+    print_member_usage(
+        "Member Usage Allocated Cluster:",
+        rows,
+        MEMBER_ALLOCATED_USAGE_CLUSTERS,
+    )
+    print()
+    print_member_usage(
+        "Member Usage Other Cluster:",
+        rows,
+        MEMBER_OTHER_USAGE_CLUSTERS,
+    )
+    print()
+    print_utias_member_usage()
     for gpus in GPU_GROUPS:
         print_bucket_table(rows, snapshots, gpus)
 
