@@ -49,11 +49,13 @@ workflow = [("train", 1)]
 fp16 = dict(loss_scale=32.0)
 input_shape = (704, 256)
 
-# with_cp=True + multi-use parameters (e.g. plan_anchor_encoder invoked at
-# init and inside every refine stage) hits DDP "marked ready twice" under
-# default settings. Diag confirms 0 unused params, so static_graph is safe
-# and is PyTorch's documented fix for this class of error.
-static_graph = True
+# No find_unused_parameters / static_graph: diag confirms 0 unused params,
+# and the working `_planneronly_skeleton` config (same multi-use pattern,
+# same with_cp=True backbone) trains under DDP defaults. The "marked ready
+# twice" crash on the original config came from setting
+# find_unused_parameters=True with with_cp=True multi-use params, which was
+# unnecessary in the first place. Verified by debug variant K3457303
+# (with_cp=False + find_unused=True).
 
 
 # ================== model ========================
