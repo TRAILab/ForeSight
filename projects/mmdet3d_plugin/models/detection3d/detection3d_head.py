@@ -60,6 +60,7 @@ class Sparse4DHead(BaseModule):
         temporal_warmup_order: Optional[List[str]] = None,
         warmup_refine_layer: dict = None,
         warmup_ffn: dict = None,
+        warmup_temp_graph_model: dict = None,
         warmup_supervise_all: bool = False,
         init_cfg: dict = None,
         **kwargs,
@@ -136,6 +137,10 @@ class Sparse4DHead(BaseModule):
             warmup_op_config_map["refine"] = [warmup_refine_layer, PLUGIN_LAYERS]
         if warmup_ffn is not None:
             warmup_op_config_map["ffn"] = [warmup_ffn, FEEDFORWARD_NETWORK]
+        # Dedicated temporal CA module for the warmup (TPD) — kept separate
+        # from the main decoder's `temp_graph_model` so weights don't tie.
+        if warmup_temp_graph_model is not None:
+            warmup_op_config_map["temp_gnn"] = [warmup_temp_graph_model, ATTENTION]
         self.warmup_layers = nn.ModuleList(
             [
                 build(*warmup_op_config_map.get(op, [None, None]))
@@ -155,7 +160,9 @@ class Sparse4DHead(BaseModule):
             self.fc_after = nn.Identity()
         # Dedicated fc projections for warmup GNN — must NOT share with fc_before/fc_after
         # because gradient checkpointing would fire DDP hooks twice for shared params.
-        has_warmup_gnn = any(op == "gnn" for op in self.temporal_warmup_order)
+        has_warmup_gnn = any(
+            op in ("gnn", "temp_gnn") for op in self.temporal_warmup_order
+        )
         if has_warmup_gnn and self.decouple_attn:
             self.warmup_fc_before = nn.Linear(
                 self.embed_dims, self.embed_dims * 2, bias=False
@@ -202,6 +209,29 @@ class Sparse4DHead(BaseModule):
         else:
             v = self.warmup_fc_before(feat)
             return self.warmup_fc_after(layer(feat, feat, v, query_pos=anchor_embed))
+
+    def _temp_gnn_with_layer(
+        self, layer, q_feat, q_anchor_embed, kv_feat, kv_anchor_embed,
+    ):
+        """Cross-attention from temporal queries (Q) to a separate K/V tensor.
+        Used by the temporal warmup (TPD) block where Q is the cached temporal
+        det features and K/V is the cached previous-frame motion-aggregated
+        feature, positionally indexed by predicted endpoints.
+        Uses warmup_fc_before/after (not shared with main decoder fc projections)."""
+        if self.decouple_attn:
+            q = torch.cat([q_feat, q_anchor_embed], dim=-1)
+            k = torch.cat([kv_feat, kv_anchor_embed], dim=-1)
+            v = self.warmup_fc_before(kv_feat)
+            return self.warmup_fc_after(layer(q, k, v))
+        else:
+            v = self.warmup_fc_before(kv_feat)
+            return self.warmup_fc_after(
+                layer(
+                    q_feat, kv_feat, v,
+                    query_pos=q_anchor_embed,
+                    key_pos=kv_anchor_embed,
+                )
+            )
 
     def graph_model(
         self,
@@ -340,6 +370,15 @@ class Sparse4DHead(BaseModule):
                 w_anchor = anchor[:, :num_ti]
                 w_anchor_embed = anchor_embed[:, :num_ti]
                 is_temporal = False
+            # TPD K/V: previous-frame motion-aggregated agent features +
+            # predicted top-1 endpoint, aligned to the same agents as the
+            # cached det subset. None until at least one cache_motion() call.
+            cached_motion_feature = getattr(
+                self.instance_bank, 'cached_motion_feature', None
+            )
+            cached_motion_endpoint = getattr(
+                self.instance_bank, 'cached_motion_endpoint', None
+            )
             w_cls, w_qt, w_vis, w_rel = None, None, None, None
             for i, op in enumerate(self.temporal_warmup_order):
                 if self.warmup_layers[i] is None:
@@ -347,6 +386,25 @@ class Sparse4DHead(BaseModule):
                 if op == "gnn":
                     w_feat = self._gnn_with_layer(
                         self.warmup_layers[i], w_feat, w_anchor_embed
+                    )
+                elif op == "temp_gnn":
+                    # Cross-attend cached temporal queries (Q) to the previous
+                    # frame's motion-aggregated K/V, positionally indexed by the
+                    # predicted top-1 endpoint. No-op on first frame or before
+                    # any motion cache exists — params still receive grad through
+                    # the closing `refine` op via w_feat.
+                    if cached_motion_feature is None or not is_temporal:
+                        continue
+                    kv_anchor = self.instance_bank.cached_anchor.clone()
+                    if cached_motion_endpoint is not None:
+                        kv_anchor[..., :2] = cached_motion_endpoint
+                    kv_anchor_embed = self.anchor_encoder(kv_anchor)
+                    w_feat = self._temp_gnn_with_layer(
+                        self.warmup_layers[i],
+                        w_feat,
+                        w_anchor_embed,
+                        cached_motion_feature,
+                        kv_anchor_embed,
                     )
                 elif op in ("norm", "ffn"):
                     w_feat = self.warmup_layers[i](w_feat)

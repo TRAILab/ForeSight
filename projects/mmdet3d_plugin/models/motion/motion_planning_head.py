@@ -2485,11 +2485,38 @@ class MotionPlanningHead(BaseModule):
         # for the next forward.
         self._cache_planning_temporal(feature_maps, metas)
 
+        # Per-agent motion feature + top-1 endpoint, exposed so the det head's
+        # InstanceBank can cache them across frames for the temporal-prior
+        # decoder (TPD) to cross-attend on the next frame.
+        if motion_classification and motion_prediction and not self.ego_only_planning and num_anchor > 0:
+            mw = motion_classification[-1].detach().softmax(dim=-1)  # (B, N, M)
+            motion_feature_agg = (
+                motion_mode_query * mw.unsqueeze(-1)
+            ).sum(dim=2)  # (B, N, D)
+            traj_cum = motion_prediction[-1].detach().cumsum(dim=-2)  # (B, N, M, T, 2)
+            if self.motion_target_in_agent_frame:
+                traj_cum = self._agent2lidar(traj_cum, det_anchors)
+            top1 = motion_classification[-1].detach().argmax(dim=-1)  # (B, N)
+            B_, N_, M_, T_, _ = traj_cum.shape
+            idx = top1.view(B_, N_, 1, 1, 1).expand(-1, -1, 1, T_, 2)
+            motion_endpoint = traj_cum.gather(2, idx).squeeze(2)[..., -1, :]
+            # motion_endpoint stores the predicted future XY relative to current
+            # agent position (lidar-frame orientation); add to det anchor center
+            # to land in absolute lidar frame.
+            motion_endpoint = (
+                motion_endpoint + det_anchors[..., :2]
+            )
+        else:
+            motion_feature_agg = None
+            motion_endpoint = None
+
         motion_output = {
             "classification": motion_classification,
             "prediction": motion_prediction,
             "period": self.instance_queue.period,
             "anchor_queue": self.instance_queue.anchor_queue,
+            "motion_feature": motion_feature_agg,
+            "motion_endpoint": motion_endpoint,
         }
         planning_output = {
             "classification": planning_classification,

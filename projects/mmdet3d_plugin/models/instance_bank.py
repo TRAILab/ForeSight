@@ -74,12 +74,15 @@ class InstanceBank(nn.Module):
     def reset(self):
         self.cached_feature = None
         self.cached_anchor = None
+        self.cached_motion_feature = None
+        self.cached_motion_endpoint = None
         self.metas = None
         self.mask = None
         self.confidence = None
         self.temp_confidence = None
         self.instance_id = None
         self.prev_id = 0
+        self._last_topk_indices = None
 
     def get(self, batch_size, metas=None, dn_metas=None):
         instance_feature = torch.tile(
@@ -226,6 +229,50 @@ class InstanceBank(nn.Module):
             self.confidence,
             (self.cached_feature, self.cached_anchor),
         ) = topk(confidence, self.num_temp_instances, instance_feature, anchor)
+        # Save the indices used for the cache so cache_motion() can apply the
+        # same selection to motion features and keep them aligned per-agent.
+        bs, N = confidence.shape[:2]
+        _, idx = torch.topk(confidence, self.num_temp_instances, dim=1)
+        self._last_topk_indices = idx
+        # New motion cache slots get cleared until cache_motion() fills them
+        # (called by SparseDriveHead after the motion head completes).
+        self.cached_motion_feature = None
+        self.cached_motion_endpoint = None
+
+    def cache_motion(self, motion_feature=None, motion_endpoint=None):
+        """Cache the per-agent motion feature + predicted endpoint, aligned to
+        the same top-k slots that `cache()` selected for det.
+
+        motion_feature: (bs, num_anchor, D) or None  — mode-aggregated agent feat
+        motion_endpoint: (bs, num_anchor, 2) or None — top-1 predicted XY (lidar)
+        """
+        if (
+            motion_feature is None
+            and motion_endpoint is None
+        ):
+            return
+        if self._last_topk_indices is None:
+            return
+        idx = self._last_topk_indices  # (bs, num_temp_instances)
+        bs, k = idx.shape
+        if motion_feature is not None:
+            mf = motion_feature.detach()
+            N = mf.shape[1]
+            flat_idx = (
+                idx + torch.arange(bs, device=idx.device)[:, None] * N
+            ).reshape(-1)
+            self.cached_motion_feature = (
+                mf.flatten(0, 1)[flat_idx].reshape(bs, k, -1)
+            )
+        if motion_endpoint is not None:
+            me = motion_endpoint.detach()
+            N = me.shape[1]
+            flat_idx = (
+                idx + torch.arange(bs, device=idx.device)[:, None] * N
+            ).reshape(-1)
+            self.cached_motion_endpoint = (
+                me.flatten(0, 1)[flat_idx].reshape(bs, k, -1)
+            )
 
     def get_instance_id(self, confidence, anchor=None, threshold=None):
         confidence = confidence.max(dim=-1).values.sigmoid()

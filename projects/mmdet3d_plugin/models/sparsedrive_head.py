@@ -63,14 +63,22 @@ class SparseDriveHead(BaseModule):
         
         if self.task_config['with_motion_plan']:
             motion_output, planning_output = self.motion_plan_head(
-                det_output, 
-                map_output, 
+                det_output,
+                map_output,
                 feature_maps,
                 metas,
                 self.det_head.anchor_encoder,
                 self.det_head.instance_bank.mask,
                 self.det_head.instance_bank.anchor_handler,
             )
+            # Cache mode-aggregated motion feature + predicted endpoint into
+            # the det InstanceBank so the next frame's TPD can cross-attend
+            # to forward-looking context (not just last-frame det state).
+            if motion_output is not None and self.task_config.get('with_det', True):
+                self.det_head.instance_bank.cache_motion(
+                    motion_output.get('motion_feature'),
+                    motion_output.get('motion_endpoint'),
+                )
         else:
             motion_output, planning_output = None, None
 
