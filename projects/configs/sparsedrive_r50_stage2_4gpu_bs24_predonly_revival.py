@@ -268,7 +268,7 @@ model = dict(
                 loss_yawness=dict(type="GaussianFocalLoss"),
                 cls_allow_reverse=[class_names.index("barrier")],
             ),
-            decoder=dict(type="SparseBox3DDecoder"),
+            decoder=dict(type="SparseBox3DDecoder", num_output=200),
             reg_weights=[2.0] * 3 + [1.0] * 7,
         ),
         map_head=dict(
