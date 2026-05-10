@@ -62,6 +62,17 @@ class Sparse4DHead(BaseModule):
         warmup_ffn: dict = None,
         warmup_temp_graph_model: dict = None,
         warmup_supervise_all: bool = False,
+        # ---- TPD post-main fusion: combines TPD warmup output with main
+        # decoder's last refine. fusion_strategy in {None, 'gated_blend',
+        # 'concat_fuse', 'pred_ensemble'}. Fused (anchor, cls, qt, vis, rel)
+        # is appended to the prediction lists, becoming the [-1] entry that
+        # motion/plan reads. fusion_order applies only to the two learnable
+        # strategies; pred_ensemble uses no modules. ----
+        fusion_strategy: Optional[str] = None,
+        fusion_order: Optional[List[str]] = None,
+        fusion_temp_graph_model: dict = None,
+        fusion_ffn: dict = None,
+        fusion_refine_layer: dict = None,
         init_cfg: dict = None,
         **kwargs,
     ):
@@ -175,6 +186,60 @@ class Sparse4DHead(BaseModule):
             self.warmup_fc_after = nn.Identity()
         self.warmup_supervise_all = warmup_supervise_all
 
+        # =========== fusion (TPD ↔ main decoder) modules ===========
+        # Strategies:
+        #   gated_blend   — α-gate over [w_feat, main_feat[:num_ti]] → blend
+        #                   → fusion_order ops (norm/ffn/refine). Refine
+        #                   produces fused (anchor, cls, qt, vis, rel) over
+        #                   the temporal subset only; non-temporal main slots
+        #                   pass through unchanged.
+        #   concat_fuse   — Q = [main; w] (num_anchor + num_temp_instances)
+        #                   → fusion_order ops (typically temp_gnn cross-attn
+        #                   to motion cache + ffn + refine). Refine produces
+        #                   fused outputs over the full concat; final
+        #                   det_output keeps the first num_anchor.
+        #   pred_ensemble — no learnable modules; per-slot blend of TPD's
+        #                   (w_anchor, w_cls, w_qt) with main's predictions
+        #                   over the temporal subset.
+        self.fusion_strategy = fusion_strategy
+        self.fusion_order = list(fusion_order) if fusion_order else []
+        if self.fusion_strategy in ("gated_blend", "concat_fuse"):
+            assert self.fusion_order, (
+                f"fusion_strategy={self.fusion_strategy} requires fusion_order"
+            )
+        fusion_op_config_map = dict(self.op_config_map)
+        if fusion_temp_graph_model is not None:
+            fusion_op_config_map["temp_gnn"] = [fusion_temp_graph_model, ATTENTION]
+        if fusion_ffn is not None:
+            fusion_op_config_map["ffn"] = [fusion_ffn, FEEDFORWARD_NETWORK]
+        if fusion_refine_layer is not None:
+            fusion_op_config_map["refine"] = [fusion_refine_layer, PLUGIN_LAYERS]
+        self.fusion_layers = nn.ModuleList(
+            [build(*fusion_op_config_map.get(op, [None, None]))
+             for op in self.fusion_order]
+        )
+        # MLP gate for gated_blend: takes concat([w_feat, main_temp_feat]) → α.
+        if self.fusion_strategy == "gated_blend":
+            self.fusion_gate = nn.Sequential(
+                nn.Linear(self.embed_dims * 2, self.embed_dims),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.embed_dims, 1),
+            )
+        # Dedicated fc projections for fusion GNN (parity with warmup_fc_*).
+        has_fusion_gnn = any(
+            op in ("gnn", "temp_gnn") for op in self.fusion_order
+        )
+        if has_fusion_gnn and self.decouple_attn:
+            self.fusion_fc_before = nn.Linear(
+                self.embed_dims, self.embed_dims * 2, bias=False
+            )
+            self.fusion_fc_after = nn.Linear(
+                self.embed_dims * 2, self.embed_dims, bias=False
+            )
+        else:
+            self.fusion_fc_before = nn.Identity()
+            self.fusion_fc_after = nn.Identity()
+
     def init_weights(self):
         for i, op in enumerate(self.operation_order):
             if self.layers[i] is None:
@@ -194,6 +259,17 @@ class Sparse4DHead(BaseModule):
             nn.init.xavier_uniform_(self.warmup_fc_before.weight)
         if isinstance(self.warmup_fc_after, nn.Linear):
             nn.init.xavier_uniform_(self.warmup_fc_after.weight)
+        for i, op in enumerate(self.fusion_order):
+            if self.fusion_layers[i] is None:
+                continue
+            elif op != "refine":
+                for p in self.fusion_layers[i].parameters():
+                    if p.dim() > 1:
+                        nn.init.xavier_uniform_(p)
+        if isinstance(self.fusion_fc_before, nn.Linear):
+            nn.init.xavier_uniform_(self.fusion_fc_before.weight)
+        if isinstance(self.fusion_fc_after, nn.Linear):
+            nn.init.xavier_uniform_(self.fusion_fc_after.weight)
         for m in self.modules():
             if hasattr(m, "init_weight"):
                 m.init_weight()
@@ -232,6 +308,73 @@ class Sparse4DHead(BaseModule):
                     key_pos=kv_anchor_embed,
                 )
             )
+
+    def _fusion_attn_with_layer(
+        self, layer, q_feat, q_anchor_embed, kv_feat, kv_anchor_embed,
+    ):
+        """Cross-attn for the post-main fusion block. Mirrors
+        _temp_gnn_with_layer but uses fusion_fc_before/after."""
+        if self.decouple_attn:
+            q = torch.cat([q_feat, q_anchor_embed], dim=-1)
+            k = torch.cat([kv_feat, kv_anchor_embed], dim=-1)
+            v = self.fusion_fc_before(kv_feat)
+            return self.fusion_fc_after(layer(q, k, v))
+        else:
+            v = self.fusion_fc_before(kv_feat)
+            return self.fusion_fc_after(
+                layer(
+                    q_feat, kv_feat, v,
+                    query_pos=q_anchor_embed,
+                    key_pos=kv_anchor_embed,
+                )
+            )
+
+    def _fusion_self_attn_with_layer(self, layer, feat, anchor_embed):
+        """Self-attn variant for the fusion block (Q=K/V=feat)."""
+        if self.decouple_attn:
+            q = torch.cat([feat, anchor_embed], dim=-1)
+            v = self.fusion_fc_before(feat)
+            return self.fusion_fc_after(layer(q, q, v))
+        else:
+            v = self.fusion_fc_before(feat)
+            return self.fusion_fc_after(
+                layer(feat, feat, v, query_pos=anchor_embed)
+            )
+
+    def _run_fusion_ops(
+        self, f_feat, f_anchor, f_anchor_embed,
+        kv_feat=None, kv_anchor_embed=None, time_interval=None,
+    ):
+        """Apply fusion_order ops in sequence. Closing refine returns
+        fused (anchor, cls, qt, vis, rel) for the input query set."""
+        f_cls, f_qt, f_vis, f_rel = None, None, None, None
+        for i, op in enumerate(self.fusion_order):
+            if self.fusion_layers[i] is None:
+                continue
+            if op == "temp_gnn":
+                # Cross-attn with self-attn fallback when no motion cache —
+                # mirrors the warmup temp_gnn behavior so DDP keeps params
+                # connected on first frame batches.
+                if kv_feat is None:
+                    kv_f, kv_ae = f_feat, f_anchor_embed
+                else:
+                    kv_f, kv_ae = kv_feat, kv_anchor_embed
+                f_feat = self._fusion_attn_with_layer(
+                    self.fusion_layers[i], f_feat, f_anchor_embed, kv_f, kv_ae,
+                )
+            elif op == "gnn":
+                f_feat = self._fusion_self_attn_with_layer(
+                    self.fusion_layers[i], f_feat, f_anchor_embed,
+                )
+            elif op in ("norm", "ffn"):
+                f_feat = self.fusion_layers[i](f_feat)
+            elif op == "refine":
+                f_anchor, f_cls, f_qt, f_vis, f_rel = self.fusion_layers[i](
+                    f_feat, f_anchor, f_anchor_embed,
+                    time_interval=time_interval, return_cls=True,
+                )
+                f_anchor_embed = self.anchor_encoder(f_anchor)
+        return f_feat, f_anchor, f_anchor_embed, f_cls, f_qt, f_vis, f_rel
 
     def graph_model(
         self,
@@ -356,6 +499,12 @@ class Sparse4DHead(BaseModule):
         # with current-frame detections. No image features used here.
         # Always runs (even on first frame) so warmup params always receive
         # gradients — avoids the need for find_unused_parameters=True.
+        # Initialize warmup outputs so the post-main fusion path can reference
+        # them safely even when temporal_warmup_order is empty.
+        w_feat = None
+        w_anchor = None
+        w_anchor_embed = None
+        w_cls, w_qt, w_vis, w_rel = None, None, None, None
         if self.temporal_warmup_order:
             if temp_instance_feature is not None:
                 # Temporal case: warm up the cached temporal features
@@ -595,6 +744,138 @@ class Sparse4DHead(BaseModule):
                     ]
             else:
                 raise NotImplementedError(f"{op} is not supported.")
+
+        # =========== TPD ↔ main fusion (post main decoder) ===========
+        # Combines TPD warmup output (w_feat, w_anchor, w_anchor_embed,
+        # w_cls, w_qt, w_vis, w_rel — set during warmup loop above) with the
+        # main decoder's last refine. Fused (anchor, cls, qt, vis, rel) is
+        # appended to the prediction lists and becomes the [-1] entry that
+        # motion/plan reads. Skipped under DN training to avoid shape
+        # bookkeeping with the noisy-instance split below.
+        if (
+            self.fusion_strategy is not None
+            and self.temporal_warmup_order
+            and dn_metas is None
+            and w_cls is not None
+        ):
+            num_ti = self.instance_bank.num_temp_instances
+            main_cls = classification[-1]
+            main_qt = quality[-1]
+            main_vis = visibility[-1]
+            main_rel = relevance[-1]
+            if self.fusion_strategy == "gated_blend":
+                main_temp_feat = instance_feature[:, :num_ti]
+                main_temp_ae = anchor_embed[:, :num_ti]
+                gate_in = torch.cat([w_feat, main_temp_feat], dim=-1)
+                alpha = torch.sigmoid(self.fusion_gate(gate_in))
+                f_feat = alpha * w_feat + (1.0 - alpha) * main_temp_feat
+                (
+                    f_feat, f_anchor, f_anchor_embed,
+                    f_cls, f_qt, f_vis, f_rel,
+                ) = self._run_fusion_ops(
+                    f_feat, anchor[:, :num_ti].clone(), main_temp_ae,
+                    kv_feat=None, kv_anchor_embed=None,
+                    time_interval=time_interval,
+                )
+                fused_anchor = anchor.clone()
+                fused_anchor[:, :num_ti] = f_anchor
+                fused_cls = main_cls.clone()
+                fused_cls[:, :num_ti] = f_cls
+                fused_qt = main_qt.clone() if (main_qt is not None and f_qt is not None) else main_qt
+                if fused_qt is not None and f_qt is not None:
+                    fused_qt[:, :num_ti] = f_qt
+                fused_vis = main_vis.clone() if (main_vis is not None and f_vis is not None) else main_vis
+                if fused_vis is not None and f_vis is not None:
+                    fused_vis[:, :num_ti] = f_vis
+                fused_rel = main_rel.clone() if (main_rel is not None and f_rel is not None) else main_rel
+                if fused_rel is not None and f_rel is not None:
+                    fused_rel[:, :num_ti] = f_rel
+                instance_feature = torch.cat(
+                    [f_feat, instance_feature[:, num_ti:]], dim=1
+                )
+                anchor = fused_anchor
+                anchor_embed = self.anchor_encoder(anchor)
+            elif self.fusion_strategy == "concat_fuse":
+                # Concat main + TPD outputs into a single query set.
+                f_feat = torch.cat([instance_feature, w_feat], dim=1)
+                f_anchor = torch.cat([anchor, w_anchor], dim=1)
+                f_anchor_embed = torch.cat([anchor_embed, w_anchor_embed], dim=1)
+                cached_motion_feature = getattr(
+                    self.instance_bank, 'cached_motion_feature', None
+                )
+                cached_motion_endpoint = getattr(
+                    self.instance_bank, 'cached_motion_endpoint', None
+                )
+                kv_feat, kv_anchor_embed_in = None, None
+                if cached_motion_feature is not None:
+                    kv_anchor_temp = self.instance_bank.cached_anchor.clone()
+                    if cached_motion_endpoint is not None:
+                        kv_anchor_temp[..., :2] = cached_motion_endpoint
+                    kv_feat = cached_motion_feature
+                    kv_anchor_embed_in = self.anchor_encoder(kv_anchor_temp)
+                (
+                    f_feat, f_anchor, f_anchor_embed,
+                    f_cls, f_qt, f_vis, f_rel,
+                ) = self._run_fusion_ops(
+                    f_feat, f_anchor, f_anchor_embed,
+                    kv_feat=kv_feat, kv_anchor_embed=kv_anchor_embed_in,
+                    time_interval=time_interval,
+                )
+                num_main = anchor.shape[1]
+                fused_anchor = f_anchor[:, :num_main]
+                fused_cls = f_cls[:, :num_main]
+                fused_qt = f_qt[:, :num_main] if f_qt is not None else None
+                fused_vis = f_vis[:, :num_main] if f_vis is not None else None
+                fused_rel = f_rel[:, :num_main] if f_rel is not None else None
+                instance_feature = f_feat[:, :num_main]
+                anchor = fused_anchor
+                anchor_embed = self.anchor_encoder(anchor)
+            elif self.fusion_strategy == "pred_ensemble":
+                # No new params — sigmoid-confidence-weighted blend per slot
+                # over the temporal subset of main's predictions and the TPD
+                # warmup refine output.
+                main_score = main_cls[:, :num_ti].sigmoid().max(
+                    dim=-1, keepdim=True
+                )[0]
+                tpd_score = w_cls.sigmoid().max(dim=-1, keepdim=True)[0]
+                weight_tpd = tpd_score / (main_score + tpd_score + 1e-6)
+                fused_anchor = anchor.clone()
+                fused_anchor[:, :num_ti] = (
+                    weight_tpd * w_anchor + (1.0 - weight_tpd) * anchor[:, :num_ti]
+                )
+                fused_cls = main_cls.clone()
+                fused_cls[:, :num_ti] = (
+                    weight_tpd * w_cls + (1.0 - weight_tpd) * main_cls[:, :num_ti]
+                )
+                fused_qt = main_qt.clone() if (main_qt is not None and w_qt is not None) else main_qt
+                if fused_qt is not None and w_qt is not None:
+                    fused_qt[:, :num_ti] = (
+                        weight_tpd * w_qt + (1.0 - weight_tpd) * main_qt[:, :num_ti]
+                    )
+                fused_vis = main_vis.clone() if (main_vis is not None and w_vis is not None) else main_vis
+                if fused_vis is not None and w_vis is not None:
+                    fused_vis[:, :num_ti] = (
+                        weight_tpd * w_vis + (1.0 - weight_tpd) * main_vis[:, :num_ti]
+                    )
+                fused_rel = main_rel.clone() if (main_rel is not None and w_rel is not None) else main_rel
+                if fused_rel is not None and w_rel is not None:
+                    fused_rel[:, :num_ti] = (
+                        weight_tpd * w_rel + (1.0 - weight_tpd) * main_rel[:, :num_ti]
+                    )
+                # pred_ensemble doesn't change features — instance_feature/
+                # anchor/anchor_embed kept as main's last refine for caching.
+                anchor = fused_anchor
+                anchor_embed = self.anchor_encoder(anchor)
+            else:
+                raise NotImplementedError(
+                    f"fusion_strategy={self.fusion_strategy} not supported"
+                )
+            prediction.append(fused_anchor)
+            classification.append(fused_cls)
+            quality.append(fused_qt)
+            visibility.append(fused_vis)
+            relevance.append(fused_rel)
+            cls = fused_cls
 
         output = {}
 
