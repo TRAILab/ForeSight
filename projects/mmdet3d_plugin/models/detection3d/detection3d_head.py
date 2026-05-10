@@ -390,21 +390,25 @@ class Sparse4DHead(BaseModule):
                 elif op == "temp_gnn":
                     # Cross-attend cached temporal queries (Q) to the previous
                     # frame's motion-aggregated K/V, positionally indexed by the
-                    # predicted top-1 endpoint. No-op on first frame or before
-                    # any motion cache exists — params still receive grad through
-                    # the closing `refine` op via w_feat.
+                    # predicted top-1 endpoint. On first frame / before any
+                    # motion cache exists, fall back to self-attn (Q=K/V=w_feat)
+                    # so warmup_temp_graph_model params stay connected to the
+                    # loss — avoids find_unused_parameters=True under DDP.
                     if cached_motion_feature is None or not is_temporal:
-                        continue
-                    kv_anchor = self.instance_bank.cached_anchor.clone()
-                    if cached_motion_endpoint is not None:
-                        kv_anchor[..., :2] = cached_motion_endpoint
-                    kv_anchor_embed = self.anchor_encoder(kv_anchor)
+                        kv_feat_w = w_feat
+                        kv_anchor_embed_w = w_anchor_embed
+                    else:
+                        kv_anchor = self.instance_bank.cached_anchor.clone()
+                        if cached_motion_endpoint is not None:
+                            kv_anchor[..., :2] = cached_motion_endpoint
+                        kv_feat_w = cached_motion_feature
+                        kv_anchor_embed_w = self.anchor_encoder(kv_anchor)
                     w_feat = self._temp_gnn_with_layer(
                         self.warmup_layers[i],
                         w_feat,
                         w_anchor_embed,
-                        cached_motion_feature,
-                        kv_anchor_embed,
+                        kv_feat_w,
+                        kv_anchor_embed_w,
                     )
                 elif op in ("norm", "ffn"):
                     w_feat = self.warmup_layers[i](w_feat)
