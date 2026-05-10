@@ -1,6 +1,7 @@
 from typing import List
 
 import torch
+from torch import nn
 
 from mmcv.runner import BaseModule
 from mmdet.models import HEADS, build_head
@@ -42,12 +43,20 @@ class GTSparseDriveHead(BaseModule):
         motion_plan_head: dict = None,
         num_classes: int = 10,
         num_map_classes: int = 3,
+        instance_feature_init: str = "zero",
         init_cfg=None,
         **kwargs,
     ):
         super(GTSparseDriveHead, self).__init__(init_cfg)
         self.task_config = task_config
         self.num_classes = num_classes
+        # `instance_feature_init`:
+        #   - "zero": classic zero-init (legacy GT oracle behavior)
+        #   - "class_embed": learnable per-class embedding looked up by GT class
+        assert instance_feature_init in ("zero", "class_embed"), (
+            f"instance_feature_init={instance_feature_init!r} not recognised"
+        )
+        self.instance_feature_init = instance_feature_init
 
         assert det_head is not None, (
             "det_head config is required to provide anchor_encoder "
@@ -70,6 +79,13 @@ class GTSparseDriveHead(BaseModule):
 
         assert motion_plan_head is not None
         self.motion_plan_head = build_head(motion_plan_head)
+
+        if self.instance_feature_init == "class_embed":
+            embed_dims = self.det_head.instance_bank.embed_dims
+            # Per-class learnable embedding; trainable (the rest of det_head
+            # is frozen, but this module is owned by GTSparseDriveHead).
+            self.gt_class_embed = nn.Embedding(num_classes, embed_dims)
+            nn.init.normal_(self.gt_class_embed.weight, std=0.02)
 
     def init_weights(self):
         self.det_head.init_weights()
@@ -199,10 +215,22 @@ class GTSparseDriveHead(BaseModule):
         # Anchor embeddings from the det_head's encoder.
         anchor_embed = self.det_head.anchor_encoder(anchors)
 
-        # Instance features initialised to zero; the motion GNN refines them.
+        # Instance feature init.
         instance_feature = torch.zeros(
             batch_size, num_anchor, embed_dims, device=device
         )
+        if self.instance_feature_init == "class_embed":
+            # Look up per-class embedding for valid GT slots; padding stays zero.
+            for i in range(batch_size):
+                labels_i = gt_labels[i]
+                if not isinstance(labels_i, torch.Tensor):
+                    labels_i = torch.tensor(labels_i, device=device, dtype=torch.long)
+                else:
+                    labels_i = labels_i.to(device=device, dtype=torch.long)
+                N_i = min(len(labels_i), num_anchor)
+                if N_i == 0:
+                    continue
+                instance_feature[i, :N_i] = self.gt_class_embed(labels_i[:N_i])
 
         # GT instance IDs for temporal tracking in InstanceQueue.
         instance_id = self._get_gt_instance_ids(

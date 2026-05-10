@@ -339,8 +339,14 @@ def accumulate(gt_boxes: EvalBoxes,
     # Organize input and initialize accumulators.
     # ---------------------------------------------
 
+    # `class_name == 'all'` aggregates across every detection class; the
+    # nuScenes filter_eval_boxes step has already restricted boxes to the
+    # configured per-class ranges, so 'all' is just the union of those.
+    def _matches_class(name):
+        return class_name == 'all' or name == class_name
+
     # Count the positives.
-    npos = len([1 for gt_box in gt_boxes.all if gt_box.detection_name == class_name])
+    npos = len([1 for gt_box in gt_boxes.all if _matches_class(gt_box.detection_name)])
     if verbose:
         print("Found {} GT of class {} out of {} total across {} samples.".
               format(npos, class_name, len(gt_boxes.all), len(gt_boxes.sample_tokens)))
@@ -350,7 +356,7 @@ def accumulate(gt_boxes: EvalBoxes,
         return DetectionMetricData.no_predictions(), 0
 
     # Organize the predictions in a single list.
-    pred_boxes_list = [box for box in pred_boxes.all if box.detection_name == class_name]
+    pred_boxes_list = [box for box in pred_boxes.all if _matches_class(box.detection_name)]
     pred_confs = [box.detection_score for box in pred_boxes_list]
 
     if verbose:
@@ -371,6 +377,7 @@ def accumulate(gt_boxes: EvalBoxes,
                   'min_ade': [],
                   'min_fde': [],
                   'miss_rate': [],
+                  'top1_ade': [],
                   'top1_fde': [],
                   'brier_min_fde': []}
 
@@ -387,7 +394,7 @@ def accumulate(gt_boxes: EvalBoxes,
         for gt_idx, gt_box in enumerate(gt_boxes[pred_box.sample_token]):
 
             # Find closest match among ground truth boxes
-            if gt_box.detection_name == class_name and not (pred_box.sample_token, gt_idx) in taken:
+            if _matches_class(gt_box.detection_name) and not (pred_box.sample_token, gt_idx) in taken:
                 this_distance = dist_fcn(gt_box, pred_box)
                 if this_distance < min_dist:
                     min_dist = this_distance
@@ -409,10 +416,11 @@ def accumulate(gt_boxes: EvalBoxes,
 
             match_data['conf'].append(pred_box.detection_score)
 
-            minade, minfde, mr, top1_fde, brier_min_fde = prediction_metrics(gt_box_match, pred_box)
+            minade, minfde, mr, top1_ade, top1_fde, brier_min_fde = prediction_metrics(gt_box_match, pred_box)
             match_data['min_ade'].append(minade)
             match_data['min_fde'].append(minfde)
             match_data['miss_rate'].append(mr)
+            match_data['top1_ade'].append(top1_ade)
             match_data['top1_fde'].append(top1_fde)
             match_data['brier_min_fde'].append(brier_min_fde)
 
@@ -480,7 +488,7 @@ def accumulate(gt_boxes: EvalBoxes,
         for gt_idx, gt_box in enumerate(gt_boxes[pred_box.sample_token]):
 
             # Find closest match among ground truth boxes
-            if gt_box.detection_name == class_name and not (pred_box.sample_token, gt_idx) in taken:
+            if _matches_class(gt_box.detection_name) and not (pred_box.sample_token, gt_idx) in taken:
                 this_distance = dist_fcn(gt_box, pred_box)
                 if this_distance < min_dist:
                     min_dist = this_distance
@@ -503,6 +511,7 @@ def accumulate(gt_boxes: EvalBoxes,
                                min_ade_err=match_data['min_ade'],
                                min_fde_err=match_data['min_fde'],
                                miss_rate_err=match_data['miss_rate'],
+                               top1_ade_err=match_data['top1_ade'],
                                top1_fde_err=match_data['top1_fde'],
                                brier_min_fde_err=match_data['brier_min_fde']), EPA, EPA_
 
@@ -513,7 +522,7 @@ def prediction_metrics(gt_box_match, pred_box, miss_thresh=2):
 
     valid_step = gt_traj.shape[0]
     if valid_step <= 0:
-        return 0, 0, 0, 0, 0
+        return 0, 0, 0, 0, 0, 0
 
     pred_traj_valid = pred_traj[:, :valid_step, :]
     dist = np.linalg.norm(pred_traj_valid - gt_traj[np.newaxis], axis=2)
@@ -522,13 +531,14 @@ def prediction_metrics(gt_box_match, pred_box, miss_thresh=2):
     minfde = dist[:, -1].min()
     mr = dist.max(axis=1).min() > miss_thresh
 
-    # Top-1 FDE: FDE of the highest-confidence mode.
+    # Top-1 ADE / FDE: ADE / FDE of the highest-confidence mode.
     # Brier-minFDE: minFDE + (1 - p_best)^2, where p_best is the normalized
     # probability assigned to the mode closest to GT (nuScenes leaderboard metric).
     traj_score = getattr(pred_box, 'traj_score', None)
     if traj_score is not None and len(traj_score) == pred_traj.shape[0]:
         scores = np.array(traj_score, dtype=np.float64)
         top1_idx = int(np.argmax(scores))
+        top1_ade = float(dist[top1_idx, :].mean())
         top1_fde = float(dist[top1_idx, -1])
 
         scores_sum = scores.sum()
@@ -537,12 +547,13 @@ def prediction_metrics(gt_box_match, pred_box, miss_thresh=2):
         p_best = float(probs[best_mode_idx])
         brier_min_fde = minfde + (1.0 - p_best) ** 2
     else:
-        # No per-mode scores available: fall back to min-FDE for top1,
+        # No per-mode scores available: fall back to min-ADE / min-FDE for top1,
         # and worst-case confidence penalty for Brier-minFDE.
+        top1_ade = minade
         top1_fde = minfde
         brier_min_fde = minfde + 1.0
 
-    return minade, minfde, mr, top1_fde, brier_min_fde
+    return minade, minfde, mr, top1_ade, top1_fde, brier_min_fde
 
 def traj_fde(gt_box, pred_box, final_step):
     if gt_box.traj.shape[0] <= 0:
@@ -577,6 +588,7 @@ class MotionMetricData(DetectionMetricData):
                  min_ade_err: np.array,
                  min_fde_err: np.array,
                  miss_rate_err: np.array,
+                 top1_ade_err: np.array,
                  top1_fde_err: np.array,
                  brier_min_fde_err: np.array):
 
@@ -587,6 +599,7 @@ class MotionMetricData(DetectionMetricData):
         assert len(min_ade_err) == self.nelem
         assert len(min_fde_err) == self.nelem
         assert len(miss_rate_err) == self.nelem
+        assert len(top1_ade_err) == self.nelem
         assert len(top1_fde_err) == self.nelem
         assert len(brier_min_fde_err) == self.nelem
 
@@ -601,6 +614,7 @@ class MotionMetricData(DetectionMetricData):
         self.min_ade_err = min_ade_err
         self.min_fde_err = min_fde_err
         self.miss_rate_err = miss_rate_err
+        self.top1_ade_err = top1_ade_err
         self.top1_fde_err = top1_fde_err
         self.brier_min_fde_err = brier_min_fde_err
 
@@ -638,6 +652,7 @@ class MotionMetricData(DetectionMetricData):
             'min_ade_err': self.min_ade_err.tolist(),
             'min_fde_err': self.min_fde_err.tolist(),
             'miss_rate_err': self.miss_rate_err.tolist(),
+            'top1_ade_err': self.top1_ade_err.tolist(),
             'top1_fde_err': self.top1_fde_err.tolist(),
             'brier_min_fde_err': self.brier_min_fde_err.tolist(),
         }
@@ -651,6 +666,7 @@ class MotionMetricData(DetectionMetricData):
                    min_ade_err=np.array(content['min_ade_err']),
                    min_fde_err=np.array(content['min_fde_err']),
                    miss_rate_err=np.array(content['miss_rate_err']),
+                   top1_ade_err=np.array(content.get('top1_ade_err', content['min_ade_err'])),
                    top1_fde_err=np.array(content['top1_fde_err']),
                    brier_min_fde_err=np.array(content['brier_min_fde_err']))
 
@@ -663,6 +679,7 @@ class MotionMetricData(DetectionMetricData):
                    min_ade_err=np.ones(cls.nelem),
                    min_fde_err=np.ones(cls.nelem),
                    miss_rate_err=np.ones(cls.nelem),
+                   top1_ade_err=np.ones(cls.nelem),
                    top1_fde_err=np.ones(cls.nelem),
                    brier_min_fde_err=np.ones(cls.nelem) * 2.0)
 
@@ -675,6 +692,7 @@ class MotionMetricData(DetectionMetricData):
                    min_ade_err=np.random.random(cls.nelem),
                    min_fde_err=np.random.random(cls.nelem),
                    miss_rate_err=np.random.random(cls.nelem),
+                   top1_ade_err=np.random.random(cls.nelem),
                    top1_fde_err=np.random.random(cls.nelem),
                    brier_min_fde_err=np.random.random(cls.nelem))
 
