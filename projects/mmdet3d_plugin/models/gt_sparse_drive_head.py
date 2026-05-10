@@ -121,8 +121,11 @@ class GTSparseDriveHead(BaseModule):
             feature_maps,
         )
 
-        # 4. Build GT map_output if map_head sub-modules are available.
-        if hasattr(self, "map_head"):
+        # 4. Build GT map_output if map_head sub-modules are available *and*
+        #    the batch carries map GT. The test pipeline drops gt_map_* keys
+        #    (use_map=False), so eval falls through to map_output=None which
+        #    MotionPlanningHead's cross_gnn step already handles.
+        if hasattr(self, "map_head") and "gt_map_labels" in metas:
             map_output = self._build_gt_map_output(metas, batch_size, device)
         else:
             map_output = None
