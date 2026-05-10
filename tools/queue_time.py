@@ -34,7 +34,7 @@ CACHE_DIR = Path(
 )
 DEFAULT_CLUSTERS = ("narval", "trillium", "killarney", "killarney_h100")
 ADDITIONAL_QUEUE_HEATMAP_CLUSTERS = ("tamia", "rorqual", "fir")
-MAP_CLUSTERS = tuple(dict.fromkeys((*DEFAULT_CLUSTERS, *ADDITIONAL_QUEUE_HEATMAP_CLUSTERS, "vulcan", "nibi", "utias")))
+MAP_CLUSTERS = tuple(dict.fromkeys((*DEFAULT_CLUSTERS, *ADDITIONAL_QUEUE_HEATMAP_CLUSTERS, "vulcan", "nibi", "utias", "apollo")))
 SACCT_CLUSTERS = tuple(dict.fromkeys((*DEFAULT_CLUSTERS, *ADDITIONAL_QUEUE_HEATMAP_CLUSTERS)))
 PENDING_HEATMAP_CLUSTERS = tuple(dict.fromkeys((*DEFAULT_CLUSTERS, *ADDITIONAL_QUEUE_HEATMAP_CLUSTERS)))
 QUEUE_HEATMAP_CLUSTERS = PENDING_HEATMAP_CLUSTERS
@@ -61,6 +61,7 @@ CLUSTER_GEO = {
     "rorqual": {"site": "ETS, Montreal", "lat": 45.4948, "lon": -73.5620},
     "vulcan": {"site": "Amii, Edmonton", "lat": 53.5462, "lon": -113.4937},
     "nibi": {"site": "Waterloo", "lat": 43.4723, "lon": -80.5449},
+    "apollo": {"site": "UWaterloo", "lat": 43.07, "lon": -80.96},
     "utias": {"site": "UTIAS, Toronto", "lat": 44.1800, "lon": -79.2600},
 }
 TRAIL_CLUSTERS = ("dgx", "apollo", "turing", "lovelace", "ums", "um1", "um2", "um3")
@@ -1303,12 +1304,17 @@ def query_snapshot(cluster: str, info: dict[str, str], timeout: int) -> dict[str
     if user_gpu:
         snapshot["user_gpu"] = dict(user_gpu)
         snapshot["users"] = sorted(user_gpu)
-    if info.get("gpu_source") == "nvidia-smi" and per_gpu and not info.get("usable_gpus"):
-        # Trust nvidia-smi over scontrol AllocTRES only for hosts where Slurm
-        # does not need a trainable-GPU cap. DGX SSH may expose only the
-        # caller's cgroup-visible GPUs, so Slurm + usable_gpus is safer there.
-        snapshot["gpus_total"] = smi_total
-        snapshot["gpus_used"] = smi_used
+    if info.get("gpu_source") == "nvidia-smi" and per_gpu:
+        # Prefer nvidia-smi (already filtered via gpu_exclude_pattern) so
+        # non-trainable GPUs like the DGX Display don't get attributed as
+        # utilisation. The cgroup-masking concern (DGX SSH potentially
+        # hiding GPUs) is handled by only overriding when smi sees at
+        # least `usable_gpus` trainable GPUs; otherwise fall back to
+        # scontrol's CfgTRES/AllocTRES.
+        usable = info.get("usable_gpus")
+        if not isinstance(usable, int) or smi_total >= usable:
+            snapshot["gpus_total"] = smi_total
+            snapshot["gpus_used"] = smi_used
     return snapshot
 
 
@@ -2884,12 +2890,13 @@ def plot_cluster_location_map(
     }
     label_offsets = {
         "nibi": (-0.25, 0.22, "right", "bottom"),
-        "trillium": (0.25, -0.28, "center", "top"),
+        "trillium": (0.18, -0.18, "left", "top"),
         "killarney": (0.25, 0.10, "left", "bottom"),
         "rorqual": (-0.25, 0.22, "right", "bottom"),
         "narval": (0.0, -0.28, "center", "top"),
         "tamia": (0.25, 0.22, "left", "bottom"),
         "utias": (0.0, 0.32, "center", "bottom"),
+        "apollo": (-0.18, -0.18, "right", "top"),
     }
     marker_y_offsets = {
         "narval": -0.18,
@@ -3663,12 +3670,10 @@ def write_html(
                 f'<td>{html.escape(str(r["gpuutil_display"]))}</td>'
                 f'<td>{html.escape(str(r["low_activity_display"]))}</td>'
                 f'<td>{html.escape(str(r["clusters"]))}</td>'
-                f'<td>{html.escape(str(r["cpu_ratio"]))}</td>'
-                f'<td>{html.escape(str(r["mem_ratio"]))}</td>'
                 "</tr>"
             )
         return "\n".join(html_rows) if html_rows else (
-            '        <tr><td colspan="7" class="muted">No member usage in this window.</td></tr>'
+            '        <tr><td colspan="5" class="muted">No member usage in this window.</td></tr>'
         )
 
     allocated_member_usage_table_html = _member_usage_table_html(
@@ -3685,7 +3690,6 @@ def write_html(
             "        <tr>"
             f'<td class="cluster">{html.escape(str(r["member"]))}</td>'
             f'<td>{html.escape(str(r["gpu_hours_display"]))}</td>'
-            f'<td>{html.escape(str(r["gpu_util_display"]))}</td>'
             f'<td>{html.escape(str(r["servers"]))}</td>'
             f'<td>{html.escape(str(r["days_used"]))}</td>'
             "</tr>"
@@ -3693,7 +3697,7 @@ def write_html(
     utias_member_usage_table_html = (
         "\n".join(utias_member_usage_html_rows)
         if utias_member_usage_html_rows
-        else '        <tr><td colspan="5" class="muted">No UTIAS member usage in this window.</td></tr>'
+        else '        <tr><td colspan="4" class="muted">No UTIAS member usage in this window.</td></tr>'
     )
 
     def _cluster_list_text(clusters: tuple[str, ...]) -> str:
@@ -4108,7 +4112,7 @@ def write_html(
   <table>
     <thead>
       <tr>
-        <th>Member</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS</th><th>{TRAIL_LOOKBACK_DAYS}D GPU Util</th><th>{TRAIL_LOOKBACK_DAYS}D Inactive GPU Hrs</th><th>{TRAIL_LOOKBACK_DAYS}D CLUSTERS</th><th>{TRAIL_LOOKBACK_DAYS}D CPU Used/Req</th><th>{TRAIL_LOOKBACK_DAYS}D Mem Used/Req</th>
+        <th>Member</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS</th><th>{TRAIL_LOOKBACK_DAYS}D GPU Util</th><th>{TRAIL_LOOKBACK_DAYS}D Inactive GPU Hrs</th><th>{TRAIL_LOOKBACK_DAYS}D CLUSTERS</th>
       </tr>
     </thead>
     <tbody>
@@ -4120,7 +4124,7 @@ def write_html(
   <table>
     <thead>
       <tr>
-        <th>Member</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS</th><th>{TRAIL_LOOKBACK_DAYS}D GPU Util</th><th>{TRAIL_LOOKBACK_DAYS}D Inactive GPU Hrs</th><th>{TRAIL_LOOKBACK_DAYS}D CLUSTERS</th><th>{TRAIL_LOOKBACK_DAYS}D CPU Used/Req</th><th>{TRAIL_LOOKBACK_DAYS}D Mem Used/Req</th>
+        <th>Member</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS</th><th>{TRAIL_LOOKBACK_DAYS}D GPU Util</th><th>{TRAIL_LOOKBACK_DAYS}D Inactive GPU Hrs</th><th>{TRAIL_LOOKBACK_DAYS}D CLUSTERS</th>
       </tr>
     </thead>
     <tbody>
@@ -4133,7 +4137,7 @@ def write_html(
   <table>
     <thead>
       <tr>
-        <th>Member</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS</th><th>{TRAIL_LOOKBACK_DAYS}D GPU Util</th><th>{TRAIL_LOOKBACK_DAYS}D Servers</th><th>{TRAIL_LOOKBACK_DAYS}D DAYS USED</th>
+        <th>Member</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS</th><th>{TRAIL_LOOKBACK_DAYS}D Servers</th><th>{TRAIL_LOOKBACK_DAYS}D DAYS USED</th>
       </tr>
     </thead>
     <tbody>
