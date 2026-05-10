@@ -287,7 +287,7 @@ model = dict(
             ),
             warmup_ffn=dict(
                 type="AsymmetricFFN",
-                in_channels=embed_dims * 2,
+                in_channels=embed_dims,
                 pre_norm=dict(type="LN"),
                 embed_dims=embed_dims,
                 feedforward_channels=embed_dims * 4,
