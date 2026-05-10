@@ -521,7 +521,7 @@ model = dict(
             ),
             plan_loss_reg=dict(type='L1Loss', loss_weight=1.0),
             plan_loss_status=dict(type='L1Loss', loss_weight=1.0),
-            motion_decoder=dict(type="SparseBox3DMotionDecoder"),
+            motion_decoder=dict(type="SparseBox3DMotionDecoder", num_output=200),
             planning_decoder=dict(
                 type="HierarchicalPlanningDecoder",
                 ego_fut_ts=ego_fut_ts,

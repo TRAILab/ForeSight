@@ -12,8 +12,19 @@ from projects.mmdet3d_plugin.datasets.utils import box3d_to_corners
 
 @BBOX_CODERS.register_module()
 class SparseBox3DMotionDecoder(SparseBox3DDecoder):
-    def __init__(self):
-        super(SparseBox3DMotionDecoder, self).__init__()
+    def __init__(
+        self,
+        num_output: int = 300,
+        score_threshold: Optional[float] = None,
+        sorted: bool = True,
+        invert_visibility: bool = False,
+    ):
+        super(SparseBox3DMotionDecoder, self).__init__(
+            num_output=num_output,
+            score_threshold=score_threshold,
+            sorted=sorted,
+            invert_visibility=invert_visibility,
+        )
 
     def decode(
         self,
