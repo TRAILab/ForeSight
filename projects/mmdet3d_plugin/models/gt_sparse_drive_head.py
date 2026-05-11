@@ -114,6 +114,12 @@ class GTSparseDriveHead(BaseModule):
             None,
         )
         if self._gt_deformable_idx is not None:
+            # Det's deformable defaults to residual_mode='cat' so the det
+            # transformer can chain 256→512→ffn→256. In our standalone use
+            # we need a 256-d output, so switch to 'add'. Safe because the
+            # det transformer is bypassed entirely — nobody else uses this
+            # layer.
+            self.det_head.layers[self._gt_deformable_idx].residual_mode = "add"
             for p in self.det_head.layers[self._gt_deformable_idx].parameters():
                 p.requires_grad_(True)
 
@@ -141,6 +147,9 @@ class GTSparseDriveHead(BaseModule):
                 None,
             )
             if self._gt_map_deformable_idx is not None:
+                # Same rationale as det side: switch from 'cat' (used by the
+                # map transformer's chaining) to 'add' for our standalone call.
+                self.map_head.layers[self._gt_map_deformable_idx].residual_mode = "add"
                 for p in self.map_head.layers[self._gt_map_deformable_idx].parameters():
                     p.requires_grad_(True)
 
