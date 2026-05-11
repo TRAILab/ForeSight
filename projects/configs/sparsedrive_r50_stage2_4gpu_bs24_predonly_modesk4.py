@@ -105,7 +105,7 @@ model = dict(
         frozen_stages=-1,
         norm_eval=False,
         style="pytorch",
-        with_cp=True,
+        with_cp=False,  # find_unused_parameters=True + with_cp=True conflicts via reentrant backward (see 2026_04_29 nomap_ppdeformmm note)
         out_indices=(0, 1, 2, 3),
         norm_cfg=dict(type="BN", requires_grad=True),
         pretrained="ckpt/resnet50-19c8e357.pth",
