@@ -608,6 +608,19 @@ test_pipeline = [
         class_dist_thred=[55] * len(class_names),
     ),
     dict(type="InstanceNameFilter", classes=class_names),
+    # Vectorize map at eval so GTSparseDriveHead can build the GT map
+    # oracle (frozen map_head encodes the polylines; MotionPlanningHead's
+    # cross_gnn attends to them). Mirrors the train_pipeline VectorizeMap;
+    # without this the GT motion ceiling is artificially handicapped
+    # because train sees map context but eval does not.
+    dict(
+        type='VectorizeMap',
+        roi_size=roi_size,
+        simplify=False,
+        normalize=False,
+        sample_num=num_sample,
+        permute=True,
+    ),
     dict(type="NuScenesSparse4DAdaptor"),
     dict(
         type="Collect",
@@ -620,6 +633,8 @@ test_pipeline = [
             'gt_ego_fut_cmd',
             "gt_bboxes_3d",
             "gt_labels_3d",
+            'gt_map_labels',
+            'gt_map_pts',
         ],
         meta_keys=["T_global", "T_global_inv", "timestamp", "instance_id"],
     ),
