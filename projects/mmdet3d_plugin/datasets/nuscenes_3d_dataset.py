@@ -844,7 +844,21 @@ class NuScenes3DDataset(Dataset):
             "results": nusc_annos,
         }
 
-        return nusc_submissions 
+        return nusc_submissions
+
+    def _dump_motion_predictions(self, motion_result_files):
+        """Persist motion predictions to ``<work_dir>/motion_predictions.pkl``.
+
+        Stores per-mode trajectories with their original 10-class detection_name
+        (before motion_utils.motion_name_mapping collapses them) so offline tools
+        can compute finer breakdowns. Pickled rather than JSON because per-mode
+        trajs/scores are numpy arrays.
+        """
+        import pickle
+        out_path = osp.join(self.work_dir, 'motion_predictions.pkl')
+        with open(out_path, 'wb') as f:
+            pickle.dump(motion_result_files, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f'[motion-dump] wrote {out_path}')
 
     def _evaluate_single_motion(self,
                          results,
@@ -1351,6 +1365,11 @@ class NuScenes3DDataset(Dataset):
         if eval_mode['with_motion']:
             thresh = eval_mode["motion_threshhold"]
             motion_result_files = self.format_motion_results(results, jsonfile_prefix=self.work_dir, thresh=thresh)
+            # Persist raw motion predictions (with original 10-class detection_name
+            # and per-mode trajectories in lidar frame) so tools/detailed_prediction_eval.py
+            # can score finer breakdowns offline. motion_utils.motion_name_mapping
+            # collapses the classes inside MotionEval, so dumping here preserves them.
+            self._dump_motion_predictions(motion_result_files)
             motion_results_dict = self._evaluate_single_motion(motion_result_files, self.work_dir, logger=logger)
             results_dict.update(motion_results_dict)
 
