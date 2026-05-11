@@ -36,6 +36,10 @@ resume_from = None
 workflow = [("train", 1)]
 fp16 = dict(loss_scale=32.0)
 input_shape = (704, 256)
+# Some GT-oracle sub-modules (e.g. map_head.instance_bank.instance_feature
+# Parameter when feat_grad=True) remain trainable but are bypassed in
+# GTSparseDriveHead's forward path. Tolerate them via DDP find_unused_parameters.
+find_unused_parameters = True
 
 
 # ================== model ========================
