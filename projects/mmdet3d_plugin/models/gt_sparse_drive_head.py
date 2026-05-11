@@ -117,6 +117,33 @@ class GTSparseDriveHead(BaseModule):
             for p in self.det_head.layers[self._gt_deformable_idx].parameters():
                 p.requires_grad_(True)
 
+        # ---- Symmetric map-side enrichments (only built when map_head is
+        # present). instance_feature for each GT polyline becomes
+        #   gt_map_class_embed[map_class] + gt_map_anchor_proj(flat_poly)
+        #   + image_content (via map_head's first deformable)
+        # ----
+        if hasattr(self, "map_head"):
+            self.gt_map_class_embed = nn.Embedding(num_map_classes, embed_dims)
+            nn.init.normal_(self.gt_map_class_embed.weight, std=0.02)
+
+            # Polyline content projection. Input dim = num_sample * 2 (flat
+            # XY coords). anchor_encoder's `input_dims` is exactly that.
+            map_anchor_in = self.map_head.anchor_encoder.input_dims
+            self.gt_map_anchor_proj = nn.Linear(map_anchor_in, embed_dims)
+            nn.init.normal_(self.gt_map_anchor_proj.weight, std=0.02)
+            nn.init.zeros_(self.gt_map_anchor_proj.bias)
+
+            self._gt_map_deformable_idx = next(
+                (
+                    i for i, op in enumerate(self.map_head.operation_order)
+                    if op == "deformable"
+                ),
+                None,
+            )
+            if self._gt_map_deformable_idx is not None:
+                for p in self.map_head.layers[self._gt_map_deformable_idx].parameters():
+                    p.requires_grad_(True)
+
     def init_weights(self):
         self.det_head.init_weights()
         if hasattr(self, "map_head"):
@@ -156,7 +183,9 @@ class GTSparseDriveHead(BaseModule):
         #    (use_map=False), so eval falls through to map_output=None which
         #    MotionPlanningHead's cross_gnn step already handles.
         if hasattr(self, "map_head") and "gt_map_labels" in metas:
-            map_output = self._build_gt_map_output(metas, batch_size, device)
+            map_output = self._build_gt_map_output(
+                metas, batch_size, device, feature_maps,
+            )
         else:
             map_output = None
 
@@ -297,7 +326,7 @@ class GTSparseDriveHead(BaseModule):
         }
 
     def _build_gt_map_output(
-        self, metas: dict, batch_size: int, device
+        self, metas: dict, batch_size: int, device, feature_maps=None,
     ) -> dict:
         """Build the map_output dict populated with GT map polylines.
 
@@ -362,15 +391,48 @@ class GTSparseDriveHead(BaseModule):
             cls_logits[i, :M_i] = -100.0
             cls_logits[i, torch.arange(M_i, device=device), map_labels_i] = 100.0
 
-        # Encode GT map point coordinates into positional embeddings.
+        # Encode GT map point coordinates into positional embeddings
+        # (anchor_encoder is unfrozen so it can adapt for motion downstream).
         anchor_embed = self.map_head.anchor_encoder(predictions)
 
-        # Instance features initialised from anchor_embed so motion's
-        # cross_gnn receives non-zero V content. With instance_feature=0
-        # the attention output is `softmax(Q·Kᵀ) @ 0 = const_bias` —
-        # the per-polyline information is lost. Copying anchor_embed into
-        # the content channel preserves the polyline shape encoding in V.
-        instance_feature = anchor_embed.clone()
+        # Per-polyline instance_feature: stack three sources of content —
+        #   (1) polyline shape: gt_map_anchor_proj(flat polyline coords)
+        #   (2) class identity: gt_map_class_embed[map_class]
+        #   (3) image content:  map_head's first deformable samples FPN
+        #                       features at the polyline keypoints
+        # Padding slots get (1) and (3) applied to zero predictions
+        # (harmless — cls_logit=-100 filters them out downstream).
+        instance_feature = self.gt_map_anchor_proj(predictions)
+        for i in range(batch_size):
+            map_labels_i = metas["gt_map_labels"][i]
+            if not isinstance(map_labels_i, torch.Tensor):
+                map_labels_i = torch.tensor(
+                    map_labels_i, device=device, dtype=torch.long
+                )
+            else:
+                map_labels_i = map_labels_i.to(device=device, dtype=torch.long)
+            M_i = min(len(map_labels_i), num_anchor)
+            if M_i == 0:
+                continue
+            instance_feature[i, :M_i] = (
+                instance_feature[i, :M_i]
+                + self.gt_map_class_embed(map_labels_i[:M_i])
+            )
+
+        # Pass through map_head's first deformable layer to inject image
+        # content at the polyline keypoints. Skipped when feature_maps is
+        # unavailable (e.g. if a future caller path skips img features).
+        if (
+            getattr(self, "_gt_map_deformable_idx", None) is not None
+            and feature_maps is not None
+        ):
+            instance_feature = self.map_head.layers[self._gt_map_deformable_idx](
+                instance_feature,
+                predictions,
+                anchor_embed,
+                feature_maps,
+                metas,
+            )
 
         return {
             "instance_feature": instance_feature,
