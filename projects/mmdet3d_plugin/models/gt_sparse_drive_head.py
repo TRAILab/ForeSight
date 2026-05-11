@@ -88,12 +88,34 @@ class GTSparseDriveHead(BaseModule):
         assert motion_plan_head is not None
         self.motion_plan_head = build_head(motion_plan_head)
 
+        embed_dims = self.det_head.instance_bank.embed_dims
         if self.instance_feature_init == "class_embed":
-            embed_dims = self.det_head.instance_bank.embed_dims
             # Per-class learnable embedding; trainable (the rest of det_head
             # is frozen, but this module is owned by GTSparseDriveHead).
             self.gt_class_embed = nn.Embedding(num_classes, embed_dims)
             nn.init.normal_(self.gt_class_embed.weight, std=0.02)
+
+        # Per-agent box-content projection: 11-d encoded anchor → 256-d.
+        # Puts pose/size/velocity into the V channel of motion's attention
+        # (anchor_embed already covers the K_pos channel via anchor_encoder).
+        self.gt_anchor_proj = nn.Linear(11, embed_dims)
+        nn.init.normal_(self.gt_anchor_proj.weight, std=0.02)
+        nn.init.zeros_(self.gt_anchor_proj.bias)
+
+        # Reuse the det_head's first `deformable` layer to sample image
+        # features at the GT box positions and aggregate them into
+        # instance_feature. Stage-1 weights are a strong init; unfreeze so
+        # it adapts for motion downstream rather than detection.
+        self._gt_deformable_idx = next(
+            (
+                i for i, op in enumerate(self.det_head.operation_order)
+                if op == "deformable"
+            ),
+            None,
+        )
+        if self._gt_deformable_idx is not None:
+            for p in self.det_head.layers[self._gt_deformable_idx].parameters():
+                p.requires_grad_(True)
 
     def init_weights(self):
         self.det_head.init_weights()
@@ -223,15 +245,18 @@ class GTSparseDriveHead(BaseModule):
             cls_logits[i, :N_i] = -100.0
             cls_logits[i, torch.arange(N_i, device=device), labels_i] = 100.0
 
-        # Anchor embeddings from the det_head's encoder.
+        # Anchor embeddings from the det_head's encoder (now unfrozen).
         anchor_embed = self.det_head.anchor_encoder(anchors)
 
-        # Instance feature init.
-        instance_feature = torch.zeros(
-            batch_size, num_anchor, embed_dims, device=device
-        )
+        # Instance feature: stack three sources of per-agent content —
+        #   (1) class identity:  gt_class_embed[gt_class]
+        #   (2) box pose/vel:    gt_anchor_proj(11-d encoded anchor)
+        #   (3) image content:   det_head.deformable_model(...) — samples
+        #                        FPN features at the agent's GT box position
+        # Padding slots get (2) and (3) applied to zero anchors (harmless;
+        # cls_logit=-100 filters them out downstream).
+        instance_feature = self.gt_anchor_proj(anchors)
         if self.instance_feature_init == "class_embed":
-            # Look up per-class embedding for valid GT slots; padding stays zero.
             for i in range(batch_size):
                 labels_i = gt_labels[i]
                 if not isinstance(labels_i, torch.Tensor):
@@ -241,7 +266,21 @@ class GTSparseDriveHead(BaseModule):
                 N_i = min(len(labels_i), num_anchor)
                 if N_i == 0:
                     continue
-                instance_feature[i, :N_i] = self.gt_class_embed(labels_i[:N_i])
+                instance_feature[i, :N_i] = (
+                    instance_feature[i, :N_i] + self.gt_class_embed(labels_i[:N_i])
+                )
+
+        # Pass through det_head's first deformable layer to inject per-agent
+        # image content. The deformable's residual connection adds the
+        # sampled image features to instance_feature in place.
+        if self._gt_deformable_idx is not None:
+            instance_feature = self.det_head.layers[self._gt_deformable_idx](
+                instance_feature,
+                anchors,
+                anchor_embed,
+                feature_maps,
+                metas,
+            )
 
         # GT instance IDs for temporal tracking in InstanceQueue.
         instance_id = self._get_gt_instance_ids(
