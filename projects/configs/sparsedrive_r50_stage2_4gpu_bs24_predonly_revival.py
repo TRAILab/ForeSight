@@ -36,10 +36,6 @@ resume_from = None
 workflow = [("train", 1)]
 fp16 = dict(loss_scale=32.0)
 input_shape = (704, 256)
-# Some GT-oracle sub-modules (e.g. map_head.instance_bank.instance_feature
-# Parameter when feat_grad=True) remain trainable but are bypassed in
-# GTSparseDriveHead's forward path. Tolerate them via DDP find_unused_parameters.
-find_unused_parameters = True
 
 
 # ================== model ========================
@@ -105,7 +101,7 @@ model = dict(
         frozen_stages=-1,
         norm_eval=False,
         style="pytorch",
-        with_cp=False,  # find_unused_parameters=True + with_cp=True conflicts via reentrant backward (see 2026_04_29 nomap_ppdeformmm note)
+        with_cp=True,
         out_indices=(0, 1, 2, 3),
         norm_cfg=dict(type="BN", requires_grad=True),
         pretrained="ckpt/resnet50-19c8e357.pth",
@@ -432,6 +428,8 @@ model = dict(
                     "motion_self_attn",
                     "norm",
                     "deformable",
+                    "norm",
+                    "cross_gnn",
                     "norm",
                     "ffn",
                     "norm",
