@@ -318,11 +318,12 @@ class GTSparseDriveHead(BaseModule):
         # Encode GT map point coordinates into positional embeddings.
         anchor_embed = self.map_head.anchor_encoder(predictions)
 
-        # Instance features initialised to zero; cross_gnn will attend to
-        # anchor_embed (position) rather than learned instance content.
-        instance_feature = torch.zeros(
-            batch_size, num_anchor, embed_dims, device=device
-        )
+        # Instance features initialised from anchor_embed so motion's
+        # cross_gnn receives non-zero V content. With instance_feature=0
+        # the attention output is `softmax(Q·Kᵀ) @ 0 = const_bias` —
+        # the per-polyline information is lost. Copying anchor_embed into
+        # the content channel preserves the polyline shape encoding in V.
+        instance_feature = anchor_embed.clone()
 
         return {
             "instance_feature": instance_feature,
