@@ -11,7 +11,7 @@ import sys
 
 import mmcv
 from mmcv import Config
-from mmdet.models import build_model
+from mmdet.models import build_detector
 
 
 def main():
@@ -19,8 +19,9 @@ def main():
     cfg = Config.fromfile(cfg_path)
     if hasattr(cfg, "plugin"):
         import importlib
-        importlib.import_module(cfg.plugin_dir.replace("/", "."))
-    model = build_model(
+        plugin_dir = cfg.plugin_dir.replace("/", ".").rstrip(".")
+        importlib.import_module(plugin_dir)
+    model = build_detector(
         cfg.model, train_cfg=cfg.get("train_cfg"), test_cfg=cfg.get("test_cfg")
     )
     idx = 0
