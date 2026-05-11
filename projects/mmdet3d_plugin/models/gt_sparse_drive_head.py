@@ -478,13 +478,17 @@ class GTSparseDriveHead(BaseModule):
     # ------------------------------------------------------------------ #
 
     def loss(self, model_outs, data):
-        _, _, motion_output, planning_output = model_outs
+        det_output, _, motion_output, planning_output = model_outs
 
         motion_loss_cache = dict(
             indices=self._build_identity_indices(data),
         )
+        # det_output is required by motion_plan_head.loss when
+        # motion_target_in_agent_frame=True (it uses det anchors to convert
+        # GT trajectories into agent frame for the regression target).
         return self.motion_plan_head.loss(
-            motion_output, planning_output, data, motion_loss_cache
+            motion_output, planning_output, data, motion_loss_cache,
+            det_output=det_output,
         )
 
     def _build_identity_indices(self, data) -> List:
