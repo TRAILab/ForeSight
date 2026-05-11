@@ -7,7 +7,10 @@ Prints `idx name shape` for every Parameter with requires_grad=True, so
 we can map DDP's "Parameter indices which did not receive grad: ..."
 output back to module paths.
 """
+import os
 import sys
+
+sys.path.insert(0, os.getcwd())
 
 import mmcv
 from mmcv import Config
