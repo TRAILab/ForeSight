@@ -63,19 +63,27 @@ class GTSparseDriveHead(BaseModule):
             "and instance_bank sub-modules."
         )
         self.det_head = build_head(det_head)
-        # Freeze all det_head parameters: we only use its sub-modules
-        # (anchor_encoder, instance_bank) as non-trainable components.
-        # This prevents DDP from complaining about unused parameters.
+        # Freeze det_head's bypassed sub-modules (transformer, refine,
+        # fc_before/after, warmup_layers) so DDP doesn't see unused params.
+        # `anchor_encoder` IS consumed every forward to encode GT boxes;
+        # unfreeze it so it can adapt the box embedding for motion
+        # downstream (the goal is best offline prediction, not a pure
+        # GT-perception oracle).
         for p in self.det_head.parameters():
             p.requires_grad_(False)
+        for p in self.det_head.anchor_encoder.parameters():
+            p.requires_grad_(True)
 
         self.num_map_classes = num_map_classes
         if map_head is not None:
             self.map_head = build_head(map_head)
-            # Freeze map_head parameters: only anchor_encoder and
-            # instance_bank sub-modules are used (non-trainable).
+            # Same pattern as det_head: freeze bypassed transformer/refine
+            # modules, leave anchor_encoder trainable so it can adapt the
+            # polyline embedding for motion's cross_gnn.
             for p in self.map_head.parameters():
                 p.requires_grad_(False)
+            for p in self.map_head.anchor_encoder.parameters():
+                p.requires_grad_(True)
 
         assert motion_plan_head is not None
         self.motion_plan_head = build_head(motion_plan_head)
