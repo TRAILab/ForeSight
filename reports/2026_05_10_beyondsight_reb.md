@@ -260,6 +260,12 @@ Bold = better.
 
 ### Confirmed Findings (predonly_revival full vs simple, top-1)
 
+> **Superseded (2026-06-27):** the consistent Killarney re-eval batch
+> (`3502404`/`3502405`, see "Predonly follow-up batch" under Outcomes
+> 2026-05-11) shows full and simple **tie** (0.9523 vs 0.9529). The
+> "full wins" read below was an artifact of comparing across two separate
+> DGX eval runs (3804 vs 3805). Keep for history; trust the re-eval batch.
+
 - **Full wins on car and on the all-class aggregate.** car_top1_ade
   −0.029, car_top1_fde −0.069; all_top1_ade −0.016, all_top1_fde −0.038.
   Mode classification (which the top-1 path is driven by) picks a
@@ -298,6 +304,138 @@ What's *not* yet validated end-to-end on real data:
   — the endpoint is treated as "predicted current-frame XY" without further
   projection. Acceptable since prediction error dominates the small
   per-frame projection delta, but worth revisiting if results disappoint.
+
+## Outcomes (2026-05-11) — predonly follow-up batch + detailed eval
+
+Two things landed after the 2026-05-10 top-1 numbers: (1) the 6-variant
+follow-up batch cloned from `revival_simple` (commit `0d4094bd`), and (2) a
+new offline detailed-prediction-eval framework (commit `c8e18ef1`) that dumps
+raw per-class motion predictions and scores deterministic **L2 / Yaw / BEV-IoU
+/ HitRate**, broken down by class lump (Vehicle / Pedestrian / Movable),
+forecast horizon (0–2 / 2–4 / 4–6 s), and GT-trajectory maneuver (Stationary
+/ Straight / Turning). This is a *different* metric family than the
+`top1_ade`/`top1_fde` above — it scores the single deterministic trajectory,
+not the multimodal min/top-1 selection.
+
+### Detailed-eval headline (All-agent, μ / P90)
+
+`.tex` sources in `reports/`. Baseline `bs24` = full-stack real perception
+(not an oracle), included only as a floor.
+
+| Run | L2 (m) | Yaw (°) | BEV IoU | Hit <2m / <1m |
+|---|---:|---:|---:|---:|
+| bs24 baseline (real perception) | 1.401 / 2.914 | 47.9 | 0.374 | 0.863 / 0.685 |
+| revival **full** (`k3502404`) | 0.816 / 1.656 | 21.6 | 0.650 | 0.912 / 0.862 |
+| revival **simple** | 0.837 / 1.680 | 21.6 | 0.649 | 0.911 / 0.863 |
+| **modesk1_noclass** (`k3502409`) | **0.653 / 1.350** | **20.7** | **0.668** | **0.925 / 0.878** |
+
+Per-class mean L2 (Vehicle / Pedestrian / Movable):
+full `1.195 / 0.570 / 0.097`, simple `1.237 / 0.559 / 0.095`,
+modesk1_noclass `0.943 / 0.479 / 0.088`.
+
+### Confirmed findings (detailed eval)
+
+- **Single-mode (`modesk1_noclass`) wins decisively on deterministic L2** —
+  0.653 vs full 0.816 / simple 0.837 (−0.16 to −0.18 m, well above the
+  ~0.012 noise floor), and it wins on *every* metric and *every* class lump,
+  **including pedestrian** (0.479 vs full 0.570 / simple 0.559). It is
+  `fut_mode=1` with `motion_loss_cls.loss_weight=0.0` — no mode-classifier.
+- **Mechanism**: the 2026-05-10 top-1 analysis pegged the ceiling on the
+  mode classifier (top1 trailed min_ade because argmax picked the wrong mode).
+  Collapsing to one mode removes the classifier from the loop entirely, so the
+  single trained trajectory is a better *deterministic* prediction than the
+  6-mode top-1. This sidesteps — rather than solves — the classifier
+  bottleneck flagged in "Next" item (2).
+- **Pedestrian flip is gone under single-mode.** The full-vs-simple ped flip
+  was a mode-classification artifact; with no classifier it disappears.
+- **full ≈ simple confirmed on the new metric** (0.816 vs 0.837, full
+  marginally better) — consistent with the top-1 ranking, so the new
+  framework corroborates the earlier numbers.
+
+### Occluded breakdown (revival full, `..._occluded_27.tex` / `..._reweighted.tex`)
+
+Occluded-agent deterministic L2 is ~27% worse than visible (All 1.039 vs
+0.816), concentrated in Vehicles (1.621 vs 1.195) and at long horizon
+(4–6 s Straight Vehicle blows up to 6.9 m). Pedestrian/Movable degrade much
+less. Per-(class × horizon × maneuver) table is in
+`predonly_revival_full_detailed_pred_eval_occluded_27.tex`.
+
+### Detection track — tpd + fusion (Killarney, recovered 2026-06-27)
+
+All four ran to completion in May (~5 h 16–22 m each, clean `Done`) on
+Killarney; logs recovered now that access is restored.
+Full-stack vanilla (real perception). Baseline = `SparseDrive default`
+(NDS 0.523 / mAP 0.413 / mAP_normal 0.553) in `results_summary.md`.
+
+| Run | Job | NDS | mAP | mAP_norm | L2 | CR | car_EPA | car_minADE | all_minADE |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| baseline (bs24) | — | 0.523 | 0.413 | 0.553 | — | — | 0.492 | — | — |
+| **tpd** | 3498999 | **0.5226** | **0.4135** | **0.5677** | **0.5987** | 0.101% | **0.4906** | **0.6355** | **0.5537** |
+| fuseA | 3500449 | 0.5165 | 0.4098 | 0.5589 | 0.5983 | 0.111% | 0.4827 | 0.6717 | 0.5749 |
+| fuseB | 3500450 | 0.5213 | 0.4057 | 0.5558 | 0.6394 | 0.104% | 0.4820 | 0.6724 | 0.5722 |
+| fuseC | 3500451 | 0.5173 | 0.3987 | 0.5569 | 0.6273 | 0.142% | 0.4740 | 0.6356 | 0.5616 |
+
+**Confirmed findings (detection track):**
+
+- **TPD is detection-neutral, not detection-positive.** tpd NDS 0.5226 /
+  mAP 0.4135 sit right on the vanilla baseline (0.523 / 0.413) — within noise.
+  The distinguishing TPD claim (forward-looking motion-cache K/V into the
+  detection warmup) does **not** move detection mAP/NDS. The one bright spot is
+  mAP_normal +0.015 (0.5677 vs 0.553), and it doesn't regress planning
+  (L2 0.599, CR 0.101%) or motion (best car/all minADE of the four).
+- **No fusion strategy beats injection-only TPD — clean negative.** All three
+  fusion variants are *below* tpd on both NDS (0.5165 / 0.5213 / 0.5173) and
+  mAP (0.4098 / 0.4057 / 0.3987), and fuseB/fuseC also regress planning L2
+  (0.639 / 0.627 vs 0.599) and motion (car_minADE 0.67 vs 0.64). Folding warmup
+  features into the main decoder's last refine *hurts* rather than helps. The
+  report's primary question — does any fusion beat injection-only TPD on
+  detection — is answered **no**.
+
+### Predonly follow-up batch — top-1 isolation (Killarney, recovered 2026-06-27)
+
+All 6 follow-up variants + a re-eval of full/simple completed on Killarney
+(jobs `3502404–3502411`, all clean `Done`). **Critically, these were all
+scored in one consistent eval batch** — the same framework that dumps
+`motion_predictions.pkl` — so they are directly comparable to each other in a
+way the original DGX (3804) vs DGX (3805) numbers were not.
+
+`top1_ade_err` (lower = better), the metric this track targets. `min_ade`
+shown for context (multimodal coverage, ~flat across the 6-mode variants).
+
+| Variant | Job | car_top1 | all_top1 | car_min_ade | What it adds vs `simple` |
+|---|---|---:|---:|---:|---|
+| simple | 3502405 | 0.9529 | 0.6601 | 0.3578 | neither (control) |
+| full | 3502404 | 0.9523 | 0.6603 | 0.3603 | per-waypoint **+** mode-SA |
+| modeSAonly | 3502406 | 0.9690 | 0.6696 | 0.3585 | mode-mode SA only |
+| **perwaypointonly** | 3502407 | **0.9361** | **0.6503** | 0.3597 | per-waypoint deformable only |
+| classw2x | 3502410 | 0.9246 | 0.6425 | 0.3629 | motion_loss_cls ×2 |
+| longer20ep | 3502411 | 0.9224 | 0.6382 | 0.3512 | 20 epochs |
+| modesk4 | 3502408 | 0.9113 | 0.6332 | 0.4175 | fut_mode=4 |
+| **modesk1_noclass** | 3502409 | **0.7545** | **0.5305** | 0.7545 | fut_mode=1, no cls loss |
+
+**Confirmed findings (top-1 isolation):**
+
+- **The original "full beats simple" headline was eval-batch noise.** In the
+  consistent re-eval, full (0.9523) and simple (0.9529) **tie** (Δ 0.0006,
+  far under the 0.012 noise floor) — not the −0.029 car gap the DGX batch
+  showed. The 2026-05-10 "Confirmed Findings" section below is superseded by
+  this batch.
+- **2×2 isolates the mechanism: per-waypoint deformable helps, mode-mode SA
+  hurts, and in `full` they cancel.** `perwaypointonly` 0.9361 beats simple
+  by −0.017 car (above noise); `modeSAonly` 0.9690 is *worse* than simple by
+  +0.016. `full` lands back at simple because the productive per-waypoint gain
+  is canceled by the harmful mode-SA. → **graduate per-waypoint deformable,
+  drop mode-mode SA.** This answers "Next" item (1) decisively.
+- **Cheap classifier knobs help top-1, as predicted.** classw2x (0.9246) and
+  longer20ep (0.9224) both beat simple while `min_ade` stays flat (~0.36) —
+  confirming top-1 is mode-classifier-bottlenecked, not regression-bottlenecked
+  ("Next" items 2 & 4).
+- **Fewer modes trade coverage for top-1.** modesk4 (0.9113) and especially
+  modesk1_noclass (0.7545) give the best top-1, but modesk1's `min_ade`
+  collapses to 0.7545 (single mode → min == top1, no multimodal benefit).
+  Consistent with the detailed-eval L2 result above where modesk1_noclass won
+  deterministic L2. The choice is explicitly top-1/deterministic quality vs
+  multimodal coverage.
 
 ## Open questions
 
@@ -369,15 +507,14 @@ For the TPD and TPD↔main fusion experiments the goal is detection
 quality with no regression on full task set. Full metric set will be
 populated when the runs land:
 
-- **Killarney 3498999 (tpd)** — ETA ~56 min. Eval will produce
-  NDS / mAP / mAP_normal / motion / planning. Compare against the
-  vanilla `bs24` baseline already in `results_summary.md`.
-- **Killarney 3500449/3500450/3500451 (fuseA/B/C)** — just started,
-  ETA ~5 h. Each replaces the main decoder's last refine with a fused
-  output that combines TPD warmup features with main features. The
-  primary question is whether *any* of the three fusion strategies
-  beats injection-only TPD on detection; the secondary question is
-  whether the fused stack regresses on planning or motion.
+- **Killarney 3498999 (tpd)** and **3500449/50/51 (fuseA/B/C)** — **DONE,
+  metrics recovered 2026-06-27** (see "Detection track" table in Outcomes
+  2026-05-11). Result: TPD is detection-neutral vs the vanilla baseline, and
+  none of the three fusion strategies beats injection-only TPD — both the
+  primary (fusion > injection?) and the implicit (TPD > baseline?) questions
+  came back negative.
 
-Decisions deferred until those land. Resurvey when Killarney 3498999
-completes.
+**Status (resurvey 2026-06-27):** detection track is closed — TPD neutral,
+fusion a clean negative; do not port fusion forward. The predonly track has
+moved on to the single-mode result (`modesk1_noclass`), which is the current
+front-runner on deterministic L2.
