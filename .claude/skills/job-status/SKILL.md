@@ -39,7 +39,7 @@ timeout 15 ssh narval "source ~/.bashrc && squeue -u spapais --noheader --format
 timeout 15 ssh trillium_gpu "source ~/.bashrc && squeue -u spapais --noheader --format='%.10i|%.8T|%.10M|%.10L|%.6D|%.20b|%R'" 2>&1
 
 # Killarney (needs module load)
-timeout 15 ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && squeue -u spapais --noheader --format='%.10i|%.8T|%.10M|%.10L|%.6D|%.20b|%R'" 2>&1
+timeout 15 ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/25.05.6 && squeue -u spapais --noheader --format='%.10i|%.8T|%.10M|%.10L|%.6D|%.20b|%R'" 2>&1
 
 # Fir
 timeout 15 ssh fir "source ~/.bashrc && squeue -u spapais --noheader --format='%.10i|%.8T|%.10M|%.10L|%.6D|%.20b|%R'" 2>&1

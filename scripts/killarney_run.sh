@@ -55,7 +55,7 @@ echo "Done extracting data"
 # Run command
 # echo "Debug mode: sleep engaged" && sleep 5d # Uncomment to debug
 source /etc/profile.d/modules.sh
-module load slurm/killarney/24.05.7
+module load slurm/killarney/25.05.6
 duration=$SECONDS
 echo "[$((duration/3600))h$(((duration%3600)/60))m]: Running command"
 echo "$CONTAINER_CMD"

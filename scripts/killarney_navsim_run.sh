@@ -18,7 +18,7 @@
 #
 # Usage (from local):
 #   ssh killarney "source /etc/profile.d/modules.sh && \
-#                  module load slurm/killarney/24.05.7 && \
+#                  module load slurm/killarney/25.05.6 && \
 #                  sbatch --export=ALL /home/spapais/ForeSight/scripts/killarney_navsim_run.sh \
 #                  bash /workspace/ForeSight/scripts/navsim_train.sh navmini"
 
@@ -66,7 +66,7 @@ CONTAINER_CMD="$CONTAINER_CMD bash -c 'export LD_LIBRARY_PATH=/usr/lib/x86_64-li
 mkdir -p $TMP_DATA_DIR $TMP_DIR $WORK_DIR $WANDB_PERSIST_DIR $NAVSIM_DATA_HOST_DIR
 
 source /etc/profile.d/modules.sh
-module load slurm/killarney/24.05.7
+module load slurm/killarney/25.05.6
 
 SECONDS=0
 echo "[$((SECONDS/60))m]: Running command"

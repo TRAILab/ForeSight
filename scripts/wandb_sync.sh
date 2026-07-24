@@ -40,7 +40,7 @@ case "$HOST" in
         WANDB_DIR=${WANDB_DIR:-/scratch/spapais/ForeSight/wandb}
         APPTAINER=${APPTAINER:-/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/Core/apptainer/1.4.5/bin/apptainer}
         source /etc/profile.d/modules.sh
-        module load slurm/killarney/24.05.7
+        module load slurm/killarney/25.05.6
         ;;
     *) echo "Unknown host: $HOST (use narval|trillium|killarney)" >&2; exit 1 ;;
 esac
