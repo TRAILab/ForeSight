@@ -23,7 +23,7 @@ ssh trail_dgx "source ~/.bashrc && squeue -u spapais --format='%.10i %.20j %.8T 
   | awk -F'|' -v cutoff='<ended_since>' '\$5 != \"Unknown\" && \$5 >= cutoff'"
 ```
 
-Same pattern for `narval`, `trillium_gpu`, and `killarney` (Killarney needs `source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7`).
+Same pattern for `narval`, `trillium_gpu`, and `killarney` (Killarney needs `source /etc/profile.d/modules.sh && module load slurm/killarney/25.05.6`).
 
 The awk filter keeps any row whose `End` is on or after `<ended_since>`, regardless of when the job started — so a 36 h run that started 2 days ago and ended 6 h ago will show up under a 24 h end-time lookback.
 

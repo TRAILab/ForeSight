@@ -58,7 +58,7 @@ Parse `Submitted batch job <ID>`.
 
 ### Killarney
 ```bash
-ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && sbatch --export=ALL /home/spapais/ForeSight/scripts/killarney_run.sh <wrapped_cmd>"
+ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/25.05.6 && sbatch --export=ALL /home/spapais/ForeSight/scripts/killarney_run.sh <wrapped_cmd>"
 ```
 Parse `Submitted batch job <ID>`.
 

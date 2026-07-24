@@ -86,7 +86,7 @@ Autonomous driving research codebase built on SparseDrive. Training and evaluati
 - Repo: `/home/spapais/ForeSight`
 - No VPN required (geo-blocked; requires access from a Canadian institution network)
 - SLURM requires module init; `--chdir=/scratch` is baked into the script:
-  `ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7 && sbatch --export=ALL /home/spapais/ForeSight/scripts/killarney_run.sh <cmd>"`
+  `ssh killarney "source /etc/profile.d/modules.sh && module load slurm/killarney/25.05.6 && sbatch --export=ALL /home/spapais/ForeSight/scripts/killarney_run.sh <cmd>"`
 - Container runtime is apptainer via CVMFS (not a loadable module); called via full path in `killarney_run.sh`
 - WandB runs in offline mode on Killarney.
 

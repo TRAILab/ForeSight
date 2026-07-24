@@ -102,7 +102,7 @@ CLUSTER_INFO: dict[str, dict[str, str]] = {
         "sacct_account": "rrg-swasland",
         "probe_cwd": "",
         "lab_users_dir": "$HOME/projects/rrg-swasland",
-        "weekly_gpu_hrs_target": "172",
+        "gpu_hrs_14d_target": "1331",
     },
     "trillium": {
         "kind": "slurm",
@@ -119,7 +119,7 @@ CLUSTER_INFO: dict[str, dict[str, str]] = {
         "sacct_account": "rrg-swasland",
         "probe_cwd": "",
         "lab_users_dir": "$HOME/links/projects/rrg-swasland",
-        "weekly_gpu_hrs_target": "103",
+        "gpu_hrs_14d_target": "665",
         "pending_gpu_groups": (4, 1),
     },
     "killarney": {
@@ -127,7 +127,7 @@ CLUSTER_INFO: dict[str, dict[str, str]] = {
         "group": "external",
         "host": "killarney",
         "ip": "killarney.alliancecan.ca",
-        "init": "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7",
+        "init": "source /etc/profile.d/modules.sh && module load slurm/killarney/25.05.6",
         "node_type": "4xL40S-48GB",
         "partition": "gpubase_l40s_b1,gpubase_l40s_b2,gpubase_l40s_b3,gpubase_l40s_b4,gpubase_l40s_b5",
         "account": "",
@@ -144,7 +144,7 @@ CLUSTER_INFO: dict[str, dict[str, str]] = {
         "group": "external",
         "host": "killarney",
         "ip": "killarney.alliancecan.ca",
-        "init": "source /etc/profile.d/modules.sh && module load slurm/killarney/24.05.7",
+        "init": "source /etc/profile.d/modules.sh && module load slurm/killarney/25.05.6",
         "node_type": "8xH100-48GB",
         "partition": "gpubase_h100_b1,gpubase_h100_b2,gpubase_h100_b3,gpubase_h100_b4,gpubase_h100_b5",
         "account": "",
@@ -1759,18 +1759,19 @@ def compute_cluster_snapshot_rows(
             and stale_acct[cluster] is None
         )
         qtime_7d_secs: float | None = None
-        weekly_target = info.get("weekly_gpu_hrs_target", "")
+        target_14d = info.get("gpu_hrs_14d_target", "")
         if rows is None or sacct_no_data:
-            gpu_hrs_7d_str = "N/A"
+            gpu_hrs_used_str = "N/A"
+            gpu_hrs_target_str = "N/A"
             qtime_7d_str = "N/A"
             users_7d_str = "N/A"
         else:
-            used = f"{gpu_hours_by_cluster.get(cluster, 0.0):.0f}"
-            if weekly_target:
-                period_target = round(int(weekly_target) * TRAIL_LOOKBACK_DAYS / 7)
-                gpu_hrs_7d_str = f"{used} / {period_target}"
+            gpu_hrs_used_str = f"{gpu_hours_by_cluster.get(cluster, 0.0):.0f}"
+            if target_14d:
+                period_target = round(int(target_14d) * TRAIL_LOOKBACK_DAYS / 14)
+                gpu_hrs_target_str = str(period_target)
             else:
-                gpu_hrs_7d_str = used
+                gpu_hrs_target_str = "—"
             q_list = queue_secs_by_cluster.get(cluster, [])
             if q_list:
                 qtime_7d_secs = sum(q_list) / len(q_list)
@@ -1791,7 +1792,8 @@ def compute_cluster_snapshot_rows(
                 "node_type": info["node_type"],
                 "active_nodes": active_str,
                 "levelfs": lfs_str,
-                "trail_gpu_hrs_7d": gpu_hrs_7d_str,
+                "trail_gpu_hrs_used": gpu_hrs_used_str,
+                "trail_gpu_hrs_target": gpu_hrs_target_str,
                 "trail_qtime_7d": qtime_7d_str,
                 "trail_qtime_7d_secs": qtime_7d_secs,
                 "trail_users_7d": users_7d_str,
@@ -2382,16 +2384,18 @@ def print_cluster_snapshot(
     n_days = TRAIL_LOOKBACK_DAYS
     headers = [
         "Cluster", "Node Type", "GPU NODES", "LEVELFS",
-        f"{n_days}D GPU HRS", f"{n_days}D QUEUE TIME", f"{n_days}D USERS",
+        f"{n_days}D GPU HRS USED", f"{n_days}D GPU HRS TARGET",
+        f"{n_days}D QUEUE TIME", f"{n_days}D USERS",
     ]
-    widths = [14, 14, 9, 7, 12, 14, 28]
+    widths = [14, 14, 9, 7, 16, 18, 14, 28]
     body = [
         [
             str(r["cluster"]),
             str(r["node_type"]),
             str(r["active_nodes"]),
             str(r["levelfs"]),
-            str(r["trail_gpu_hrs_7d"]),
+            str(r["trail_gpu_hrs_used"]),
+            str(r["trail_gpu_hrs_target"]),
             str(r["trail_qtime_7d"]),
             str(r["trail_users_7d"]),
         ]
@@ -3642,7 +3646,8 @@ def write_html(
             if include_levelfs:
                 cells.append(f'<td>{html.escape(str(r["levelfs"]))}</td>')
             cells.extend([
-                f'<td>{html.escape(str(r["trail_gpu_hrs_7d"]))}</td>',
+                f'<td>{html.escape(str(r["trail_gpu_hrs_used"]))}</td>',
+                f'<td>{html.escape(str(r["trail_gpu_hrs_target"]))}</td>',
                 qtime_cell,
             ])
             if include_users:
@@ -4151,7 +4156,7 @@ def write_html(
   <table>
     <thead>
       <tr>
-        <th>Cluster</th><th>Node Type</th><th>GPU NODES</th><th>LEVELFS</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS</th><th>{TRAIL_LOOKBACK_DAYS}D QUEUE TIME</th><th>{TRAIL_LOOKBACK_DAYS}D USERS</th>
+        <th>Cluster</th><th>Node Type</th><th>GPU NODES</th><th>LEVELFS</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS USED</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS TARGET</th><th>{TRAIL_LOOKBACK_DAYS}D QUEUE TIME</th><th>{TRAIL_LOOKBACK_DAYS}D USERS</th>
       </tr>
     </thead>
     <tbody>
@@ -4176,7 +4181,7 @@ def write_html(
   <table>
     <thead>
       <tr>
-        <th>Cluster</th><th>Node Type</th><th>GPU NODES</th><th>LEVELFS</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS</th><th>{TRAIL_LOOKBACK_DAYS}D QUEUE TIME</th><th>Location</th>
+        <th>Cluster</th><th>Node Type</th><th>GPU NODES</th><th>LEVELFS</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS USED</th><th>{TRAIL_LOOKBACK_DAYS}D GPU HRS TARGET</th><th>{TRAIL_LOOKBACK_DAYS}D QUEUE TIME</th><th>Location</th>
       </tr>
     </thead>
     <tbody>
