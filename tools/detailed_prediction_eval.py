@@ -205,7 +205,8 @@ def load_gt(nusc: NuScenes, eval_set: str, seconds: int = 6) -> Dict[str, List[d
          'box_lidar_center': (3,) np.ndarray,          # current-frame, lidar
          'box_lidar_yaw': float,                       # current-frame, lidar
          'gt_traj_lidar': (Tv, 2) np.ndarray,          # future XY in lidar frame
-         'instance_token': str}
+         'instance_token': str,
+         'instance_inds': int}                          # nusc.instance index (for occ pkl lookup)
     """
     helper = PredictHelper(nusc)
     tokens = split_sample_tokens(nusc, eval_set)
@@ -246,9 +247,75 @@ def load_gt(nusc: NuScenes, eval_set: str, seconds: int = 6) -> Dict[str, List[d
                 'box_lidar_yaw': box_yaw,
                 'gt_traj_lidar': np.asarray(fut_lidar, dtype=np.float64),
                 'instance_token': ann['instance_token'],
+                'instance_inds': int(nusc.getind('instance', ann['instance_token'])),
             })
         out[sample_token] = gts
     return out
+
+
+# --- Occlusion data --------------------------------------------------------
+
+
+def load_occ_data(occ_pkl_path: str):
+    """Build per-(sample, instance) occlusion lookup + scene time ordering.
+
+    Occluded definition matches tools/data_converter/plot_occlusion_durations.py:
+        is_interpolated OR is_extrapolated OR (num_lidar_pts + num_radar_pts < 1)
+
+    Returns
+    -------
+    occ_flag : dict[(sample_token, instance_inds)] -> bool
+        True if the agent's box at that sample is occluded (any of the 3 types).
+    sample_to_pos : dict[sample_token] -> (scene_token, int position_in_scene)
+    scene_to_samples : dict[scene_token] -> list[sample_token] ordered by timestamp
+    """
+    import pickle as _pickle
+    from collections import defaultdict
+    with open(occ_pkl_path, 'rb') as f:
+        data = _pickle.load(f)
+    infos = data['infos']
+
+    occ_flag: Dict[Tuple[str, int], bool] = {}
+    scene_to_samples_ts = defaultdict(list)  # scene -> [(ts, sample_token)]
+
+    for info in infos:
+        st = info['token']
+        scene = info['scene_token']
+        scene_to_samples_ts[scene].append((info['timestamp'], st))
+
+        is_int = info['is_interpolated']
+        is_ext = info['is_extrapolated']
+        nlp = info['num_lidar_pts']
+        nrp = info.get('num_radar_pts', np.zeros_like(nlp))
+        inst_inds = info['instance_inds']
+        zero_pts = (nlp + nrp) < 1
+        occ = is_int | is_ext | zero_pts
+        for ii, inst in enumerate(inst_inds):
+            occ_flag[(st, int(inst))] = bool(occ[ii])
+
+    scene_to_samples = {}
+    sample_to_pos: Dict[str, Tuple[str, int]] = {}
+    for scene, items in scene_to_samples_ts.items():
+        items.sort(key=lambda x: x[0])
+        ordered = [st for _, st in items]
+        scene_to_samples[scene] = ordered
+        for pos, st in enumerate(ordered):
+            sample_to_pos[st] = (scene, pos)
+
+    return occ_flag, sample_to_pos, scene_to_samples
+
+
+def future_sample_token(sample_to_pos, scene_to_samples,
+                        sample_token: str, tick_i: int) -> Optional[str]:
+    """tick_i is 0-indexed; tick 0 = +0.5s = next sample."""
+    if sample_token not in sample_to_pos:
+        return None
+    scene, pos = sample_to_pos[sample_token]
+    target = pos + tick_i + 1
+    samples = scene_to_samples[scene]
+    if target >= len(samples):
+        return None
+    return samples[target]
 
 
 # --- Prediction loading ---------------------------------------------------
@@ -354,7 +421,10 @@ def classify_motion(gt_traj: np.ndarray) -> str:
     return 'Straight'
 
 
-def compute_per_agent_arrays(matches_by_sample, fut_ts: int = FUT_TS):
+def compute_per_agent_arrays(matches_by_sample, fut_ts: int = FUT_TS,
+                              occ_flag: Optional[dict] = None,
+                              sample_to_pos: Optional[dict] = None,
+                              scene_to_samples: Optional[dict] = None):
     """Flatten matches into per-(agent, tick) numpy arrays plus per-agent metadata.
 
     Returns dict with:
@@ -362,10 +432,14 @@ def compute_per_agent_arrays(matches_by_sample, fut_ts: int = FUT_TS):
         yaw_err:   (N_agent, T)  -- nan where tangent is undefined either side
         bev_iou:   (N_agent, T)
         valid:     (N_agent, T)  bool -- True where GT has a future point
+        occluded:  (N_agent, T)  bool -- True if the GT box at that future
+                   sample is occluded (interp|extrap|zero-pts).  Always False
+                   when no occ data is supplied.
         class_lump:    list of str length N_agent
         motion_bin:    list of str length N_agent
     """
-    l2_rows, yaw_rows, iou_rows, valid_rows = [], [], [], []
+    have_occ = occ_flag is not None and sample_to_pos is not None
+    l2_rows, yaw_rows, iou_rows, valid_rows, occ_rows = [], [], [], [], []
     lump_list, motion_list = [], []
     for sample_token, matches in matches_by_sample.items():
         for pred, gt in matches:
@@ -402,10 +476,28 @@ def compute_per_agent_arrays(matches_by_sample, fut_ts: int = FUT_TS):
             iou_full[:T] = ious
             valid_full[:T] = True
 
+            occ_full = np.zeros(fut_ts, dtype=bool)
+            if have_occ:
+                inst_ind = gt.get('instance_inds')
+                if inst_ind is not None:
+                    for t in range(T):
+                        fst = future_sample_token(
+                            sample_to_pos, scene_to_samples, sample_token, t,
+                        )
+                        if fst is None:
+                            # Agent left the scene; treat as not in occlusion
+                            # population (already False in occ_full).
+                            continue
+                        # Missing key => agent not in that future sample's
+                        # val_occ entry; the GT future tick came from
+                        # predict_helper interpolation, so treat as occluded.
+                        occ_full[t] = bool(occ_flag.get((fst, int(inst_ind)), True))
+
             l2_rows.append(l2_full)
             yaw_rows.append(yaw_full)
             iou_rows.append(iou_full)
             valid_rows.append(valid_full)
+            occ_rows.append(occ_full)
             lump_list.append(class_lump(gt['detection_name']))
             motion_list.append(classify_motion(gt_traj))
 
@@ -414,19 +506,25 @@ def compute_per_agent_arrays(matches_by_sample, fut_ts: int = FUT_TS):
         'yaw_err': np.stack(yaw_rows) if yaw_rows else np.zeros((0, fut_ts)),
         'bev_iou': np.stack(iou_rows) if iou_rows else np.zeros((0, fut_ts)),
         'valid': np.stack(valid_rows) if valid_rows else np.zeros((0, fut_ts), dtype=bool),
+        'occluded': np.stack(occ_rows) if occ_rows else np.zeros((0, fut_ts), dtype=bool),
         'class_lump': lump_list,
         'motion_bin': motion_list,
     }
 
 
-def aggregate_row(arrays, agent_mask: np.ndarray, tick_slice: slice) -> dict:
+def aggregate_row(arrays, agent_mask: np.ndarray, tick_slice: slice,
+                  occluded_only: bool = False) -> dict:
     """Compute (mu, P90) for L2 / yaw; (mu, P10) for IoU; hit rates for L2.
 
     Aggregation is over (agent, tick) pairs in the selection, masked by valid.
+    If ``occluded_only`` is True, the pairs are additionally restricted to
+    those flagged as occluded (interp|extrap|zero-pts).
     """
     if agent_mask.sum() == 0:
         return None
     valid = arrays['valid'][agent_mask, tick_slice]
+    if occluded_only:
+        valid = valid & arrays['occluded'][agent_mask, tick_slice]
     l2 = arrays['l2'][agent_mask, tick_slice]
     yerr = arrays['yaw_err'][agent_mask, tick_slice]
     iou = arrays['bev_iou'][agent_mask, tick_slice]
@@ -449,6 +547,22 @@ def aggregate_row(arrays, agent_mask: np.ndarray, tick_slice: slice) -> dict:
         'hit_2m': float(np.mean(flat_l2 < HIT_THRESHOLDS_M[0])),
         'hit_1m': float(np.mean(flat_l2 < HIT_THRESHOLDS_M[1])),
     }
+
+
+def _occluded_pct(arrays, agent_mask: np.ndarray, tick_slice: slice) -> float:
+    """Per-row share of the occluded population.
+
+    Defined as ``P(in slice | occluded)`` = occluded pairs in this slice
+    divided by all occluded pairs in the dataset. By construction All = 100%
+    and each axis (class / horizon / maneuver) sums to 100% across its rows,
+    matching the Table A convention.
+    """
+    total = int((arrays['valid'] & arrays['occluded']).sum())
+    if total == 0:
+        return 0.0
+    in_slice = arrays['valid'][agent_mask, tick_slice] & \
+        arrays['occluded'][agent_mask, tick_slice]
+    return 100.0 * int(in_slice.sum()) / total
 
 
 def build_table(arrays) -> List[dict]:
@@ -502,6 +616,65 @@ def build_table(arrays) -> List[dict]:
     return rows
 
 
+def build_table_27(arrays) -> List[dict]:
+    """27-row table: class x horizon x maneuver. Metrics computed on OCCLUDED
+    subset within each cell. Label % is the per-cell occlusion prevalence
+    (fraction of valid pairs in this cell that are flagged occluded).
+    """
+    n_agents = arrays['l2'].shape[0]
+    if n_agents == 0:
+        raise RuntimeError('No matched (pred, gt) pairs to score.')
+    lump_arr = np.array(arrays['class_lump'])
+    motion_arr = np.array(arrays['motion_bin'])
+    rows = []
+    for grp in ('Vehicle', 'Pedestrian', 'Movable'):
+        cls_mask = lump_arr == grp
+        for h_label, (lo, hi) in HORIZON_BINS.items():
+            for behavior in ('Stationary', 'Straight', 'Turning'):
+                mask = cls_mask & (motion_arr == behavior)
+                tick_slice = slice(lo, hi)
+                pct = _occluded_pct(arrays, mask, tick_slice) if mask.any() else 0.0
+                stats = aggregate_row(arrays, mask, tick_slice, occluded_only=True)
+                rows.append({
+                    'class': grp,
+                    'horizon': h_label,
+                    'maneuver': behavior,
+                    'label': f'{grp} / {h_label} / {behavior}',
+                    'label_pct': pct,
+                    'stats': stats,
+                })
+    return rows
+
+
+def build_table_occluded_reweighted(arrays) -> List[dict]:
+    """Same 10-row structure as the original (All + 3 class + 3 horizon +
+    3 maneuver) but every row's metric is computed on the OCCLUDED subset
+    only. Label % reports the per-row occlusion prevalence.
+    """
+    n_agents = arrays['l2'].shape[0]
+    if n_agents == 0:
+        raise RuntimeError('No matched (pred, gt) pairs to score.')
+    lump_arr = np.array(arrays['class_lump'])
+    motion_arr = np.array(arrays['motion_bin'])
+    all_mask = np.ones(n_agents, dtype=bool)
+    full_slice = slice(0, FUT_TS)
+    rows = []
+
+    def add(label, mask, tick_slice):
+        pct = _occluded_pct(arrays, mask, tick_slice)
+        stats = aggregate_row(arrays, mask, tick_slice, occluded_only=True)
+        rows.append({'label': label, 'label_pct': pct, 'stats': stats})
+
+    add('All', all_mask, full_slice)
+    for grp in ('Vehicle', 'Pedestrian', 'Movable'):
+        add(grp, lump_arr == grp, full_slice)
+    for label, (lo, hi) in HORIZON_BINS.items():
+        add(label, all_mask, slice(lo, hi))
+    for behavior in ('Stationary', 'Straight', 'Turning'):
+        add(behavior, motion_arr == behavior, full_slice)
+    return rows
+
+
 # --- Rendering -------------------------------------------------------------
 
 
@@ -530,12 +703,12 @@ def render_markdown(rows: List[dict]) -> str:
     return '\n'.join(lines)
 
 
-def render_latex(rows: List[dict]) -> str:
+def render_latex(rows: List[dict], pct_label: str = 'Labels') -> str:
     lines = []
     lines.append(r'\begin{tabular}{lcccccc}')
     lines.append(r'\toprule')
     lines.append(
-        r'\textbf{Label Subset} & \textbf{Labels} & \textbf{L2 err. (m) $\downarrow$} '
+        rf'\textbf{{Label Subset}} & \textbf{{{pct_label}}} & \textbf{{L2 err. (m) $\downarrow$}} '
         r'& \textbf{Yaw err. ($^\circ$) $\downarrow$} & \textbf{BEV IoU $\uparrow$} '
         r'& \textbf{Hit Rate $\uparrow$} \\'
     )
@@ -581,6 +754,71 @@ def render_latex(rows: List[dict]) -> str:
     return '\n'.join(lines)
 
 
+def render_markdown_27(rows: List[dict]) -> str:
+    lines = []
+    lines.append('| Class | Horizon | Maneuver | Occ % | L2 (μ, P90) | Yaw (μ, P90) | IoU (μ, P10) | Hit (<2m, <1m) |')
+    lines.append('|---|---|---|---:|---|---|---|---|')
+    for row in rows:
+        s = row['stats']
+        if s is None:
+            lines.append(
+                f"| {row['class']} | {row['horizon']} | {row['maneuver']} | "
+                f"{row['label_pct']:.1f} | - | - | - | - |"
+            )
+            continue
+        lines.append(
+            f"| {row['class']} | {row['horizon']} | {row['maneuver']} | "
+            f"{row['label_pct']:.1f} | "
+            f"{_fmt(s['l2_mu'])} / {_fmt(s['l2_p90'])} | "
+            f"{_fmt(s['yaw_mu'], 1)} / {_fmt(s['yaw_p90'], 1)} | "
+            f"{_fmt(s['iou_mu'])} / {_fmt(s['iou_p10'])} | "
+            f"{_fmt(s['hit_2m'])} / {_fmt(s['hit_1m'])} |"
+        )
+    return '\n'.join(lines)
+
+
+def render_latex_27(rows: List[dict]) -> str:
+    lines = []
+    lines.append(r'\begin{tabular}{lllcccccc}')
+    lines.append(r'\toprule')
+    lines.append(
+        r'\textbf{Class} & \textbf{Horizon} & \textbf{Maneuver} & \textbf{Occ} '
+        r'& \textbf{L2 err. (m) $\downarrow$} & \textbf{Yaw err. ($^\circ$) $\downarrow$} '
+        r'& \textbf{BEV IoU $\uparrow$} & \textbf{Hit Rate $\uparrow$} \\'
+    )
+    lines.append(
+        r' & & & \% & ($\mu$, $P_{90}$) & ($\mu$, $P_{90}$) & ($\mu$, $P_{10}$) '
+        r'& ($<$2m, $<$1m) \\'
+    )
+    lines.append(r'\midrule')
+
+    last_class = None
+    for row in rows:
+        if last_class is not None and row['class'] != last_class:
+            lines.append(r'\midrule')
+        s = row['stats']
+        h_lbl = row['horizon'].replace('-', '--')
+        if s is None:
+            lines.append(
+                rf"{row['class']} & {h_lbl} & {row['maneuver']} & "
+                rf"{row['label_pct']:.1f} & - & - & - & - \\"
+            )
+        else:
+            lines.append(
+                rf"{row['class']} & {h_lbl} & {row['maneuver']} & "
+                rf"{row['label_pct']:.1f} & "
+                rf"{_fmt(s['l2_mu'])} / {_fmt(s['l2_p90'])} & "
+                rf"{_fmt(s['yaw_mu'], 1)} / {_fmt(s['yaw_p90'], 1)} & "
+                rf"{_fmt(s['iou_mu'])} / {_fmt(s['iou_p10'])} & "
+                rf"{_fmt(s['hit_2m'])} / {_fmt(s['hit_1m'])} \\"
+            )
+        last_class = row['class']
+
+    lines.append(r'\bottomrule')
+    lines.append(r'\end{tabular}')
+    return '\n'.join(lines)
+
+
 # --- CLI -------------------------------------------------------------------
 
 
@@ -593,6 +831,11 @@ def main():
     parser.add_argument('--seconds', type=int, default=6)
     parser.add_argument('--output-tex', default=None, help='Path to write LaTeX table; '
                         'defaults to <pred-pkl-dir>/detailed_prediction_eval.tex')
+    parser.add_argument('--occ-pkl', default='data/infos/nuscenes_infos_val_occ.pkl',
+                        help='Path to nuscenes_infos_<split>_occ.pkl. When present, '
+                             'two extra tables are produced: a 27-row breakdown '
+                             '(class x horizon x maneuver) on the occluded subset, '
+                             'and a 10-row re-weighted version of the original table.')
     args = parser.parse_args()
 
     if args.output_tex is None:
@@ -623,20 +866,71 @@ def main():
     n_match = sum(len(v) for v in matches_by_sample.values())
     print(f'[detailed-eval] {n_match} (pred, gt) matches')
 
-    arrays = compute_per_agent_arrays(matches_by_sample, fut_ts=args.seconds * 2)
+    occ_flag = sample_to_pos = scene_to_samples = None
+    if args.occ_pkl and os.path.isfile(args.occ_pkl):
+        print(f'[detailed-eval] loading occ flags: {args.occ_pkl}')
+        occ_flag, sample_to_pos, scene_to_samples = load_occ_data(args.occ_pkl)
+        n_occ = sum(1 for v in occ_flag.values() if v)
+        print(f'[detailed-eval]   {len(occ_flag)} (sample, instance) entries, '
+              f'{n_occ} flagged occluded ({100.0 * n_occ / max(len(occ_flag), 1):.1f}%)')
+    else:
+        print(f'[detailed-eval] occ pkl not found at {args.occ_pkl} -- skipping '
+              f'occlusion tables.')
+
+    arrays = compute_per_agent_arrays(
+        matches_by_sample, fut_ts=args.seconds * 2,
+        occ_flag=occ_flag, sample_to_pos=sample_to_pos,
+        scene_to_samples=scene_to_samples,
+    )
     print(f'[detailed-eval] {arrays["l2"].shape[0]} agents with valid futures')
+    if occ_flag is not None:
+        n_valid = int(arrays['valid'].sum())
+        n_occ_pairs = int((arrays['valid'] & arrays['occluded']).sum())
+        print(f'[detailed-eval]   {n_occ_pairs}/{n_valid} (agent,tick) pairs '
+              f'flagged occluded ({100.0 * n_occ_pairs / max(n_valid, 1):.1f}%)')
 
+    # ---- Table A: original ----
     rows = build_table(arrays)
-    md = render_markdown(rows)
-    tex = render_latex(rows)
+    md_a = render_markdown(rows)
+    tex_a = render_latex(rows, pct_label='Labels')
 
-    print('\n=== Detailed Prediction Eval ===\n')
-    print(md)
+    print('\n=== Table A: All pairs (existing) ===\n')
+    print(md_a)
     print()
 
     with open(args.output_tex, 'w') as f:
-        f.write(tex + '\n')
-    print(f'[detailed-eval] wrote LaTeX table -> {args.output_tex}')
+        f.write(tex_a + '\n')
+    print(f'[detailed-eval] wrote LaTeX table A -> {args.output_tex}')
+
+    # ---- Tables B and C: occluded subset ----
+    if occ_flag is None:
+        return
+
+    rows_b = build_table_27(arrays)
+    md_b = render_markdown_27(rows_b)
+    tex_b = render_latex_27(rows_b)
+
+    print('\n=== Table B: Occluded subset, 3x3x3 cells ===\n')
+    print(md_b)
+    print()
+
+    out_b = args.output_tex.replace('.tex', '_occluded_27.tex')
+    with open(out_b, 'w') as f:
+        f.write(tex_b + '\n')
+    print(f'[detailed-eval] wrote LaTeX table B -> {out_b}')
+
+    rows_c = build_table_occluded_reweighted(arrays)
+    md_c = render_markdown(rows_c)
+    tex_c = render_latex(rows_c, pct_label='Occluded')
+
+    print('\n=== Table C: Occluded subset, reweighted to original slices ===\n')
+    print(md_c)
+    print()
+
+    out_c = args.output_tex.replace('.tex', '_occluded_reweighted.tex')
+    with open(out_c, 'w') as f:
+        f.write(tex_c + '\n')
+    print(f'[detailed-eval] wrote LaTeX table C -> {out_c}')
 
 
 if __name__ == '__main__':

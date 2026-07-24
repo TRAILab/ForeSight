@@ -9,7 +9,12 @@ Usage:
 """
 import argparse
 import importlib
+import os
 import os.path as osp
+import sys
+
+# Ensure the project root is on sys.path so the mmdet3d_plugin package imports.
+sys.path.insert(0, os.getcwd())
 
 import mmcv
 from mmcv import Config
@@ -37,11 +42,25 @@ def main():
     dataset = build_dataset(cfg.data.test)
 
     print(f'[dump-motion] loading results.pkl ({osp.getsize(args.results_pkl) / 1e9:.2f} GB)')
-    results = mmcv.load(args.results_pkl)
+    # mmcv-pickled tensors may reference CUDA devices that don't exist on this
+    # host (e.g. a 4-GPU train run unpickled on a single-GPU machine). Force
+    # CPU mapping during unpickling.
+    import torch
+    _orig_load = torch.load
+    torch.load = lambda *a, **k: _orig_load(*a, **{**k, 'map_location': 'cpu'})
+    try:
+        results = mmcv.load(args.results_pkl)
+    finally:
+        torch.load = _orig_load
     print(f'[dump-motion]   {len(results)} samples')
 
-    print('[dump-motion] running dataset.evaluate() (triggers motion-pred dump)')
-    dataset.evaluate(results, metric='bbox')
+    print('[dump-motion] formatting motion results + dumping (skipping det/track/map/etc.)')
+    eval_mode = cfg.get('evaluation', {}).get('eval_mode', {})
+    thresh = eval_mode.get('motion_threshhold', 0.2)
+    motion_result_files = dataset.format_motion_results(
+        results, jsonfile_prefix=args.work_dir, thresh=thresh,
+    )
+    dataset._dump_motion_predictions(motion_result_files)
 
     out = osp.join(args.work_dir, 'motion_predictions.pkl')
     print(f'[dump-motion] done. expected pickle at: {out}')
