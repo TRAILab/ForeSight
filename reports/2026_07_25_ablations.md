@@ -142,12 +142,17 @@ seeing the numbers.
 
 | Server | Config | Seed | Job ID | Status |
 | --- | --- | --- | --- | --- |
-| Killarney L40S | `..._egostatus_kvon` | 0 | `[pending]` | `[pending]` |
-| Killarney L40S | `..._egostatus_kvon` | 1 | `[pending]` | `[pending]` |
-| Killarney L40S | `..._egostatus_minS2_kvon` | 0 | `[pending]` | `[pending]` |
+| Killarney L40S | `..._egostatus_kvon` | 0 | 4394494 | PENDING (submitted 2026-07-25) |
+| Killarney L40S | `..._egostatus_kvon` | 1 | 4394495 | PENDING (submitted 2026-07-25) |
+| Killarney L40S | `..._egostatus_minS2_kvon` | 0 | 4394496 | PENDING (submitted 2026-07-25) |
 
 Seeds follow the established convention: same config, `--seed 1` for the
-reproduction (precedent K3412422, K3424762).
+reproduction (precedent K3412422, K3424762). Seed 1 additionally gets
+`--work-dir work_dirs/..._kvon_seed1` so the two seeds cannot collide on
+`latest.pth` or the log files if they run concurrently — prior seed pairs were
+run at different times and shared a work_dir. Each job also gets a distinct
+`PORT` (28651 / 28652 / 28653), since `tools/dist_train.sh` defaults to 28651
+and Killarney can co-schedule 4-GPU jobs on one node.
 
 ### Pre-submission verification
 
@@ -156,9 +161,21 @@ reproduction (precedent K3412422, K3424762).
   parents `gnn 0/6, cross_gnn 0/6`; `_kvon` arms `gnn 6/6, cross_gnn 6/6`.
 - `num_det=50, num_map=10, skip_perception_kv=False` in both `_kvon` arms;
   `ego_only_planning` True in minS2 arm, False in headline arm.
-- 1-GPU smoke train of `minS2_kvon` on the local 3090: 405 iterations, loss
-  7.9 → 6.8, no shape errors. det/map losses read 0.0000 as expected under
-  minS2's zeroed weights; planning losses live across all 6 stages.
+- **Runtime probe of the K/V pool** (monkeypatched `MotionPlanningHead.graph_model`,
+  1-GPU local run). Op index 1 is the `gnn` op; index 0 and 10 are `temp_gnn`
+  from blocks 1 and 2:
+
+  ```
+  minS2_kvon     stage=1  query=(1,  1,256)  key=(1,51,256)  ego_only=True
+  headline_kvon  stage=1  query=(1,901,256)  key=(1,51,256)  ego_only=False
+  ```
+
+  51 = 50 det tokens + ego in both arms, confirming the gating change works and
+  that the minS2 arm is not silently degenerate.
+- 1-GPU smoke trains on the local 3090, both arms, no shape errors. `minS2_kvon`:
+  405 iterations, loss 7.9 → 6.8; det/map losses read 0.0000 as expected under
+  minS2's zeroed weights, planning losses live across all 6 stages.
+  `headline_kvon`: 19+ iterations, det/map/planning losses all live.
 
 ### Results
 
