@@ -1652,8 +1652,14 @@ class MotionPlanningHead(BaseModule):
             # dead-end forward through temp_gnn/deformable/refine.
             instance_feature = instance_feature[:, num_anchor:]
             anchor_embed = anchor_embed[:, num_anchor:]
-            instance_feature_selected = instance_feature_selected[:, -1:]
-            anchor_embed_selected = anchor_embed_selected[:, -1:]
+            # The det K/V pool (top-k dets + ego, cat'd above) is only dead
+            # weight when the `gnn` op is nulled. If det K/V is live, keep the
+            # pool intact — otherwise `gnn` would degenerate to ego attending
+            # to itself. Every ego-only config to date sets skip_perception_kv
+            # True/'both', so this is a no-op for them.
+            if self.skip_perception_kv in (True, "both", "det"):
+                instance_feature_selected = instance_feature_selected[:, -1:]
+                anchor_embed_selected = anchor_embed_selected[:, -1:]
             motion_anchor = motion_anchor[:, :0]
             motion_mode_query = motion_mode_query[:, :0]
             if motion_endpoint_anchor_all is not None:
