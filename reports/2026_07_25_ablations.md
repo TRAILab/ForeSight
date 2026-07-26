@@ -384,17 +384,22 @@ global embedding is sufficient."
 ### Design: run it as a 2×2 with Ablation 3
 
 The two levers are the paper's whole planning signal, and their interaction is
-the point:
+the point. Built on **minS2**, since it is the locked architecture and three of
+its four corners are already measured or in flight:
 
-| | deformable ON | deformable OFF |
+| minS2 | deformable ON | deformable OFF |
 | --- | --- | --- |
-| **egostatus ON** | 0.3692 (headline anchor) | **5a** |
-| **egostatus OFF** | 0.5145 (2-seed, K3366620/K3377724) | **5c** |
+| **egostatus ON** | 0.3644 (2-seed anchor) | **5a-minS2** |
+| **egostatus OFF** | Ablation 3 (4394720/21, in flight) | **5c** |
 
-Three of four corners are cheap; two are already measured. `5c` is the floor of
-the whole architecture — neither ego status nor direct image reading — and
-tells us what the temporal queue plus a front-cam embedding are worth on their
-own.
+The headline 2×2 has three of four corners covered as a by-product
+(0.3692 anchor · 0.5145 no-ego 2-seed · 5a-headline); only
+headline + no-ego + no-deformable is left open, and it is one further run if the
+minS2 result makes it worth having.
+
+`5c` is the floor of the whole architecture — neither ego status nor direct
+image reading — and tells us what the temporal queue plus a front-cam embedding
+are worth on their own.
 
 ### Arms
 
