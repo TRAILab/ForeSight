@@ -806,6 +806,20 @@ L40S:
 | 2c-c | 0.2 | 4411695 |
 | 2c-d | 0.5 | 4411696 |
 
+Third batch, submitted 2026-07-26:
+
+| Ablation | Arm | Server | Job ID |
+| --- | --- | --- | --- |
+| 4 | reference eval, minS2 (veto ON) | Killarney L40S | 4411724 |
+| 4a | veto off, minS2 | Killarney L40S | 4411725 |
+| 6a | predicted ego status, seed 0 | Killarney L40S | 4411756 |
+| 6a | predicted ego status, seed 1 | Killarney L40S | 4411757 |
+
+The 4a-minS2 pair evaluates the checkpoint produced by 4394729, using the
+**container-relative** path `work_dirs/<config>_seed2/latest.pth` — the first
+attempt at the headline arm failed because a host `/scratch` path was passed
+and the run scripts use apptainer `-c`, so `/scratch` does not exist inside.
+
 Held back deliberately: **5b** (stub `ego_feature_encoder`) pending 5a, and
 **4b** (remove the conflict head and its aux loss) pending 4a. Both are
 conditional — their question only exists depending on what the upstream arm
