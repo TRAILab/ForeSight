@@ -591,6 +591,101 @@ large for this to matter to the conclusion.
 
 ---
 
+## Ablation 6 — Close the ego-status loop inside the model
+
+### Correction to the record
+
+An earlier reading of `instance_queue.py:217` (`ego_anchor[..., VY] =
+prev_ego_status[..., 6]`) was taken to mean every "no-ego" run still receives a
+ground-truth ego velocity. **That is wrong.** `cache_planning` is called with
+`plan_status` (`motion_planning_head.py:2357`), which is the *refine layer's
+predicted* ego status (`:2263`, `:2285`), not `metas['ego_status']`.
+
+Consequences, all of which strengthen rather than weaken the position:
+
+- **SparseDrive is genuinely ego-status-free at inference.** GT `ego_status` is
+  consumed only as an L1 training target for `plan_status_branch`
+  (`plan_loss_status`, weight 1.0). The anchor write feeds back the model's own
+  prediction.
+- **Our no-ego runs are genuinely ego-free too.** The 0.5145 headline no-ego and
+  0.5233 minS2 no-ego numbers stand without qualification.
+- **The apples-to-apples comparison against SparseDrive is 0.5145 vs 0.636** —
+  a 0.12 win from architecture alone, on equal ego-status footing. This should
+  be stated explicitly in the paper before the text hardens around 0.3692, which
+  is *not* comparable to UniAD / VAD / SparseDrive.
+
+### Question
+
+The model already predicts its own ego status at full loss weight. Can that
+prediction replace the GT read in `plan_ego_status_encoder`, recovering part of
+the 0.16 L2 ego gap without consuming ego status at inference?
+
+### What already exists
+
+| Mechanism | Where | Channel width |
+| --- | --- | --- |
+| `plan_status_branch(ego_feature + ego_anchor_embed)` → 10-D ego status | `motion_blocks.py:94,177` | trained at `plan_loss_status` weight 1.0 |
+| prediction cached for next frame | `motion_planning_head.py:2357` | — |
+| fed into next frame's ego anchor | `instance_queue.py:217` | **one scalar** (`[6]` → `VY`) |
+| `temp_gnn` over past ego tokens | `instance_queue.py:138,142` → `:1863` | post-refinement ego feature, 4 frames |
+| GT ego status → `plan_ego_status_encoder` | `:2340-2342` | 5-dim MLP, **current frame** |
+
+So a visual ego-state estimate is already present and already fed back — but
+through a one-scalar channel into an anchor slot. Ablation 6 widens it to the
+same 5-dim MLP injection that `egostatus` uses, sourced from the model instead
+of from CAN.
+
+### Distinction from `egopred_lite` / `egopred_full`
+
+Both existing predictors consume **raw `ego_status` history from `metas`**
+(`:2364`), so neither is ego-free — they replace the current-frame read only.
+`egopred_full` additionally bases its output on a constant-acceleration
+extrapolation of that history, with the residual head zero-initialised
+(`ego_state_estimator.py:67-68`), so its 0.4722 may be largely kinematic rather
+than visual. Ablation 6 closes the loop entirely inside the model and would be
+the first variant that touches no `metas['ego_status']` at inference.
+
+### Method
+
+New flag `plan_ego_status_source='predicted'` (default `'gt'`, preserving every
+existing config). When set, `plan_ego_status_encoder` consumes `plan_status`
+instead of `metas['ego_status']`.
+
+Stage 0 has no current-frame prediction yet, so:
+
+- **stage *i*** consumes stage *(i−1)*'s `plan_status` — matching the existing
+  `planning_cumulative_refinement` pattern;
+- **stage 0** bootstraps from the cached previous-frame `prev_ego_status`, which
+  the queue already holds.
+
+The pure previous-frame variant falls out as the stage-0 case, so only one
+implementation is needed.
+
+### Expected range and risk
+
+Bounded by minS2 anchor **0.3649** (GT ego) and minS2 no-ego **0.5233**. The
+open question is where in that 0.16 band it lands.
+
+Tempering expectation: `plan_status` is already trained at weight 1.0 and
+already feeds the anchor, so the visual estimate is *present in the model today*
+— this widens the channel rather than adding information. The gain could be
+0.15 or 0.02.
+
+Real risk: **feedback instability.** `plan_status` is supervised on GT but at
+inference its errors compound frame to frame. The anchor already does this for
+one scalar; widening to five dimensions with a much stronger downstream effect
+could drift. Watch `planning_loss_status` and the per-timestep L2 curve — drift
+would show as degradation concentrated in the 4–6 s waypoints.
+
+### Arms
+
+- **6a** — `plan_ego_status_source='predicted'` on minS2, 2 seeds (no-ego
+  regime is noisy; the Ablation 3 spread was 0.025).
+- **6b** *(conditional on 6a)* — detach `plan_status` before the encoder, if 6a
+  shows training instability from the gradient path through the status branch.
+
+---
+
 ## Run log
 
 Submitted 2026-07-25. Killarney has no per-user job cap and 100+ partially-free
@@ -642,6 +737,33 @@ Consequences:
 Operational note: checkpoints are being purged from Killarney scratch between
 sessions. Any ablation intended to be answered by eval-only reruns needs its
 checkpoint preserved deliberately, or it silently becomes a 12h retrain.
+
+## Did anything beat the anchors?
+
+**No — not outside noise.** These were designed as falsification controls, not
+as improvements, and every null is a confirmation. But several arms came in
+numerically below their anchor, which is worth recording so nobody later mistakes
+a seed draw for a result:
+
+| Run | L2 | CR | vs anchor |
+| --- | ---: | ---: | --- |
+| K/V-on minS2 (4394496) | **0.3608** | 0.049% | −0.0041 vs minS2 0.3649 |
+| K/V-on headline seed 1 (4394495) | 0.3626 | 0.045% | −0.0066 vs headline 0.3692 |
+| 2a backbone `lr_mult=0.1` (4394722) | 0.3627 | **0.037%** | −0.0022 L2, −0.009 pp CR |
+| minS2 seed 2 (4394729) | 0.3660 | 0.047% | +0.0011 |
+| 2b unfrozen (4394723) | 0.3661 | 0.060% | +0.0012 |
+| headline anchor (3-seed) | 0.3692 | 0.0400% | — |
+
+Every delta is inside the 0.007 L2 / 0.015 pp CR floors. The lowest single
+number in the batch is K/V-on minS2 at 0.3608 and the lowest CR is 2a at 0.037%
+— **both single seeds, both configurations we have positive reasons not to
+adopt** (K/V-on costs +7.88M params for nothing; 2a destroys NDS 0.5279 → 0.4353).
+Chasing either would be seed-fishing.
+
+The one substantive observation: five of six arms landing at 0.360–0.366 hints
+the headline 3-seed anchor (0.3692) may be marginally pessimistic. The minS2
+3-seed anchor (0.3649) sits closer to the batch centre and is the better
+reference going forward.
 
 ## Priority
 
