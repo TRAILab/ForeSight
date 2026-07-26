@@ -731,6 +731,47 @@ would show as degradation concentrated in the 4–6 s waypoints.
 - **6b** *(conditional on 6a)* — detach `plan_status` before the encoder, if 6a
   shows training instability from the gradient path through the status branch.
 
+### Implementation
+
+`instance_queue.py` — expose `masked_prev_ego_status`: the previous frame's
+predicted ego status with the sequence-start mask already applied. This reuses
+the masking `prepare_planning` already performs for the anchor write rather than
+reimplementing it, so scene boundaries behave identically. Cleared in `reset()`.
+
+`motion_planning_head.py` — new `plan_ego_status_source` param, default `'gt'`,
+so every existing config is byte-for-byte unaffected. Under `'predicted'`:
+
+- **stage 0** reads `masked_prev_ego_status`, or zeros on the first frame of a
+  scene. Never touches `metas`.
+- **stage *i*** re-encodes from `plan_status`, the previous stage's prediction,
+  mirroring the existing `planning_cumulative_refinement` pattern.
+
+Gradient is left attached through the status branch so the planning loss can
+shape the ego estimate — that is the substantive version of the experiment, and
+6b is the detached fallback.
+
+### Verification
+
+A first attempt poisoned `metas['ego_status']` with NaN to prove the planning
+path never reads it. **That test is invalid here:** `plan_loss_status`
+legitimately consumes GT `ego_status` as its training target, so the poison
+NaNs the loss regardless of whether the inference path is clean. Recording this
+so it is not retried.
+
+The valid check compares what `plan_ego_status_encoder` actually consumes
+against the GT slice, with the first frame of a scene as the decisive signature
+— with no cached prediction the input must be exactly zeros where GT is not:
+
+```
+PROBE6 src=predicted enc_in[0]=[0.0, 0.0, 0.0, 0.0, 0.0]
+                     gt[0]=[1.3328, 0.1738, 0.0045, 4.9368, 0.0]
+                     matches_gt=False all_zero=True   ← stage 0, frame 1
+PROBE6 src=predicted enc_in[0]=[-0.0415, 0.0885, -0.0423, 0.0368, -0.2434]
+                     matches_gt=False all_zero=False  ← stage 1, own prediction
+```
+
+Confirms the encoder is fed the model's own estimate and never the GT.
+
 ---
 
 ## Run log

@@ -49,6 +49,7 @@ class InstanceQueue(nn.Module):
         self.instance_feature_queue = []
         self.anchor_queue = []
         self.prev_ego_status = None
+        self.masked_prev_ego_status = None
         self.ego_period = None
         self.ego_feature_queue = []
         self.ego_anchor_queue = []
@@ -208,12 +209,19 @@ class InstanceQueue(nn.Module):
         ego_anchor = torch.tile(
             self.ego_anchor[None], (batch_size, 1, 1)
         )
+        # `masked_prev_ego_status` is the previous frame's *predicted* ego
+        # status with the sequence-start mask applied. Cached here so
+        # consumers (e.g. plan_ego_status_source='predicted') reuse this
+        # masking rather than reimplementing it. None on the first frame of a
+        # scene, in which case consumers must fall back to zeros.
+        self.masked_prev_ego_status = None
         if self.prev_ego_status is not None:
             prev_ego_status = torch.where(
                 mask[:, None, None],
                 self.prev_ego_status,
                 self.prev_ego_status.new_tensor(0),
             )
+            self.masked_prev_ego_status = prev_ego_status
             ego_anchor[..., VY] = prev_ego_status[..., 6]
 
         if self.ego_period == None:

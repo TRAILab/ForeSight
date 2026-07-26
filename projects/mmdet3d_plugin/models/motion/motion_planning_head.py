@@ -331,6 +331,14 @@ class MotionPlanningHead(BaseModule):
         plan_magnitude_loss_weight=1.0,
         plan_ego_status_encode_enable=False,
         plan_ego_status_indices=(0, 1, 5, 6, 7),
+        # 'gt'        — read metas['ego_status'] (or the ego-state estimator's
+        #               output when use_predicted_ego_status is set).
+        # 'predicted' — read the model's own plan_status_branch output, closing
+        #               the loop inside the model so no ego_status is consumed
+        #               at inference. Stage i uses stage (i-1)'s prediction;
+        #               stage 0 bootstraps from the previous frame's cached
+        #               prediction (zeros at scene start).
+        plan_ego_status_source='gt',
         motion_target_in_agent_frame=False,
         ego_state_estimator=None,
         use_predicted_ego_status=False,
@@ -501,6 +509,8 @@ class MotionPlanningHead(BaseModule):
         self.plan_magnitude_loss_weight = float(plan_magnitude_loss_weight)
         self.plan_ego_status_encode_enable = bool(plan_ego_status_encode_enable)
         self.plan_ego_status_indices = list(plan_ego_status_indices)
+        assert plan_ego_status_source in ('gt', 'predicted'), plan_ego_status_source
+        self.plan_ego_status_source = plan_ego_status_source
         # Predicted ego_status pipeline: when use_predicted_ego_status=True the
         # estimator's output replaces metas['ego_status'] in all downstream
         # consumers (anchor velnorm scaling, plan_ego_status_encoder). The
@@ -1562,9 +1572,22 @@ class MotionPlanningHead(BaseModule):
         # per-stage rebuild after refine, so ego state stays in scope across
         # decoder layers.
         if self.plan_ego_status_encode_enable:
-            es_in = self._effective_ego_status(metas)[:, self.plan_ego_status_indices].to(
-                plan_mode_query.dtype
-            )
+            if self.plan_ego_status_source == 'predicted':
+                # Bootstrap from the previous frame's predicted ego_status
+                # (already sequence-start masked by InstanceQueue). Zeros on
+                # the first frame of a scene. Never touches metas.
+                prev = getattr(self.instance_queue, 'masked_prev_ego_status', None)
+                if prev is None:
+                    es_src = plan_mode_query.new_zeros(
+                        plan_mode_query.shape[0], len(self.plan_ego_status_indices)
+                    )
+                else:
+                    es_src = prev.squeeze(1)[:, self.plan_ego_status_indices]
+                es_in = es_src.to(plan_mode_query.dtype)
+            else:
+                es_in = self._effective_ego_status(metas)[:, self.plan_ego_status_indices].to(
+                    plan_mode_query.dtype
+                )
             ego_status_embed = self.plan_ego_status_encoder(es_in)  # (bs, D)
             if self.plan_mode_time_queries:
                 plan_mode_query = (
@@ -2338,10 +2361,21 @@ class MotionPlanningHead(BaseModule):
                         )
                     )
                 if ego_status_embed is not None:
+                    if self.plan_ego_status_source == 'predicted':
+                        # Refresh from this stage's prediction so stage i+1
+                        # sees stage i's estimate (mirrors
+                        # planning_cumulative_refinement). Gradient is left
+                        # attached so the planning loss can shape the status
+                        # branch; Ablation 6b detaches here if unstable.
+                        ego_status_embed = self.plan_ego_status_encoder(
+                            plan_status.squeeze(1)[:, self.plan_ego_status_indices].to(
+                                plan_mode_query.dtype
+                            )
+                        )
                     plan_mode_query = (
                         plan_mode_query + ego_status_embed[:, None, :]
                     )
-        
+
         cache_motion_feature = (
             self._project_cache_feature(instance_feature[:, :num_anchor])
             if self.use_planning_input_proj
