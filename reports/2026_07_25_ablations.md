@@ -432,9 +432,17 @@ L40S nodes, so these run concurrently rather than in waves.
 | 2a | minS2 backbone `lr_mult=0.1` | Killarney L40S | 4394722 |
 | 2b | minS2 fully unfrozen | Killarney L40S | 4394723 |
 | — | minS2 seed 2 (anchor + ckpt for 4a) | Killarney L40S | 4394729 |
+| 5a | no planner deformable, headline | Killarney L40S | 4394757 |
+| 5a | no planner deformable, minS2 | Killarney L40S | 4394758 |
+| 5c | no ego + no deformable, minS2 | Killarney L40S | 4394759 |
 | 4 | reference eval (veto on) | Fir H100 | 51125562 |
 | 4a | veto off | Fir H100 | 51125563 |
 | 4c | hard rescore | Fir H100 | 51125564 |
+
+Held back deliberately: **5b** (stub `ego_feature_encoder`) pending 5a, and
+**4b** (remove the conflict head and its aux loss) pending 4a. Both are
+conditional — their question only exists depending on what the upstream arm
+returns.
 
 ### Checkpoint availability — corrects the "4a/4c are free" claim
 
