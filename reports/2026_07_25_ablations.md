@@ -177,21 +177,40 @@ and Killarney can co-schedule 4-GPU jobs on one node.
   minS2's zeroed weights, planning losses live across all 6 stages.
   `headline_kvon`: 19+ iterations, det/map/planning losses all live.
 
-### Results
-
-`[pending]`
+### Results — LANDED 2026-07-26
 
 | Model | L2 | CR | NDS | mAP_normal | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
 | K/V-off headline (3-seed anchor) | 0.3692 | 0.0400% | 0.5212 | 0.5533 | reference |
-| K/V-on headline (seed 0) | `[ ]` | `[ ]` | `[ ]` | `[ ]` | |
-| K/V-on headline (seed 1) | `[ ]` | `[ ]` | `[ ]` | `[ ]` | |
+| K/V-on headline seed 0 | 0.3717 | 0.063% | 0.5235 | 0.5567 | 4394494 |
+| K/V-on headline seed 1 | 0.3626 | 0.045% | 0.5189 | 0.5484 | 4394495 |
+| **K/V-on headline (2-seed mean)** | **0.3672** | **0.054%** | 0.5212 | 0.5526 | **ΔL2 = −0.0020** |
 | minS2 (2-seed anchor) | 0.3644 | 0.046% | 0.5279 | 0.3363 | reference |
-| K/V-on minS2 (seed 0) | `[ ]` | `[ ]` | `[ ]` | `[ ]` | |
+| **K/V-on minS2 seed 0** | **0.3608** | **0.049%** | 0.5279 | 0.3346 | **ΔL2 = −0.0036** |
 
 ### Discussion
 
-`[pending]`
+**Both arms tie their anchors.** ΔL2 = −0.0020 (headline, 2-seed) and −0.0036
+(minS2) against a 0.007 noise floor; ΔCR = +0.014 pp and +0.003 pp against a
+0.015 pp floor. Every delta is inside noise, and the two L2 deltas point in the
+*opposite* direction to the hypothesis that K/V carries information.
+
+This matches the **pre-registered** "ties or loses" branch, recorded before the
+runs landed: the K/V-on arms carry +7.88M parameters *and* the full det+map
+token interface, and gain nothing. More capacity plus more information, no
+effect.
+
+This is the controlled row Contribution (i) never had. The three prior K/V
+comparisons were either pre-`egostatus` (0.4988-band controls, where the flag
+was worth ±0.02 depending on which control you picked) or stack-vs-stack with
+five unmatched deltas. Here the only variable is the interface, with the learned
+scorer, `egostatus`, `decoder6`, `planwp`, laststage instfeat, stage-1 init and
+bs/lr all held fixed, on the same cluster as the anchors.
+
+Perception metrics are unchanged in the headline arm (NDS 0.5212 vs 0.5212,
+mAP_normal 0.5526 vs 0.5533), confirming the K/V restoration did not perturb the
+perception heads — the planning result is not a side effect of a different
+detector.
 
 ---
 
@@ -249,6 +268,42 @@ Note the grad-clip coupling (see Ablation 1's method): `grad_clip` is global and
 mmcv's `clip_grads` filters on `requires_grad`, not on `lr_mult`, so unfreezing
 changes which gradients count toward the norm even before any weight moves.
 
+### Results — LANDED 2026-07-26
+
+| Model | L2 | CR | NDS | mAP_normal | Job |
+| --- | ---: | ---: | ---: | ---: | --- |
+| minS2 (2-seed anchor) | 0.3644 | 0.046% | **0.5279** | **0.3363** | reference |
+| **2a — backbone `lr_mult=0.1`** | **0.3627** | 0.037% | **0.4353** | 0.2391 | 4394722 |
+| **2b — whole stack unfrozen** | **0.3661** | 0.060% | **0.0034** | 0.1273 | 4394723 |
+
+### Discussion
+
+**Planning is completely unmoved; perception is destroyed.** ΔL2 = −0.0017 (2a)
+and +0.0017 (2b) — both an order of magnitude inside the noise floor. Meanwhile
+NDS falls 0.5279 → 0.4353 → **0.0034**: with the perception losses zeroed, any
+trainable perception stack drifts, and by 2b the detector is entirely gone.
+
+The answer to "can the planning loss alone usefully adapt the backbone?" is
+**no** — at least on r50, backbone plasticity buys nothing for planning. But the
+more useful finding is what this says about **why** minS2 freezes:
+
+> The freeze is not what makes planning work. It is what keeps the perception
+> numbers reportable.
+
+minS2's stated design is "perception heads exist purely as eval-time hooks for
+NDS / mAP reporting." 2b shows that framing is load-bearing in a way not
+previously measured: unfreeze them with their losses zeroed and the reported NDS
+goes to zero while L2 does not move at all. Stream E should be restated as *"the
+freeze costs nothing for planning and is required to keep the frozen stage-1
+perception readout intact"* rather than *"stage-2 backbone training is empty."*
+
+**Bearing on the r101 asymmetry.** `2026_07_25_r101_backbone_revisit.md`
+attributed r101's `lr_mult` sensitivity to "r101's features needing stage-2
+adaptation to become planning-useful." On r50, planning-loss-only adaptation
+does nothing (2a). That points the r101 explanation toward the *perception
+losses* rather than backbone plasticity — but it is r50 evidence about an r101
+claim, so the r101 `lr_mult` sweep in Future Work is still needed to close it.
+
 ---
 
 ## Ablation 3 — minS2 without ego status
@@ -299,6 +354,37 @@ the same for minS2 without citing a config carrying a known-regressive lever.
 
 One line, matching how `_minS2_planmodeSA:412` expresses it:
 `plan_ego_status_encode_enable=False`. Two seeds.
+
+### Results — LANDED 2026-07-26
+
+| Model | L2 | CR | NDS | Job |
+| --- | ---: | ---: | ---: | --- |
+| minS2 (2-seed anchor, ego) | 0.3644 | 0.046% | 0.5279 | reference |
+| minS2 no-ego seed 0 | 0.5108 | 0.057% | 0.5287 | 4394720 |
+| minS2 no-ego seed 1 | 0.5359 | 0.072% | 0.5291 | 4394721 |
+| **minS2 no-ego (2-seed mean)** | **0.5233** | **0.0645%** | 0.5289 | **ΔL2 = +0.159** |
+
+Also landed: **minS2 seed 2** (4394729) at **L2 = 0.3660 / CR = 0.047% /
+NDS = 0.5258**, giving a 3-seed minS2 anchor of **0.3649 / 0.0463%** — the
+2-seed value (0.3644) holds.
+
+### Discussion
+
+Ego status is worth **0.159 L2** on the locked architecture, closely matching the
+0.145 measured on the headline (0.5145 → 0.3692). The dependence is a property
+of the planner, not of a particular stage-2 configuration.
+
+The minS2 no-ego number is now measured rather than bracketed by contaminated
+proxies. It lands at 0.5233, above the previous 0.509–0.524 bracket's midpoint
+and well above the `_minS2_B1p7_perstage` proxy (0.5087) that would have been
+the natural stand-in.
+
+**Seed spread is a caveat.** The two no-ego seeds differ by 0.025 L2 — about
+3.6× the noise floor derived from the ego-regime runs, and far wider than the
+ego-regime seed spread (0.3563 / 0.3724 / 0.3660). No-ego training appears
+genuinely noisier, so **the 0.007 L2 noise floor should not be applied to no-ego
+comparisons**; anything drawn from single no-ego seeds needs a wider band. This
+affects how the 2×2 in Ablation 5 is read.
 
 ---
 
@@ -452,7 +538,56 @@ are worth on their own.
 Expect DDP unused-parameter trouble on 5a: `deformable_model` would be built but
 never called. Either drop the key from the config or follow the
 `skip_perception_kv` pattern (`motion_planning_head.py:593-602`) and set the
-layer to `None` so DDP does not see its params.
+layer to `None` so DDP does not see its params. *(Resolved: dropping the op from
+`operation_order` means no layer is built at all; a backward probe confirmed
+`UNUSED_PARAM_COUNT 0` on both arms, so no DDP handling was needed.)*
+
+### Results — LANDED 2026-07-26
+
+| Model | L2 | CR | NDS | Job | ΔL2 vs its anchor |
+| --- | ---: | ---: | ---: | --- | ---: |
+| headline anchor (3-seed) | 0.3692 | 0.040% | 0.5212 | — | — |
+| **5a — headline, no deformable** | **0.4062** | 0.089% | 0.5251 | 4394757 | **+0.037** |
+| minS2 anchor (3-seed) | 0.3649 | 0.046% | 0.5279 | — | — |
+| **5a — minS2, no deformable** | **0.4996** | 0.123% | 0.5257 | 4394758 | **+0.135** |
+| **5c — minS2, no ego + no deformable** | **0.6406** | 0.149% | 0.5274 | 4394759 | **+0.276** |
+
+### Discussion
+
+**Contribution (ii) survives.** This was the row ranked most likely to falsify a
+headline claim, and it did not. Removing the planner's image readout costs
++0.037 L2 on the headline (5.3× the noise floor) and +0.135 on minS2 (19×). The
+planner is genuinely using its direct image path; it is not an ego-status
+predictor with a decorative deformable module attached.
+
+**The completed minS2 2×2:**
+
+| minS2 | deformable ON | deformable OFF |
+| --- | ---: | ---: |
+| **egostatus ON** | **0.3649** | **0.4996** |
+| **egostatus OFF** | **0.5233** | **0.6406** |
+
+Both levers are large and close to additive — ego status is worth 0.159 with the
+deformable on and 0.141 with it off; the deformable is worth 0.135 with ego on
+and 0.117 with ego off. The interaction term is ~0.018, small relative to either
+main effect, so the two signals are largely complementary rather than redundant.
+
+**The floor is the baseline.** Strip both and minS2 lands at 0.6406 — essentially
+our trained SparseDrive baseline (0.636). With neither ego status nor direct
+image reading, the temporal queue plus the front-camera ego embedding recover
+nothing beyond where the whole project started. That is a useful sanity anchor:
+the 0.36 headline is built from exactly these two ingredients, and removing both
+returns the model to baseline.
+
+**CR tracks L2 monotonically here** (0.046% → 0.123% → 0.149%), unlike most
+levers in this codebase where CR moves independently. Losing scene access
+degrades collision avoidance in proportion to trajectory quality, which is what
+one would expect if the deformable readout is what supplies obstacle awareness.
+
+Caveat: 5a and 5c are single seeds, and the Ablation 3 result shows no-ego
+training is noisier than the ego regime. The 5c number in particular should be
+treated as ±0.025 rather than ±0.007. The direction and magnitude are far too
+large for this to matter to the conclusion.
 
 ---
 
