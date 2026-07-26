@@ -283,19 +283,66 @@ and +0.0017 (2b) — both an order of magnitude inside the noise floor. Meanwhil
 NDS falls 0.5279 → 0.4353 → **0.0034**: with the perception losses zeroed, any
 trainable perception stack drifts, and by 2b the detector is entirely gone.
 
-The answer to "can the planning loss alone usefully adapt the backbone?" is
-**no** — at least on r50, backbone plasticity buys nothing for planning. But the
-more useful finding is what this says about **why** minS2 freezes:
+**Framing note.** An earlier version of this section justified the freeze by
+perception reportability. That is wrong for this paper: the contributions are
+planning claims, and NDS / mAP_normal are diagnostics we report, not objectives
+we optimise. The NDS collapse is therefore *not* a reason to prefer the freeze.
+The argument has to be made on planning terms.
 
-> The freeze is not what makes planning work. It is what keeps the perception
-> numbers reportable.
+**On planning terms, 2a and 2b tie minS2 — they do not beat it.** 2a's 0.3627
+sits *inside* minS2's own seed range (0.3563 / 0.3660 / 0.3724), and one minS2
+seed is better than it. With planning a tie, the tiebreakers are simplicity and
+compute, and those favour the freeze: ~23M fewer trainable parameters and "stage
+2 is a planner fine-tune on a frozen backbone" is itself Contribution 5. Stream E
+should read *"the freeze costs nothing for planning and buys a materially
+simpler stage 2"* — not *"stage-2 backbone training is empty for planning"* and
+not the perception-reportability argument.
 
-minS2's stated design is "perception heads exist purely as eval-time hooks for
-NDS / mAP reporting." 2b shows that framing is load-bearing in a way not
-previously measured: unfreeze them with their losses zeroed and the reported NDS
-goes to zero while L2 does not move at all. Stream E should be restated as *"the
-freeze costs nothing for planning and is required to keep the frozen stage-1
-perception readout intact"* rather than *"stage-2 backbone training is empty."*
+**The substantive planning finding** is that the backbone can drift a long way —
+far enough to take NDS from 0.5279 to 0.0034 — at **zero planning cost**. Read
+together with Ablation 5 (removing the image readout costs 0.135), the picture is:
+
+> The planner genuinely needs image features, but it does **not** need them to be
+> perception-aligned.
+
+That is a stronger and more useful claim than "backbone training is empty," and
+it is squarely a planning result rather than a perception one.
+
+**It also means `lr_mult=0.1` is unmotivated here.** That value was tuned for the
+regime where perception losses hold the backbone in place. With those losses
+zeroed, the backbone is free, and nothing establishes 0.1 as the right amount of
+freedom — we have only shown it is harmless. Ablation 2c sweeps it.
+
+### Ablation 2c — `lr_mult` sweep under minS2
+
+Only `0.0` and `0.1` have ever been used across every r50 stage-2 config in the
+repo. With the perception losses zeroed the backbone is unconstrained, so the
+question is not "is training it harmless" (2a answered yes) but **"is there an
+amount of freedom that actually helps planning."**
+
+| Arm | backbone `lr_mult` | effective LR | Config |
+| --- | ---: | ---: | --- |
+| frozen (anchor) | 0.0 | 0 | `..._minS2` (3 seeds) |
+| 2c-a | 0.05 | 7.5e-06 | `..._minS2_bblr0p05` |
+| 2a / 2c-b | 0.1 | 1.5e-05 | `..._minS2_bblr0p1` (seed 1 added) |
+| 2c-c | 0.2 | 3.0e-05 | `..._minS2_bblr0p2` |
+| 2c-d | 0.5 | 7.5e-05 | `..._minS2_bblr0p5` |
+
+Everything else identical: neck / det / map stay frozen at 0.0, planner at
+1.5e-4, all perception losses zeroed. Verified by building the optimizer and
+reading per-module LRs at every point.
+
+A second seed at 0.1 is included because the existing 2a point is a single draw
+sitting inside minS2's seed range — without it the sweep has no calibration for
+how much of any trend is seed noise.
+
+**Reading, registered in advance.** The frozen anchor is 0.3649 (3 seeds,
+range 0.3563–0.3724). Given that spread, a sweep point only counts as a real
+improvement if it lands **below ~0.356** — i.e. beats the best observed frozen
+seed — and reproduces. Anything in 0.356–0.372 is inside the existing
+distribution and should be reported as a tie regardless of where it falls in the
+ordering. Expect NDS to degrade monotonically with `lr_mult`; that is a
+diagnostic here, not a criterion.
 
 **Bearing on the r101 asymmetry.** `2026_07_25_r101_backbone_revisit.md`
 attributed r101's `lr_mult` sensitivity to "r101's features needing stage-2
