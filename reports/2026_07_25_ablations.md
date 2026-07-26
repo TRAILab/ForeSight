@@ -412,6 +412,50 @@ layer to `None` so DDP does not see its params.
 
 ---
 
+## Run log
+
+Submitted 2026-07-25. Killarney has no per-user job cap and 100+ partially-free
+L40S nodes, so these run concurrently rather than in waves.
+
+| Ablation | Arm | Server | Job ID |
+| --- | --- | --- | --- |
+| 1 | K/V-on headline seed 0 | Killarney L40S | 4394494 |
+| 1 | K/V-on headline seed 1 | Killarney L40S | 4394495 |
+| 1 | K/V-on minS2 seed 0 | Killarney L40S | 4394496 |
+| 3 | minS2 no-ego seed 0 | Killarney L40S | 4394720 |
+| 3 | minS2 no-ego seed 1 | Killarney L40S | 4394721 |
+| 2a | minS2 backbone `lr_mult=0.1` | Killarney L40S | 4394722 |
+| 2b | minS2 fully unfrozen | Killarney L40S | 4394723 |
+| — | minS2 seed 2 (anchor + ckpt for 4a) | Killarney L40S | 4394729 |
+| 4 | reference eval (veto on) | Fir H100 | 51125562 |
+| 4a | veto off | Fir H100 | 51125563 |
+| 4c | hard rescore | Fir H100 | 51125564 |
+
+### Checkpoint availability — corrects the "4a/4c are free" claim
+
+Ablation 4 was planned as eval-only against the Killarney anchors. **Those
+checkpoints no longer exist**: `/scratch/spapais/ForeSight/work_dirs` on
+Killarney is 1.3 MB with zero `.pth` files — logs and plots were synced back and
+the weights purged. Surviving r50 headline (`_egostatus`) checkpoints were found
+on **Fir**, **Rorqual**, and **Tamia**; Tamia additionally has the no-ego
+headline. **No plain r50 minS2 checkpoint exists on any host.**
+
+Consequences:
+
+- **4a / 4c on the headline run as planned**, on Fir against its existing
+  checkpoint. Cluster portability is not a problem here because all three arms
+  evaluate *the same weights on the same cluster* — the paired delta is the
+  quantity of interest, not the absolute CR. A reference eval (51125562) is
+  included so the comparison is against that exact checkpoint rather than the
+  Killarney 3-seed anchor.
+- **4a on minS2 is blocked** until a checkpoint exists. Job 4394729 retrains
+  minS2 with `--seed 2` to produce one; it doubles as a third seed for the
+  2-seed minS2 anchor, which is worth having independently.
+
+Operational note: checkpoints are being purged from Killarney scratch between
+sessions. Any ablation intended to be answered by eval-only reruns needs its
+checkpoint preserved deliberately, or it silently becomes a 12h retrain.
+
 ## Priority
 
 Ordered by what a reviewer is most likely to attack, not by cost:
