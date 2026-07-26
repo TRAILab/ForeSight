@@ -755,6 +755,16 @@ L40S nodes, so these run concurrently rather than in waves.
 | 4a | veto off | Fir H100 | 51125563 |
 | 4c | hard rescore | Fir H100 | 51125564 |
 
+Second batch, submitted 2026-07-26 — Ablation 2c `lr_mult` sweep, all Killarney
+L40S:
+
+| Arm | backbone `lr_mult` | Job ID |
+| --- | ---: | --- |
+| 2c-a | 0.05 | 4411693 |
+| 2c-b | 0.1 (seed 1) | 4411694 |
+| 2c-c | 0.2 | 4411695 |
+| 2c-d | 0.5 | 4411696 |
+
 Held back deliberately: **5b** (stub `ego_feature_encoder`) pending 5a, and
 **4b** (remove the conflict head and its aux loss) pending 4a. Both are
 conditional — their question only exists depending on what the upstream arm
