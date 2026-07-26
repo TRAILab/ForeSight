@@ -195,6 +195,238 @@ and Killarney can co-schedule 4-GPU jobs on one node.
 
 ---
 
+## Ablation 2 — Trainable backbone under minS2 (`lr_mult` 0.0 → 0.1)
+
+### Question
+
+Can the **planning loss alone** usefully adapt the backbone? Every measurement
+on record conflates "backbone trains" with "perception losses supervise it,"
+because the two have only ever been switched together.
+
+### Status: never run
+
+All 27 minS2-family configs set `img_backbone` `lr_mult=0.0`. The only ego-only
+config above zero is `_streamc` (`lr_mult=0.1`), and it is *not* minS2 — its
+loss weights are byte-identical to the headline, so its backbone is trained by
+the perception losses in the usual way.
+
+| | `_streamc` | minS2 | **Ablation 2** |
+| --- | --- | --- | --- |
+| `ego_only_planning` | True | True | True |
+| backbone `lr_mult` | 0.1 | 0.0 | **0.1** |
+| perception losses | live | all zeroed | all zeroed |
+| result | 0.3673 / 0.037% (4 reads) | 0.3644 / 0.046% (2 seeds) | — |
+
+Nothing has ever trained the backbone with planning as the only live loss.
+
+### Why it was set to 0
+
+Stream E, on a single run: `_egostatus_frozenpercep` (K3394848) landed at
+**L2=0.3698 / CR=0.044%** vs the headline's 0.3692 / 0.0400%. Freezing the whole
+stage-2 perception stack cost 0.0006 L2 — a hundredth of the noise floor — so
+folding it into minS2 was free and maximized the "stage 2 is just a planner
+fine-tune" claim. It was never revisited.
+
+### Why revisit now
+
+`reports/2026_07_25_r101_backbone_revisit.md` found r101 wins at `lr_mult=0.1`
+and loses at `0.0`, and attributed it to "r101's features need stage-2
+adaptation to become planning-useful." But under the headline, stage-2
+adaptation *means perception-loss adaptation*. If planning-loss-only adaptation
+also recovers r101's win, the story is backbone plasticity; if not, it is the
+perception losses specifically. The Stream E claim cannot be stated precisely
+until this is separated.
+
+### Arms
+
+Two, to separate backbone plasticity from the rest of the frozen stack:
+
+- **2a** — backbone only: `img_backbone` `lr_mult=0.1`, neck/det/map stay 0.0.
+- **2b** — whole stack: all four keys back to headline values (backbone 0.1,
+  others default 1.0). The direct Stream E inverse under zeroed losses.
+
+Note the grad-clip coupling (see Ablation 1's method): `grad_clip` is global and
+mmcv's `clip_grads` filters on `requires_grad`, not on `lr_mult`, so unfreezing
+changes which gradients count toward the norm even before any weight moves.
+
+---
+
+## Ablation 3 — minS2 without ego status
+
+### Question
+
+What does the **locked paper architecture** score with no ego-status input?
+
+### Status: never run on minS2
+
+The headline arm of this A/B exists and is clean —
+`..._decoder6_planwp_evalmatchmode.py` is the headline minus `egostatus`, same
+stage-1 init, nothing else differing:
+
+| Config | L2 | CR | Job |
+| --- | ---: | ---: | --- |
+| `..._decoder6_planwp_evalmatchmode` seed 0 | 0.5204 | 0.046% | K3366620 |
+| `..._decoder6_planwp_evalmatchmode` seed 1 | 0.5087 | 0.053% | K3377724 |
+| **mean (no ego)** | **0.5145** | **0.0495%** | |
+| headline, 3-seed (ego) | 0.3692 | 0.0400% | |
+
+**ΔL2 = 0.145** from that one input.
+
+There is no `..._evalmatchmode_minS2.py`. Every minS2 config carries
+`plan_ego_status_encode_enable=True` except two, and both bundle an extra
+variant:
+
+| Proxy | L2 | CR | Job | Contamination |
+| --- | ---: | ---: | --- | --- |
+| `_minS2_planmodeSA` (no ego) | 0.5238 | 0.056% | K3440406 | planmodeSA is a **known regression** — with ego, 0.3848 vs minS2's 0.3563 |
+| `_minS2_B1p7_perstage` (no ego) | 0.5087 | 0.084% | K3444448 | B1.7 per-stage conflict sampler |
+| `_ptdnrot3daux2p5d_..._minS2_B1p6` (no ego) | 0.5118 | 0.088% | K3437654 | different stage-1 **and** B1.6 |
+| `planneronly_skeleton_noegostatus` | 0.5206 | 0.088% | K3445429 | different head implementation |
+
+So minS2's no-ego number is bracketed at ~0.509–0.524 by four contaminated
+reads and not measured. The planmodeSA proxy is the worst to lean on, since that
+lever is known to cost ~0.03 L2 in the ego regime.
+
+### Why it matters
+
+minS2 is the locked paper architecture; the headline is only a comparator. Any
+no-ego mirror table answering the AD-MLP / BEV-Planner critique of nuScenes
+open-loop planning needs the locked architecture in it. Today we can say "K/V-off
+holds parity without ego" (0.5145 vs the 0.5197 no-ego baseline) but cannot say
+the same for minS2 without citing a config carrying a known-regressive lever.
+
+### Arm
+
+One line, matching how `_minS2_planmodeSA:412` expresses it:
+`plan_ego_status_encode_enable=False`. Two seeds.
+
+---
+
+## Ablation 4 — Remove the learned collision rescore
+
+### Question
+
+Does the learned scorer still earn its place **now that `egostatus` is in**?
+
+Its original justification was pre-`egostatus`: on K/V-off it drove CR from
+0.068% (hard rescore, `_decoder6_planwp` 2-seed mean 0.0775%) down to 0.0495%,
+recovering the CR signal hard rescore loses when det K/V is removed. But the
+headline's CR is now **0.0400%** with `egostatus` folded in — at or below what
+the scorer was introduced to achieve. It may now be redundant.
+
+### A structural constraint worth recording
+
+**minS2 cannot use hard rescore at all.** `decoder.py:295` `rescore()` takes
+`motion_cls` / `motion_reg` — agent future trajectories — and under
+`ego_only_planning=True` those are zero-width, so hard rescore degenerates to a
+no-op. For minS2 the only choices are the learned scorer or no rescore. The
+learned scorer is therefore structurally load-bearing for the locked
+architecture in a way it is not for the headline.
+
+### Arms
+
+The conflict head does two things — an inference-time veto and a training-time
+aux loss (`conflict_loss_weight=0.10`) — so they must be separated:
+
+| Arm | Change | Isolates | Cost |
+| --- | --- | --- | --- |
+| **4a** | `use_rescore_learned_hard=False`, keep `with_conflict_head=True` | the inference-time veto only | **eval-only** on the existing ckpt |
+| **4b** | `with_conflict_head=False` everywhere | veto + aux loss together | retrain |
+| **4c** | `use_rescore=True` instead (hard rescore) | learned vs heuristic at the current operating point | **eval-only**, headline only |
+
+4a and 4c are pure inference-path changes and run on existing checkpoints
+(~1h each, `--time=2:59:00`), so this ablation is nearly free to start.
+Precedent for eval-only scorer sweeps: Exp 5 in
+`reports/2026_04_26_plan_scoring.md`. Only 4b needs a training slot.
+
+Run 4a on both headline and minS2; 4c on the headline only, per the constraint
+above. Prior no-rescore reference (pre-`egostatus`, K/V-off):
+`_laststage_nodetmap_norescore` 0.5131 / 0.089%.
+
+---
+
+## Ablation 5 — Remove the planner → image deformable readout
+
+### Question
+
+If the planner stops reading image features directly, and perception K/V is
+already off, **what is left driving planning?**
+
+### Why this is the most consequential row in this report
+
+Contribution (ii) is "the planner reads directly from image features." The
+mechanism is `planning_deformable` + the `deformable` ops in the planner op list
++ `planning_deformable_instfeat_laststage` + `planning_deformable_waypoints`.
+Turning it off with K/V already off leaves the planner with only its ego query,
+the `egostatus` encoding, and the temporal queue.
+
+If that ties the headline, then the planner was never using scene information at
+inference, and Contribution (ii) does not hold — the model would be an
+ego-status predictor with a perception-shaped backbone attached. Combined with
+Ablation 3's ΔL2 = 0.145 for ego status alone, this is the row a reviewer
+running the AD-MLP argument will demand.
+
+The last measurement of this lever is `planpredtrajdeformmm` at **0.636 → 0.522**
+("main L2 driver", `2026_05_03_nuerips_paper_outline.md`) — but that predates
+`egostatus`, which itself moved L2 by 0.13–0.15. The two have never been
+measured against each other.
+
+### Important caveat: this does not make the planner blind
+
+The ego token is built from image features regardless —
+`instance_queue.py:202-205` pools camera 0 (front), last FPN level, through
+`ego_feature_encoder`. So Ablation 5 removes *multi-view deformable sampling at
+trajectory waypoints*, not all visual input. A genuinely blind control would
+additionally have to stub `ego_feature_encoder`. Worth adding as **5b** if 5a
+ties, since only 5b distinguishes "no scene information" from "a front-camera
+global embedding is sufficient."
+
+### Design: run it as a 2×2 with Ablation 3
+
+The two levers are the paper's whole planning signal, and their interaction is
+the point:
+
+| | deformable ON | deformable OFF |
+| --- | --- | --- |
+| **egostatus ON** | 0.3692 (headline anchor) | **5a** |
+| **egostatus OFF** | 0.5145 (2-seed, K3366620/K3377724) | **5c** |
+
+Three of four corners are cheap; two are already measured. `5c` is the floor of
+the whole architecture — neither ego status nor direct image reading — and
+tells us what the temporal queue plus a front-cam embedding are worth on their
+own.
+
+### Arms
+
+- **5a** — headline/minS2 minus the planner deformable: drop `deformable` +
+  its `norm` from the op list, set `planning_deformable`,
+  `planning_deformable_instfeat`, `planning_deformable_instfeat_laststage` to
+  False, remove `planning_deformable_waypoints` and `motion_deformable_multimode`.
+- **5b** *(conditional on 5a tying)* — 5a plus a stubbed `ego_feature_encoder`.
+- **5c** — 5a with `plan_ego_status_encode_enable=False`. Completes the 2×2.
+
+Expect DDP unused-parameter trouble on 5a: `deformable_model` would be built but
+never called. Either drop the key from the config or follow the
+`skip_perception_kv` pattern (`motion_planning_head.py:593-602`) and set the
+layer to `None` so DDP does not see its params.
+
+---
+
+## Priority
+
+Ordered by what a reviewer is most likely to attack, not by cost:
+
+1. **Ablation 5a** — if the planner doesn't need its image readout, Contribution
+   (ii) is false and the paper's architecture section needs rewriting. Highest
+   information per run.
+2. **Ablation 3** — the locked architecture's no-ego number is the one row a
+   no-ego mirror table cannot omit.
+3. **Ablation 1** — in flight (4394494/4394495/4394496).
+4. **Ablation 4a/4c** — eval-only, ~1h each, can run opportunistically against
+   existing checkpoints while training slots are occupied.
+5. **Ablation 2** — sharpens Stream E and feeds the r101 asymmetry, but does not
+   threaten a headline claim.
+
 ## Future Work
 
 - **Det-only / map-only split at the current operating point.** If Ablation 1
