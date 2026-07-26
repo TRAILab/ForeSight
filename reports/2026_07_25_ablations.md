@@ -343,6 +343,45 @@ Run 4a on both headline and minS2; 4c on the headline only, per the constraint
 above. Prior no-rescore reference (pre-`egostatus`, K/V-off):
 `_laststage_nodetmap_norescore` 0.5131 / 0.089%.
 
+### Results — headline arm (LANDED 2026-07-26)
+
+Paired eval, Fir H100, all three arms on the identical checkpoint
+(`..._egostatus/iter_11720.pth`).
+
+| Arm | Job | L2 | CR | ΔL2 | ΔCR |
+| --- | --- | ---: | ---: | ---: | ---: |
+| reference — learned veto ON | 51173713 | 0.3772 | 0.048% | — | — |
+| **4a — no rescore at all** | 51173714 | **0.3758** | **0.053%** | −0.0014 | +0.005 pp |
+| **4c — hard rescore instead** | 51173715 | **0.3812** | **0.059%** | +0.0040 | +0.011 pp |
+
+Noise floors: L2 0.007, CR 0.015 pp. **Every delta is inside both.**
+
+Validity check: the reference arm reproduces the previously recorded read on
+this checkpoint (Fir 38378856: 0.3776 / 0.048%) to ΔL2 = 0.0004, confirming the
+eval is deterministic and the paired design is sound.
+
+**Reading: the inference-time collision veto contributes nothing measurable at
+the current operating point.** Removing it entirely (4a) is within noise on both
+metrics; substituting the heuristic (4c) is also within noise, marginally worse
+on both. The learned scorer's original justification was CR recovery on K/V-off
+— 0.068% (hard) → 0.046% (learned), pre-`egostatus`. With `egostatus` folded in,
+the planner's raw CR is already ~0.05% before any veto is applied, so there is
+no longer a gap for the scorer to close.
+
+**Scope of the claim.** All three arms still carry the training-time conflict
+loss (`conflict_loss_weight=0.10`); 4a disables only the inference veto. So the
+supported statement is "the veto is empty," not "the conflict head is empty" —
+the aux loss may still be shaping the planner. Single checkpoint, single seed.
+
+**This triggers 4b**, which was held as conditional: remove
+`with_conflict_head` entirely and retrain, separating the aux loss from the
+veto. If 4b also ties, the conflict head can be deleted from the paper
+architecture outright — a real simplification, and it would also dissolve the
+minS2 hard-rescore constraint noted above, since minS2 would then need no
+rescore mechanism at all.
+
+The minS2 arm of 4a remains blocked until 4394729 produces a checkpoint.
+
 ---
 
 ## Ablation 5 — Remove the planner → image deformable readout
