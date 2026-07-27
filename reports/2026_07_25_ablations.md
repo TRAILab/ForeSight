@@ -970,10 +970,17 @@ The 4a-minS2 pair evaluates the checkpoint produced by 4394729, using the
 attempt at the headline arm failed because a host `/scratch` path was passed
 and the run scripts use apptainer `-c`, so `/scratch` does not exist inside.
 
-Held back deliberately: **5b** (stub `ego_feature_encoder`) pending 5a, and
-**4b** (remove the conflict head and its aux loss) pending 4a. Both are
-conditional — their question only exists depending on what the upstream arm
-returns.
+Fourth batch, submitted 2026-07-27 — **Ablation 4b**, triggered by 4a landing
+null on both architectures:
+
+| Arm | Server | Job ID |
+| --- | --- | --- |
+| 4b — no conflict head, seed 0 | Killarney L40S | 4431550 |
+| 4b — no conflict head, seed 1 | Killarney L40S | 4431551 |
+
+Still held back: **5b** (stub `ego_feature_encoder`) pending 5a's outcome — its
+question only exists if 5a had tied, which it did not, so 5b is now moot unless
+the 2x2 is revisited.
 
 ### Checkpoint availability — corrects the "4a/4c are free" claim
 
