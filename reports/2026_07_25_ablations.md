@@ -344,6 +344,26 @@ distribution and should be reported as a tie regardless of where it falls in the
 ordering. Expect NDS to degrade monotonically with `lr_mult`; that is a
 diagnostic here, not a criterion.
 
+#### 2c results (in progress)
+
+| `lr_mult` | L2 | CR | NDS | Job |
+| ---: | ---: | ---: | ---: | --- |
+| 0.0 (frozen anchor, 3 seeds) | 0.3649 | 0.046% | 0.5279 | — |
+| 0.05 | 0.3645 | 0.042% | 0.4781 | 4411693 |
+| 0.1 (seed 0) | 0.3627 | 0.037% | 0.4353 | 4394722 |
+| 0.1 (seed 1) | `[pending]` | | | 4411694 |
+| 0.2 | `[pending]` | | | 4411695 |
+| 0.5 | `[pending]` | | | 4411696 |
+
+Two points in, and the shape is already visible: **L2 is flat** (0.3649 → 0.3645
+→ 0.3627, total spread 0.0022 against a 0.007 floor and a frozen-seed range of
+0.3563–0.3724), while **NDS degrades monotonically** (0.5279 → 0.4781 → 0.4353).
+CR drifts down slightly but stays inside noise.
+
+Against the pre-registered bar — below ~0.356 and reproducing — neither point
+qualifies. So far the sweep says backbone freedom is *harmless in proportion to
+how much you grant it*, not useful.
+
 **Bearing on the r101 asymmetry.** `2026_07_25_r101_backbone_revisit.md`
 attributed r101's `lr_mult` sensitivity to "r101's features needing stage-2
 adaptation to become planning-useful." On r50, planning-loss-only adaptation
@@ -513,7 +533,38 @@ architecture outright — a real simplification, and it would also dissolve the
 minS2 hard-rescore constraint noted above, since minS2 would then need no
 rescore mechanism at all.
 
-The minS2 arm of 4a remains blocked until 4394729 produces a checkpoint.
+### Results — minS2 arm (LANDED 2026-07-26)
+
+Paired eval on Killarney L40S, both arms on the checkpoint from 4394729
+(minS2 seed 2).
+
+| Arm | Job | L2 | CR | ΔL2 | ΔCR |
+| --- | --- | ---: | ---: | ---: | ---: |
+| reference — learned veto ON | 4411724 | 0.3663 | 0.0478% | — | — |
+| **4a — veto off** | 4411725 | **0.3648** | 0.0521% | −0.0015 | +0.004 pp |
+
+Validity check: the reference eval reproduces the training job's own reported
+number for this checkpoint (4394729: 0.3660 / 0.047%) to ΔL2 = 0.0003.
+
+**The veto is empty on minS2 as well, and the two architectures agree to three
+decimal places:**
+
+| Architecture | conflict-head input | ΔL2 | ΔCR |
+| --- | --- | ---: | ---: |
+| headline | `agent_token` (det features) | −0.0014 | +0.005 pp |
+| minS2 | `image_at_det` (image features) | −0.0015 | +0.004 pp |
+
+That the deltas match this closely despite *completely different conflict-head
+inputs* makes this a strong null rather than a lucky draw. Whatever the veto is
+doing, it is doing nothing measurable in either configuration.
+
+This matters most on minS2, because minS2 **cannot fall back to hard rescore**
+(`rescore()` needs `motion_reg`, zero-width under `ego_only_planning`). The
+learned scorer was therefore the locked architecture's only collision mechanism
+at inference — and it is inert. **4b is now clearly the right follow-up:** if
+removing the conflict head and its aux loss also ties, the paper architecture
+needs no rescore mechanism at all, and the minS2/hard-rescore constraint stops
+being a caveat to explain and simply disappears.
 
 ---
 
