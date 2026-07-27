@@ -344,25 +344,42 @@ distribution and should be reported as a tie regardless of where it falls in the
 ordering. Expect NDS to degrade monotonically with `lr_mult`; that is a
 diagnostic here, not a criterion.
 
-#### 2c results (in progress)
+#### 2c results — COMPLETE (2026-07-27)
 
 | `lr_mult` | L2 | CR | NDS | Job |
 | ---: | ---: | ---: | ---: | --- |
-| 0.0 (frozen anchor, 3 seeds) | 0.3649 | 0.046% | 0.5279 | — |
+| 0.0 (frozen anchor, 3 seeds) | 0.3649 | 0.046% | **0.5279** | — |
 | 0.05 | 0.3645 | 0.042% | 0.4781 | 4411693 |
-| 0.1 (seed 0) | 0.3627 | 0.037% | 0.4353 | 4394722 |
-| 0.1 (seed 1) | `[pending]` | | | 4411694 |
-| 0.2 | `[pending]` | | | 4411695 |
-| 0.5 | `[pending]` | | | 4411696 |
+| 0.1 seed 0 | 0.3627 | 0.037% | 0.4353 | 4394722 |
+| 0.1 seed 1 | 0.3686 | **0.171%** | 0.4525 | 4411694 |
+| 0.1 (2-seed mean) | 0.3657 | 0.104% | 0.4439 | |
+| 0.2 | 0.3670 | 0.037% | 0.3414 | 4411695 |
+| 0.5 | **0.3590** | 0.053% | **0.2093** | 4411696 |
 
-Two points in, and the shape is already visible: **L2 is flat** (0.3649 → 0.3645
-→ 0.3627, total spread 0.0022 against a 0.007 floor and a frozen-seed range of
-0.3563–0.3724), while **NDS degrades monotonically** (0.5279 → 0.4781 → 0.4353).
-CR drifts down slightly but stays inside noise.
+**No sweep point clears the pre-registered bar.** The lowest is `lr_mult=0.5`
+at 0.3590 — above the ~0.356 threshold, single seed, and it sits inside the
+frozen anchor's own seed range (0.3563–0.3724). Total L2 spread across the
+entire 0.0–0.5 range is 0.010, *smaller than the frozen configuration's own
+seed spread of 0.016*.
 
-Against the pre-registered bar — below ~0.356 and reproducing — neither point
-qualifies. So far the sweep says backbone freedom is *harmless in proportion to
-how much you grant it*, not useful.
+**Planning L2 is insensitive to backbone learning rate over a 10× range.**
+Meanwhile NDS collapses monotonically: 0.5279 → 0.4781 → 0.4439 → 0.3414 →
+0.2093. That is the whole result — freedom is harmless in proportion to how much
+you grant it, and never useful.
+
+**New finding: unfreezing destabilises CR.** The two `lr_mult=0.1` seeds give
+0.037% and **0.171%** — a 0.134 pp spread, roughly 9× the CR noise floor, and
+the 0.171% read is 4× any other value in this report. The frozen configuration's
+three seeds span only 0.041–0.050%. Collision rate is evidently held stable by
+the freeze in a way L2 does not reveal. Any future unfrozen configuration needs
+multiple seeds before its CR is quotable.
+
+**Verdict: the freeze stands.** Not because of perception — that is not this
+paper's objective — but because across the full sweep it is (i) tied on L2 with
+everything else, (ii) the only region where CR is reproducible, and (iii) the
+simplest, with ~23M fewer trainable parameters. The earlier single-seed 2a
+result (0.3627, best-looking CR at 0.037%) is now visibly a favourable draw: its
+own seed-1 partner lands at 0.171% CR.
 
 **Bearing on the r101 asymmetry.** `2026_07_25_r101_backbone_revisit.md`
 attributed r101's `lr_mult` sensitivity to "r101's features needing stage-2
@@ -822,6 +839,57 @@ PROBE6 src=predicted enc_in[0]=[-0.0415, 0.0885, -0.0423, 0.0368, -0.2434]
 ```
 
 Confirms the encoder is fed the model's own estimate and never the GT.
+
+### Results — LANDED 2026-07-27
+
+| Model | L2 | CR | NDS | Job |
+| --- | ---: | ---: | ---: | --- |
+| minS2, GT ego (3-seed anchor) | **0.3649** | 0.046% | 0.5279 | — |
+| 6a seed 0 | 0.5258 | 0.080% | 0.5267 | 4411756 |
+| 6a seed 1 | 0.5143 | 0.058% | 0.5277 | 4411757 |
+| **6a (2-seed mean)** | **0.5201** | 0.069% | 0.5272 | |
+| minS2, no ego (2-seed) | 0.5233 | 0.0645% | 0.5289 | — |
+
+**ΔL2 vs the no-ego baseline: −0.0032.** Against a no-ego seed spread of 0.025,
+that is nothing. Self-predicted ego status **recovers none of the 0.16 L2 gap.**
+
+### Discussion
+
+The direction is closed, and the negative result is sharper than a null usually
+is, because it separates two things that were conflated:
+
+> The ego-status advantage is specifically about **ground-truth** ego status. It
+> is not about the planner *having an ego-state estimate* — the model already
+> has one, trained at loss weight 1.0, and widening its channel from one scalar
+> to the full 5-dim injection buys nothing.
+
+This also reinterprets `egopred_full` (0.4722, −0.058 vs no-ego). That variant
+consumes **raw past-frame `ego_status` from `metas`** plus a
+constant-acceleration extrapolation of it. Since a purely self-predicted
+estimate recovers nothing, `egopred_full`'s gain must come from the GT history
+it reads, not from visual ego-state inference. The `egopred_*` family is
+therefore not a partial step toward ego-free planning — it is a partial step
+*back toward reading ego status*.
+
+Perception is unchanged (NDS 0.5272 vs 0.5279), as expected — the backbone is
+frozen and nothing outside the plan-query injection moved. And the feedback
+instability flagged as the main risk did not materialise: no NaN losses, no
+degradation concentrated in the 4–6 s waypoints, both seeds trained clean.
+
+**Consequence for the paper.** The honest ego-free number stays at
+**0.5145 (headline) / 0.5233 (minS2)** against SparseDrive's 0.636 — a 0.12
+architectural win, which remains the defensible apples-to-apples claim. There is
+no cheap route to improving it, and the paper should stop treating the ego gap
+as recoverable.
+
+**One untested idea survives.** Velocity is not observable from a single frame,
+and the ego token is a single-frame front-camera pooled embedding
+(`instance_queue.py:202-205`). A genuinely multi-frame ego token is the one
+mechanism that could supply ego state from vision. The `tempstack` variants
+regressed, but those were measured *with* GT ego status supplying velocity
+already; their value in the ego-free regime is untested. That is the only
+remaining lever on this axis, and it is a real one — the rest of the direction
+is closed.
 
 ---
 
