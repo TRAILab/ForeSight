@@ -575,6 +575,37 @@ That the deltas match this closely despite *completely different conflict-head
 inputs* makes this a strong null rather than a lucky draw. Whatever the veto is
 doing, it is doing nothing measurable in either configuration.
 
+### 4b — remove the conflict head entirely
+
+Config: `..._egostatus_minS2_noconflict`, minS2 parent, 2 seeds.
+
+The delta is larger than one flag, because the conflict machinery is wired
+through several keys and one of them is a trap:
+
+- `with_conflict_head=True → False` in **both** `refine_layer` and
+  `motion_plan_head` (the former is what actually instantiates
+  `plan_conflict_branch`)
+- `use_rescore_learned_hard=True → False` — `rescore_learned_hard` already
+  no-ops when `conflict_logits` is absent, but explicit is clearer
+- drop `conflict_label_source`, `conflict_loss_weight`,
+  `conflict_smooth_max_tau`
+- **drop `conflict_input` and the whole `conflict_image_sampler` block.**
+  `conflict_image_sampler` is built from `conflict_input` alone
+  (`motion_planning_head.py:406-414`) but only *called* when
+  `with_conflict_head` is set (`:1706`). Leaving those keys in place would build
+  a `DeformableFeatureAggregation` that never runs — an orphaned DDP parameter
+  set, the same failure that killed the original `nodetmap` runs. Removing
+  `conflict_input` lets it default to `'agent_token'`, which needs no sampler.
+
+Verified: `with_conflict_head=False`, no `plan_conflict_branch` parameters,
+`conflict_image_sampler=None`, params 92.69M → 91.26M (−1.43M).
+
+**Reading.** If 4b ties the minS2 anchor (0.3649 / 0.046%), the conflict head,
+its aux loss, the `evalmatchmode` per-mode BCE with smooth-max aggregation, and
+the `image_at_det` deformable pass all leave the architecture — and the paper
+needs no rescore mechanism at all. If it regresses, the aux loss was doing the
+work all along and 4a's null means only "the veto is redundant given the loss."
+
 This matters most on minS2, because minS2 **cannot fall back to hard rescore**
 (`rescore()` needs `motion_reg`, zero-width under `ego_only_planning`). The
 learned scorer was therefore the locked architecture's only collision mechanism
