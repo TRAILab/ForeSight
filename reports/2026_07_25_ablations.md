@@ -600,6 +600,33 @@ through several keys and one of them is a trap:
 Verified: `with_conflict_head=False`, no `plan_conflict_branch` parameters,
 `conflict_image_sampler=None`, params 92.69M → 91.26M (−1.43M).
 
+### 4b results — LANDED 2026-07-28
+
+| Run | L2 | CR | Job |
+| --- | ---: | ---: | --- |
+| minS2 anchor (3-seed) | 0.3649 | 0.0460% | — |
+| 4b seed 0 | 0.3714 | 0.074% | 4431550 |
+| 4b seed 1 | 0.3667 | 0.050% | 4431551 |
+| **4b (2-seed mean)** | **0.3690** | **0.062%** | ΔL2 +0.0041, ΔCR +0.016 pp |
+
+**Ties on L2; CR sits exactly at the noise floor.** The seed-0-only reading —
+recorded here earlier as "the veto is empty but the aux loss may not be" —
+**does not survive seed 1.** Seed 1's 0.050% CR matches the minS2 anchor's own
+worst seed, dropping the mean delta from +0.028 pp (1.9x floor) to +0.016 pp
+(1.07x floor).
+
+Given the `lr_mult=0.1` pair in Ablation 2c spanned 0.037%–0.171% CR across two
+seeds, a 0.016 pp delta on two seeds is not evidence of a real effect.
+
+**Revised conclusion: the conflict head appears removable in full** — the
+inference veto (4a, null on both architectures), the aux loss, the
+`evalmatchmode` smooth-max machinery, and the `image_at_det` deformable sampler,
+~1.4M params. The paper architecture would then need no rescore mechanism at
+all, and the minS2/hard-rescore structural constraint stops being a caveat.
+
+A third seed is the cheapest way to close the residual CR question, and it is
+the difference between "delete the module" and "retain it for CR."
+
 **Reading.** If 4b ties the minS2 anchor (0.3649 / 0.046%), the conflict head,
 its aux loss, the `evalmatchmode` per-mode BCE with smooth-max aggregation, and
 the `image_at_det` deformable pass all leave the architecture — and the paper
