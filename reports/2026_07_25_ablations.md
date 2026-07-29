@@ -1125,6 +1125,73 @@ the headline 3-seed anchor (0.3692) may be marginally pessimistic. The minS2
 3-seed anchor (0.3649) sits closer to the batch centre and is the better
 reference going forward.
 
+## Ablation 1 in the no-ego regime — K/V-on is WORSE, not merely empty
+
+The pre-registered reading was: *"ties or loses -> clean support for
+Contribution (i); wins by >0.007 -> ambiguous."* **It lost.**
+
+| Arm | Comparator | K/V-on | ΔL2 | ΔCR |
+| --- | ---: | ---: | ---: | ---: |
+| **headline, no-ego** (2+2 seeds, Killarney) | 0.5145 / 0.0495% | **0.5538 / 0.080%** | **+0.0393** | **+0.031 pp** |
+| minS2, no-ego (1 seed, Trillium) | 0.5177 / 0.0705% | 0.5206 / 0.064% | +0.0029 | −0.0065 |
+| headline, ego (2 seeds) | 0.3692 / 0.0400% | 0.3672 / 0.054% | −0.0020 | +0.014 pp |
+| minS2, ego (1 seed) | 0.3649 / 0.0460% | 0.3608 / 0.049% | −0.0036 | +0.003 pp |
+
+**+0.0393 is 2.3x the no-ego resolution limit** and far outside either config's
+seed spread (K/V-on 0.006, baseline 0.012). Perception is unchanged
+(NDS 0.526 vs ~0.52, map mAP 0.551 vs ~0.553), so this is not a degraded
+detector.
+
+**The regression appears only in the no-ego headline arm** — the one where the
++7.88M K/V parameters must actually be *trained* (backbone `lr_mult=0.1`,
+perception losses live) and where ego status is not making the task easy. Under
+minS2 everything is frozen, so the planner learns to ignore static tokens and
+pays nothing.
+
+Two readings, not separable by this experiment, both supporting Contribution (i):
+
+1. **Worse than empty** — the interface injects a moving target (det/map tokens
+   shifting as perception trains) that actively degrades planning.
+2. **Optimisation cost** — 7.88M extra parameters on a fixed 10-epoch budget
+   with no compensating signal.
+
+(2) is the conservative framing and the one to put in the paper. What this
+definitively rules out is that the ego-regime null was a ceiling artefact
+concealing a real benefit — without ego status the interface is measurably
+harmful.
+
+## Ablation 4b in the no-ego regime — the aux loss is worth ~0.017 pp CR
+
+| | L2 | CR |
+| --- | ---: | ---: |
+| minS2 no-ego (Trillium 2-seed, in-cluster) | 0.5177 | 0.0705% |
+| **4b — conflict head removed (2-seed)** | **0.5157** | **0.089%** |
+| Δ | **−0.0020** (ties) | **+0.0185 pp** |
+
+Seeds are tight on both sides (4b: 0.085/0.093; baseline: 0.069/0.072), and the
+gap exceeds either spread. Against the no-ego CR sd of ~0.007 pp this is ~2.6σ.
+
+**A registered prediction failed.** I predicted a *larger* CR regression here
+than in the ego regime (+0.016 pp), reasoning that the learned scorer beat hard
+rescore by 0.028 pp without ego status while the veto is inert, so the loss must
+carry that gap. It did not: **+0.016 pp (ego) vs +0.0185 pp (no-ego)** — the
+same magnitude. The 0.028 pp learned-vs-hard difference does not translate into
+what the aux loss is worth alone.
+
+The regime-independence is what makes it credible. Two independent regimes
+agreeing on a ~2σ effect is stronger evidence than either alone.
+
+**Consolidated verdict on the conflict head:**
+
+| Component | Verdict |
+| --- | --- |
+| inference veto | **empty** — both architectures, both regimes, flat across a 2x threshold sweep |
+| training aux loss | **~0.015-0.02 pp CR, no L2 effect, regime-independent** |
+
+Recommendation: **remove the veto from the inference path, keep the head as a
+training-time supervisor.** Same supervision-not-interface pattern the paper
+argues for perception, now on a second component.
+
 ## Stage-1 supervision results (no-ego regime, 2026-07-29)
 
 All rows share the no-ego headline stage-2 architecture; only the stage-1
