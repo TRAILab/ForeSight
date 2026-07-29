@@ -19,6 +19,24 @@ Killarney L40S.
 Noise floors used throughout: **L2 0.007**, **CR 0.015 pp**, **NDS 0.0026**,
 **mAP_normal 0.0049** (same-cluster, from `reports/2026_05_03_h100_reproduce.md`).
 
+**The no-ego regime is substantially noisier — do not use the 0.007 floor there.**
+Four reads of the minS2 no-ego baseline, two clusters x two seeds:
+
+| Seed | Killarney L40S | Trillium H100 |
+| --- | ---: | ---: |
+| 0 | 0.5108 (4394720) | 0.5123 (686086) |
+| 1 | 0.5359 (4394721) | 0.5231 (686087) |
+
+4-read mean **0.5205**, **sd ~0.012**, range 0.025. The scatter is seed-driven,
+not cluster-driven: seed 0 landed low on *both* clusters and seed 1 high on
+both, while the same seed across clusters agrees to 0.0015 (seed 0). That is
+independent confirmation that cross-cluster L2 is portable in this regime and
+that seeds dominate the error term.
+
+**Practical rule:** a no-ego 2-seed mean carries roughly **+/-0.008 standard
+error**, so differences below **~0.017** between 2-seed means are not
+resolvable. Single-seed no-ego results should not be compared to anything.
+
 **Cluster discipline.** *Updated 2026-07-28 — the no-ego batch runs across four
 clusters; see "Cluster placement" below.* The original rule was that every
 ablation runs on Killarney L40S.
