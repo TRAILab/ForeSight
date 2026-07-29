@@ -19,7 +19,9 @@ Killarney L40S.
 Noise floors used throughout: **L2 0.007**, **CR 0.015 pp**, **NDS 0.0026**,
 **mAP_normal 0.0049** (same-cluster, from `reports/2026_05_03_h100_reproduce.md`).
 
-**Cluster discipline.** Every ablation in this report runs on Killarney L40S.
+**Cluster discipline.** *Updated 2026-07-28 — the no-ego batch runs across four
+clusters; see "Cluster placement" below.* The original rule was that every
+ablation runs on Killarney L40S.
 L2 is portable across clusters but CR is *not* portable on the `_egostatus`
 family — Fir/Rorqual reads span 0.048–0.119% on the identical config, and
 `reports/2026_07_25_r101_backbone_revisit.md` found an L2 A100/H100 gap of
@@ -950,6 +952,50 @@ remaining lever on this axis, and it is a real one — the rest of the direction
 is closed.
 
 ---
+
+## Cluster placement (no-ego batch, 2026-07-28)
+
+The ego-regime rows were all Killarney L40S. The no-ego batch is distributed,
+for two reasons: Killarney was congested by our own 23-job backlog while the
+DrivoR (`ablA_*`) and SparseDriveV2 (`sdv2_*`) experiments **can only run
+there**, and every cluster caps us near **6 concurrent jobs**, so throughput
+comes from breadth rather than from picking a fast cluster.
+
+| Cluster | Ablations |
+| --- | --- |
+| Killarney L40S | Ablation 1 — K/V-on headline |
+| Rorqual H100 | S1 no-map (`nomap_dn`) + its `ptdn` comparator; S1 no-det (`nodet_aux2d`) |
+| Trillium H100 | minS2 no-ego baseline + Ablation 1 minS2 K/V-on + Ablation 4b |
+| Narval A100 | `vanilla_planneronly` scratch + S1-init |
+
+**Matched pairs are always co-located**, so any cluster-specific offset cancels
+within the comparison: `nomap_dn`/`ptdn` on Rorqual, and the minS2
+baseline/K/V-on/no-conflict trio on Trillium. The minS2 baseline was rerun on
+Trillium rather than compared against the Killarney value (0.5233 / 0.0645%) for
+exactly this reason — it also yields a free cross-cluster reproduction of that
+anchor.
+
+**Why cross-cluster is acceptable here but was not before.** The
+non-portability on record is CR on the `_egostatus` family (Fir/Rorqual spanning
+0.048–0.119%). In the no-ego regime, cross-cluster L2 agreement is
+0.002–0.003 (`ptdnrot3daux2p5d`: Killarney 0.5186/0.5193 vs DGX 0.5211;
+`ptjoint_nodetach`: 0.5320 vs 0.5291) — an order of magnitude *smaller* than the
+0.025 no-ego seed spread. Cluster is not the dominant error term here; seeds are.
+
+**Cluster probe results** (identical 4-GPU / 11:59 allocation, no-op payload):
+
+| Cluster | Time-to-start | Note |
+| --- | ---: | --- |
+| Tamia | 4 min | 0.2 MB/s link — 908 MB checkpoint takes ~70 min; unusable for new ckpts |
+| Narval | 4 min | all checkpoints already present |
+| Rorqual | 6 min | fast link, checkpoints present |
+| Trillium | 23 min | transient `(Resources)` block; later scheduled in 6 min |
+| Fir | — | 809 nodes down, 223 maint, 22k queue — excluded |
+
+**Caveat on those numbers:** a single-job probe measures *marginal* latency into
+an empty queue, not throughput under load. Every cluster looked fast at 4–6 min
+and every one then throttled us at ~6 concurrent. Do not read a fast probe as
+capacity.
 
 ## Run log
 
