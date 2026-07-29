@@ -741,9 +741,15 @@ runner = dict(
 
 # ================== eval ========================
 eval_mode = dict(
-    with_det=True,
-    with_tracking=True,
-    with_map=True,
+    # Perception eval is OFF here: this config zeroes every perception loss AND
+    # has no stage-1 init, so the det/map heads are never trained and emit
+    # degenerate boxes. The nuScenes evaluator then dies with
+    # `Exception: Error: Invalid box type: None` AFTER a full training run
+    # (observed: narval 66604248, crashed at 5h09m with the checkpoint intact).
+    # Only planning metrics are meaningful for this config.
+    with_det=False,
+    with_tracking=False,
+    with_map=False,
     with_motion=False,  # motion losses zeroed + ego_only_planning=True drops agent trajs
     with_planning=True,
     tracking_threshold=0.2,
