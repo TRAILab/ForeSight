@@ -1125,6 +1125,70 @@ the headline 3-seed anchor (0.3692) may be marginally pessimistic. The minS2
 3-seed anchor (0.3649) sits closer to the batch centre and is the better
 reference going forward.
 
+## Stage-1 supervision results (no-ego regime, 2026-07-29)
+
+All rows share the no-ego headline stage-2 architecture; only the stage-1
+checkpoint varies. Judge against the measured no-ego resolution limit of
+**~0.017 L2** between 2-seed means (see Standing anchors).
+
+| Stage-1 | L2 | CR | det mAP | NDS | map mAP | Jobs |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| **DetMap** — default (2-seed) | **0.5145** | **0.0495%** | ~0.41 | ~0.52 | ~0.553 | K3366620/K3377724 |
+| `ptdn` — det+map+dn (1 seed so far) | 0.5176 | 0.069% | 0.4250 | 0.5373 | 0.5600 | 17700673 |
+| **`nodet_aux2d`** — no det (2-seed) | 0.5253 | 0.075% | **0.2978** | **0.3357** | **0.5797** | 17700695/706 |
+| **`nomap_dn`** — no map, +dn (2-seed) | 0.5282 | 0.0695% | 0.4368 | 0.5476 | **0.2753** | 17700661/662 |
+
+### Removing stage-1 detection: L2 ties, CR does not
+
+`nodet_aux2d` vs default: **ΔL2 = +0.0108**, below the 0.017 resolution limit —
+so trajectory accuracy is unaffected even though detection collapses
+(mAP 0.41 → 0.30, NDS 0.52 → 0.34).
+
+But **ΔCR = +0.026 pp**, with tight within-config seeds (0.078/0.072 vs
+0.046/0.053). That is one of the few non-null CR results in this batch and
+suggests stage-1 detection supervision helps *collision avoidance*
+specifically, without helping trajectory accuracy — consistent with detection
+being the perception task most relevant to obstacles.
+
+Caveat: this checkpoint is **epoch 80 at batch 24** vs the default's 100 epochs
+at batch 64. The L2 tie is robust to that; the CR delta is more exposed.
+
+### Removing stage-1 map: ties (pending seed 2)
+
+`nomap_dn` (0.5282, 2-seed) vs `ptdn` (0.5176, 1 seed) — **ΔL2 = +0.0106**,
+below the resolution limit. Both carry `dn`, so this is the clean single-flag
+map comparison; both checkpoints are 100 epochs at batch 64, same recipe.
+`ptdn` seed 2 (17700675) still running.
+
+### det/map capacity competition, both directions
+
+Removing **det** at stage 1 *raises* map mAP (0.553 → 0.580). Removing **map**
+at stage 1 *raises* det mAP (0.425 → 0.437) and NDS (0.537 → 0.548). Same
+pattern the March map-removal study found on the coupled model, now confirmed
+in both directions on the decoupled one.
+
+## Stage-1 pretraining: worth ~0.19 L2, and it stabilises training
+
+Vanilla-planner configs (3 blocks, no deformable readout, no ego status).
+Matched pair differing only in whether stage-1 pretraining happened:
+
+| Config | seed 0 | seed 1 | mean | CR |
+| --- | ---: | ---: | ---: | ---: |
+| `vanilla_planneronly` — S1-init | 0.6378 | 0.6585 | **0.6481** | 0.2385% |
+| `vanilla_planneronly_scratch` — no S1 | 0.7093 | **0.9603** | 0.8348 | 0.496% |
+
+**The stability difference matters as much as the mean.** S1-init seeds differ by
+0.021; scratch seeds differ by **0.251** — 20x the no-ego sd. Training the full
+stack from scratch in 10 stage-2 epochs with zero perception supervision is
+ill-posed, not merely weak, so the scratch *mean* should not be quoted. The
+defensible statement is a range: stage-1 pretraining is worth **0.06 L2 against
+the best scratch seed and 0.31 against the worst**, plus a ~12x reduction in
+seed variance.
+
+Do not compare these to minS2 (0.5205) — the vanilla planner lacks the
+deformable image readout, which Ablation 5 showed is worth 0.117-0.135 on its
+own.
+
 ## Priority
 
 Ordered by what a reviewer is most likely to attack, not by cost:
