@@ -1,4 +1,5 @@
 from typing import Optional
+import math
 
 import numpy as np
 import torch
@@ -126,6 +127,7 @@ class HierarchicalPlanningDecoder(object):
         rescore_learned_hard_prob_thresh=0.5,
         rescore_learned_hard_aggregation='any',
         rescore_learned_hard_topk_k=2,
+        rescore_learned_hard_lse_tau=5.0,
         use_rescore_hybrid_or=False,
         rescore_confidence_source='det',
         rescore_score_thresh=0.5,
@@ -150,7 +152,9 @@ class HierarchicalPlanningDecoder(object):
         #   'topk'        : (prob > thr).sum(anchor) >= k    — robust to single-anchor FPs
         #   'detweighted' : (det_conf * prob > thr).any(...) — soft det-conf weighting,
         #                   replaces hard det_conf cutoff entirely.
-        valid_agg = {'any', 'topk', 'detweighted'}
+        #   'lse'         : (1/tau)*logsumexp(tau*prob, anchor) > thr — soft
+        #                   aggregation; tau -> inf recovers 'any' (== max).
+        valid_agg = {'any', 'topk', 'detweighted', 'lse'}
         if rescore_learned_hard_aggregation not in valid_agg:
             raise ValueError(
                 f"rescore_learned_hard_aggregation must be in {valid_agg}, "
@@ -158,6 +162,7 @@ class HierarchicalPlanningDecoder(object):
             )
         self.rescore_learned_hard_aggregation = rescore_learned_hard_aggregation
         self.rescore_learned_hard_topk_k = int(rescore_learned_hard_topk_k)
+        self.rescore_learned_hard_lse_tau = float(rescore_learned_hard_lse_tau)
         # `use_rescore_hybrid_or`: applies hard rescore THEN learned-hard
         # rescore in sequence on the same plan_cls. -999 masks accumulate, so
         # the per-mode collide flag is the OR of both selectors. Tests whether
@@ -662,6 +667,20 @@ class HierarchicalPlanningDecoder(object):
             if agg == 'any':
                 # Per-mode binary collision: any anchor exceeds prob threshold.
                 col = (prob > prob_thr).any(dim=1)  # (bs, M_per_cmd)
+            elif agg == 'lse':
+                # Soft aggregation replacing the hard max over anchors.
+                # Bias-corrected smooth max: subtracting log(A)/tau makes
+                # tau -> 0 the mean and tau -> inf the max, so the threshold
+                # keeps the same [0, 1] semantics as 'any' at every tau.
+                # (Raw logsumexp without the correction carries a +log(A)/tau
+                # offset that saturates every mode at small tau.)
+                tau = max(1e-3, self.rescore_learned_hard_lse_tau)
+                num_a = prob.shape[1]
+                soft_max = (
+                    torch.logsumexp(tau * prob, dim=1)
+                    - math.log(num_a)
+                ) / tau  # (bs, M_per_cmd)
+                col = soft_max > prob_thr
             else:  # 'topk'
                 # Require ≥ k anchors above threshold per mode. Robust to
                 # isolated single-anchor false positives.
