@@ -1134,7 +1134,7 @@ checkpoint varies. Judge against the measured no-ego resolution limit of
 | Stage-1 | L2 | CR | det mAP | NDS | map mAP | Jobs |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | **DetMap** — default (2-seed) | **0.5145** | **0.0495%** | ~0.41 | ~0.52 | ~0.553 | K3366620/K3377724 |
-| `ptdn` — det+map+dn (1 seed so far) | 0.5176 | 0.069% | 0.4250 | 0.5373 | 0.5600 | 17700673 |
+| `ptdn` — det+map+dn (2-seed) | 0.5159 | 0.0565% | 0.4241 | 0.5363 | 0.5542 | 17700673/675 |
 | **`nodet_aux2d`** — no det (2-seed) | 0.5253 | 0.075% | **0.2978** | **0.3357** | **0.5797** | 17700695/706 |
 | **`nomap_dn`** — no map, +dn (2-seed) | 0.5282 | 0.0695% | 0.4368 | 0.5476 | **0.2753** | 17700661/662 |
 
@@ -1153,12 +1153,31 @@ being the perception task most relevant to obstacles.
 Caveat: this checkpoint is **epoch 80 at batch 24** vs the default's 100 epochs
 at batch 64. The L2 tie is robust to that; the CR delta is more exposed.
 
-### Removing stage-1 map: ties (pending seed 2)
+### Removing stage-1 map: ties, but not comfortably — COMPLETE (2+2 seeds)
 
-`nomap_dn` (0.5282, 2-seed) vs `ptdn` (0.5176, 1 seed) — **ΔL2 = +0.0106**,
-below the resolution limit. Both carry `dn`, so this is the clean single-flag
-map comparison; both checkpoints are 100 epochs at batch 64, same recipe.
-`ptdn` seed 2 (17700675) still running.
+| | L2 | CR | det mAP | NDS | map mAP |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `ptdn` — det+map+dn | 0.5159 | 0.0565% | 0.4241 | 0.5363 | **0.5542** |
+| `nomap_dn` — det+dn, no map | 0.5282 | 0.0695% | **0.4368** | **0.5476** | **0.2753** |
+| Δ | **+0.0123** | +0.013 pp | +0.013 | +0.011 | **−0.279** |
+
+This is the clean comparison the map question has lacked since March: both sides
+carry `dn`, both checkpoints are 100 epochs at batch 64 from the same stage-1
+config family, both ran on the same cluster, 2 seeds each. **Only the map head
+differs.**
+
+**ΔL2 = +0.0123 is below the 0.017 resolution limit, so it ties — but at ~72% of
+that limit it is not a comfortable null.** A third seed per arm would be needed
+to call it decisively. ΔCR = +0.013 pp is inside noise, though `ptdn`'s own CR
+seeds span 0.025 pp (0.069 / 0.044), which is wider than the gap being measured.
+
+Map quality collapses as expected (0.554 → 0.275) since the map head is
+random-initialised and sees only the 10 stage-2 epochs.
+
+**Bonus null: `dn` at stage 1 does nothing here.** `ptdn` (0.5159) vs the plain
+default DetMap (0.5145) differ by 0.0014 — denoising queries, which were among
+the stronger stage-1 levers in the ego regime (0.3578 vs 0.3692), are inert
+without ego status.
 
 ### det/map capacity competition, both directions
 
